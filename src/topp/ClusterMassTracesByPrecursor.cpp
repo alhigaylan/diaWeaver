@@ -196,6 +196,26 @@ class TOPPCorrelateMasstraces
     {
       mz_cache_ms1.push_back(MS1_feature_map[i].getMZ());
     }
+    // cache the ion mobility of each MS1 feature
+    std::vector< double > im_cache_ms1;
+    for (Size i = 0; i < MS1_feature_map.size(); ++i)
+    {
+      im_cache_ms1.push_back(MS1_feature_map[i].getMetaValue("Ion Mobility Centroid"));
+    }
+    std::cout << "Size of MS1 feature map .." << MS1_feature_map.size() << std::endl;
+
+    std::cout << "we cached ion mobility data!" << std::endl;
+    std::cout << "example im of MS1 trace index 30  ... " << MS1_feature_map[30].getMetaValue("Ion Mobility Centroid") << std::endl;
+
+
+    // cache the ion mobility of MS2 data
+    std::vector< double > im_cache_ms2;
+    for (Size i = 0; i < MS2_feature_map.size(); ++i)
+    {
+      im_cache_ms2.push_back(MS2_feature_map[i].getMetaValue("Ion Mobility Centroid"));
+    }
+    std::cout << "example im of MS2 trace index 50  ... " << MS2_feature_map[50].getMetaValue("Ion Mobility Centroid") << std::endl;
+
 
     double* rt_cache_ptr;
     double current_rt;
@@ -230,8 +250,18 @@ class TOPPCorrelateMasstraces
         // Check whether the feature is already used
         //  TODO : this implies we can assign only one feature to one
         //         precursor, we might have to change that! See DIA Umpire!
+
+//        std::cout << "---Sanity Check --- rt_cache_ptr value is :" << *rt_cache_ptr << std::endl;
+//        std::cout << "---Sanity Check --- rt value at j = " << j << " equals " << MS2_feature_map[j].getRT() << std::endl;
+//        std::cout << "---Sanity Check --- m/z value at j = " << j << " equals " << MS2_feature_map[j].getMZ() << std::endl;
+//        std::cout << "---Sanity Check --- im value at im_cache_ms2 = " << j << " equals " << im_cache_ms2[j] << std::endl;
+
         if (fabs(current_rt - (*rt_cache_ptr) ) > rt_max_distance ) continue;
-        if (ms2feature_used[j]) continue;
+//        if (ms2feature_used[j]) continue;
+
+        // Also check for ion mobility. For now, hard code it as ± 0.02
+        double im_tolerance = 0.01;
+        if (fabs(im_cache_ms1[i] - im_cache_ms2[j]) > im_tolerance) continue;
 
 #ifdef DEBUG_MASSTRACES
         for (Size kk=0; kk<f1_points.size(); kk++)
@@ -264,6 +294,8 @@ class TOPPCorrelateMasstraces
           feature_arr.push_back(lag); // lag
           feature_arr.push_back(pearson_score); // pearson score
           feature_arr.push_back(lag_intensity); // lag intensity
+          feature_arr.push_back(im_cache_ms2[j]); // MS2 fragment ion mobility
+          feature_arr.push_back((fabs(im_cache_ms1[i] - im_cache_ms2[j]))); // delta im
           feature_attributes[i].push_back(feature_arr);
         }
       }
@@ -273,6 +305,10 @@ class TOPPCorrelateMasstraces
       {
         ms1_assignment_map[i].clear();
       }
+
+      // if a spectrum contains more than 500 peaks, we will order them by pearson correlation
+      // and retain top 500 peaks
+
 
 #ifdef DEBUG_MASSTRACES
       if (ms1_assignment_map[i].size() > 1)
@@ -306,6 +342,7 @@ class TOPPCorrelateMasstraces
     // TODO : 
     // i) just assign them to all potentially matching spectra
     // ii) assign a fragment ion only to a single precursor
+    // ---------- I commented this out temporarily -------------
     int cnt = 0;
     startProgress(0, MS2_feature_map.size(), "assigning the unused fragments ");
     for (Size j=0; j<MS2_feature_map.size() && unassigned; ++j)
@@ -327,8 +364,7 @@ class TOPPCorrelateMasstraces
     }
     endProgress();
     cout << "There were " << cnt << " (out of " << MS2_feature_map.size() << " ) unused fragment ions that were assigned to all spectra within RT range." << endl;
-
-    // -----------------------------------
+     // -----------------------------------
     // Step 3 - create spectra and assign precursor and fragments to spectra
     cnt = 0;
     startProgress(0, MS1_feature_map.size(), "create the spectra and assign the fragments ");
@@ -349,12 +385,14 @@ class TOPPCorrelateMasstraces
 
       // fill meta data
       spectrum.getFloatDataArrays().clear();
-      spectrum.getFloatDataArrays().resize(5);
+      spectrum.getFloatDataArrays().resize(7);
       spectrum.getFloatDataArrays()[0].setName("RT_apex");
       spectrum.getFloatDataArrays()[1].setName("RT_diff");
       spectrum.getFloatDataArrays()[2].setName("lag");
       spectrum.getFloatDataArrays()[3].setName("pearson_score");
       spectrum.getFloatDataArrays()[4].setName("lag_intensity");
+      spectrum.getFloatDataArrays()[5].setName("MS2 IM");
+      spectrum.getFloatDataArrays()[6].setName("Delta IM");
       int j = 0;
       for (std::vector<int>::iterator it = ms1_assignment_map[i].begin(); it != ms1_assignment_map[i].end(); ++it)
       {
@@ -369,6 +407,8 @@ class TOPPCorrelateMasstraces
         spectrum.getFloatDataArrays()[2].push_back(feature_attributes[i][j][2]);
         spectrum.getFloatDataArrays()[3].push_back(feature_attributes[i][j][3]);
         spectrum.getFloatDataArrays()[4].push_back(feature_attributes[i][j][4]);
+        spectrum.getFloatDataArrays()[5].push_back(feature_attributes[i][j][5]);
+        spectrum.getFloatDataArrays()[6].push_back(feature_attributes[i][j][6]);
         j++;
       }
  
