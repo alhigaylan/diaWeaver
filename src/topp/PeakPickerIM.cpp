@@ -112,11 +112,84 @@ protected:
       MzMLFile mzml;
       mzml.load(input_file, exp);
 
+      // --------- To boost signal-to-noise, we will borrow peaks
+      // from n-1 and n+1 spectra and half their intensities.
+      // Cache modified spectra
+      PeakMap modified_exp = exp;
+      #pragma omp parallel for
+      for (Int64 i = 0; i < static_cast<Int64>(exp.size()); ++i)
+      {
+        MSSpectrum& current = modified_exp[i];
+        const MSSpectrum& original = exp[i];
+
+        // Start with a deep copy of the original spectrum (incl. peaks + meta)
+        current = original;
+
+        auto append_neighbor_peaks = [&](const MSSpectrum& neighbor)
+        {
+          const auto& neighbor_peaks = neighbor;
+          const auto& neighbor_fda = neighbor.getFloatDataArrays();
+          auto& current_fda = current.getFloatDataArrays();
+
+          Size num_arrays = current_fda.size();
+
+          for (Size j = 0; j < neighbor_peaks.size(); ++j)
+          {
+            Peak1D p = neighbor_peaks[j];
+            p.setIntensity(p.getIntensity() * 0.5);
+            current.push_back(p);
+
+            // Copy over float metadata as-is (no scaling)
+            for (Size k = 0; k < num_arrays; ++k)
+            {
+              if (k < neighbor_fda.size() && j < neighbor_fda[k].size())
+              {
+                current_fda[k].push_back(neighbor_fda[k][j]);
+              }
+              else
+              {
+                throw std::runtime_error("ERROR! FloatDataArray size mismatch when appending neighbor peaks.");
+              }
+            }
+          }
+        };
+
+        if (i > 0) append_neighbor_peaks(exp[i - 1]);
+        if (i + 1 < static_cast<Int64>(exp.size())) append_neighbor_peaks(exp[i + 1]);
+
+        current.sortByPosition(); // optional, to preserve m/z order
+      }
+
+      // ---- sanity check. Print peaks from raw spectrum and modified spectrum ----
+      const MSSpectrum& original_spec = exp[50];
+      const MSSpectrum& modified_spec = modified_exp[50];
+
+      std::cout << "\n===== ORIGINAL SPECTRUM @ index 50 =====" << std::endl;
+      const auto& orig_fda = original_spec.getFloatDataArrays();
+      for (Size i = 0; i < original_spec.size(); ++i)
+      {
+        std::cout << "mz: " << original_spec[i].getMZ()
+                  << ", intensity: " << original_spec[i].getIntensity();
+
+        std::cout << ", float[0]: " << orig_fda[0][i] << std::endl;
+      }
+
+      std::cout << "\n===== MODIFIED SPECTRUM @ index 50 =====" << std::endl;
+      const auto& mod_fda = modified_spec.getFloatDataArrays();
+      for (Size i = 0; i < modified_spec.size(); ++i)
+      {
+        std::cout << "mz: " << modified_spec[i].getMZ()
+                  << ", intensity: " << modified_spec[i].getIntensity();
+
+        std::cout << ", float[0]: " << mod_fda[0][i] << std::endl;
+      }
+
+
       // Process each spectrum with PeakPickerIM
       #pragma omp parallel for
-      for (Int64 i = 0; i != exp.size(); i++)
+      for (Int64 i = 0; i != modified_exp.size(); i++)
       {
-        MSSpectrum& spectrum = exp[i];
+        MSSpectrum& spectrum = modified_exp[i];
         OPENMS_LOG_DEBUG << "Processing MS" << spectrum.getMSLevel() << " spectrum with " 
           << spectrum.size() << " peaks in the IM frame." << std::endl;
         if (method == "mobilogram")
@@ -135,7 +208,7 @@ protected:
       }
       // Save output mzML file
       OPENMS_LOG_DEBUG << "Saving output mzML file: " << output_file << std::endl;
-      mzml.store(output_file, exp);
+      mzml.store(output_file, modified_exp);
 
       return EXECUTION_OK;
     }

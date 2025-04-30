@@ -219,6 +219,12 @@ namespace OpenMS
           ion_mobility_array = &array;
           break;
         }
+        // another possible ion mobility name
+        if (array.getName() == "mean inverse reduced ion mobility array")
+        {
+          ion_mobility_array = &array;
+          break;
+        }
       }
 
       if (!ion_mobility_array)
@@ -760,6 +766,7 @@ namespace OpenMS
       hirez_mz_p.setValue("signal_to_noise", 0.0);
       hirez_mz_p.setValue("report_FWHM", "true");
       hirez_mz_p.setValue("report_FWHM_unit", "relative");
+      hirez_mz_p.setValue("one_sided", "true");
 
       picker.setParameters(hirez_mz_p);
       MSSpectrum picked_spectrum;
