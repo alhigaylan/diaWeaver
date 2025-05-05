@@ -7,10 +7,11 @@
 // --------------------------------------------------------------------------
 
 #include <OpenMS/ANALYSIS/OPENSWATH/MasstraceCorrelator.h>
+#include <OpenMS/PROCESSING/SMOOTHING/SavitzkyGolayFilter.h>
 #include <OpenMS/FORMAT/FileHandler.h>
 
 #ifdef TESTING
-#define DEBUG_MASSTRACES
+  #define DEBUG_MASSTRACES
 #endif
 
 
@@ -37,7 +38,7 @@ their elution profile. It uses
  In a second (optional) step, the MS2 pseudo spectra are correlated with
  the MS1 traces and the most likely precursor is assigned to the pseudo
  spectrum.
-  
+
 It is based on the following papers:
 ETISEQ -- an algorithm for automated elution time ion sequencing of concurrently fragmented peptides for mass spectrometry-based proteomics
   BMC Bioinformatics 2009, 10:244 doi:10.1186/1471-2105-10-244 ; http://www.biomedcentral.com/1471-2105/10/244
@@ -61,18 +62,18 @@ using namespace std;
 using namespace OpenMS;
 
 class TOPPCorrelateMasstraces
-  : public TOPPBase, 
-    public ProgressLogger
+    : public TOPPBase,
+      public ProgressLogger
 {
 
- public:
+public:
 
   TOPPCorrelateMasstraces()
-    : TOPPBase("ClusterMassTracesByPrecursor", "Correlate precursor masstraces with fragment ion masstraces in SWATH maps based on their elution profile.")
+      : TOPPBase("ClusterMassTracesByPrecursor", "Correlate precursor masstraces with fragment ion masstraces in SWATH maps based on their elution profile.")
   {
   }
 
- protected:
+protected:
 
   void registerOptionsAndFlags_() override
   {
@@ -97,11 +98,11 @@ class TOPPCorrelateMasstraces
     registerDoubleOption_("swath_upper", "<double>", 0.0, "Swath upper isolation window", false);
   }
 
- public:
+public:
 
   ExitCodes main_(int , const char**) override
   {
-    setLogType(log_type_); 
+    setLogType(log_type_);
 
     String ms1 = getStringOption_("in_ms1");
     String in_swath =  getStringOption_("in_swath");
@@ -124,21 +125,21 @@ class TOPPCorrelateMasstraces
 #ifdef DEBUG_MASSTRACES
     for (Size i=0; i<MS1_feature_map.size(); ++i)
     {
-        ConsensusFeature f1 = MS1_feature_map[i];
-        cout << "MS1 mass trace " << i << " at " << f1.getMZ() << " and " << 
-          f1.getRT() <<  " +/- " << f1.getWidth() << " with " << f1.getIntensity() << endl;
+      ConsensusFeature f1 = MS1_feature_map[i];
+      cout << "MS1 mass trace " << i << " at " << f1.getMZ() << " and " <<
+        f1.getRT() <<  " +/- " << f1.getWidth() << " with " << f1.getIntensity() << endl;
     }
 #endif
 
     MSExperiment pseudo_spectra_ms1centric;
-    MS1CentricClustering(MS1_feature_map, MS2_feature_map, 
-        swath_lower, swath_upper, pseudo_spectra_ms1centric);
+    MS1CentricClustering(MS1_feature_map, MS2_feature_map,
+                         swath_lower, swath_upper, pseudo_spectra_ms1centric);
     FileHandler().storeExperiment(out,pseudo_spectra_ms1centric, {FileTypes::MZML}, log_type_);
 
     return EXECUTION_OK;
   }
 
-  /** @brief Cluster fragments ions with their corresponding precursors 
+  /** @brief Cluster fragments ions with their corresponding precursors
    *
    * This is based on the ETISEQ algorithm and works as follows:
    *
@@ -152,13 +153,72 @@ class TOPPCorrelateMasstraces
    *  - allow ions to be assigned to multiple precursors
    *  - also generate mass traces from the unfragmented precursors
    *
+   */
+
+  // ------- function to modulate peak intensity using exponential decay -----
+  /*
+  void scaleSpectrumByCorrelation(MSSpectrum& spectrum, double exponent = 4.0)
+  {
+    auto& peaks = spectrum;
+    auto& correlation_array = spectrum.getFloatDataArrays()[3]; // Pearson scores
+
+    for (Size i = 0; i < peaks.size(); ++i)
+    {
+      double corr = correlation_array[i];
+      double weight = std::pow(corr, exponent) * 2.0;
+      double new_intensity = peaks[i].getIntensity() * weight;
+
+      // Enforce minimum intensity to avoid downstream 0-intensity errors
+      peaks[i].setIntensity((new_intensity >= 0.01) ? new_intensity : 0.01);
+    }
+  }
   */
-  void MS1CentricClustering(ConsensusMap& MS1_feature_map, ConsensusMap& MS2_feature_map, 
-      double swath_lower, double swath_upper, 
-      MSExperiment& pseudo_spectra_precursors1)
+
+  // ---- NOTE --- fragment intensities here may be different than diatracer
+  // and thus comparing MSFragger output is biased if MSFragger intensity cutoff
+  // removes most of my peaks.
+  void scaleSpectrumByCorrelation(MSSpectrum& spectrum, double factor = 1.0)
+  {
+    auto& peaks = spectrum;
+    auto& correlation_array = spectrum.getFloatDataArrays()[3]; // Pearson scores
+
+    for (Size i = 0; i < peaks.size(); ++i)
+    {
+      double corr = correlation_array[i];
+      double weight = corr * factor;
+      double new_intensity = peaks[i].getIntensity() * weight;
+      // Enforce minimum intensity to avoid downstream 0-intensity errors
+      peaks[i].setIntensity((new_intensity >= 0.1) ? new_intensity : 0.1);
+    }
+  }
+
+  // ---------- function to modulate peak intensity using gaussian ----
+  /*
+  void scaleSpectrumByCorrelationGaussian(MSSpectrum& spectrum, double sigma = 0.4247)
+  {
+    double two_sigma_squared = 2.0 * sigma * sigma;
+
+    auto& peaks = spectrum;
+    auto& correlation_array = spectrum.getFloatDataArrays()[3]; // "pearson_score"
+
+    for (Size i = 0; i < peaks.size(); ++i)
+    {
+      double corr = correlation_array[i];
+
+      // Gaussian centered at 1.0, scaled to peak at 2.0 and pass through 1.0 at corr = 0.5
+      double weight = 2.0 * std::exp(-std::pow(1.0 - corr, 2) / two_sigma_squared);
+
+      peaks[i].setIntensity(peaks[i].getIntensity() * weight);
+    }
+  }
+  */
+
+  void MS1CentricClustering(ConsensusMap& MS1_feature_map, ConsensusMap& MS2_feature_map,
+                            double swath_lower, double swath_upper,
+                            MSExperiment& pseudo_spectra_precursors1)
   {
     // -----------------------------------
-    // Parameters 
+    // Parameters
     // -----------------------------------
     double min_pscore = getDoubleOption_("min_pearson_correlation");
     int max_lag = getIntOption_("max_lag");
@@ -181,14 +241,93 @@ class TOPPCorrelateMasstraces
     // -----------------------------------
     // We cache the RT and intensities of each feature
     std::vector< MasstraceCorrelator::MasstracePointsType > feature_points_ms2;
-    std::vector< std::pair<double,double> > max_intensities_ms2; 
+    std::vector< std::pair<double,double> > max_intensities_ms2;
     std::vector< double > rt_cache_ms2;
     mtcorr.createConsensusMapCache(MS2_feature_map, feature_points_ms2, max_intensities_ms2, rt_cache_ms2);
 
     std::vector< MasstraceCorrelator::MasstracePointsType > feature_points_ms1;
-    std::vector< std::pair<double,double> > max_intensities_ms1; 
+    std::vector< std::pair<double,double> > max_intensities_ms1;
     std::vector< double > rt_cache_ms1;
     mtcorr.createConsensusMapCache(MS1_feature_map, feature_points_ms1, max_intensities_ms1, rt_cache_ms1);
+
+    // Apply SGolay smoothing prior to computing pearson correlation.
+    //
+    SavitzkyGolayFilter sg_filter;
+    Param sg_params = sg_filter.getParameters();
+    sg_params.setValue("frame_length", 5);
+    sg_params.setValue("polynomial_order", 3);
+    sg_filter.setParameters(sg_params);
+
+    // ------ sanity check. Print intensities of index 50 MS1 trace prior to smoothing -----
+    std::cout << "\n--- Raw MS1 trace at index 100 (before smoothing) ---" << std::endl;
+    for (const auto& p : feature_points_ms1[100])
+    {
+      std::cout << "RT: " << p.first << ", Intensity: " << p.second << std::endl;
+    }
+
+    // Smooth MS1 traces
+    for (auto& trace : feature_points_ms1)
+    {
+      MSSpectrum spec;
+      for (const auto& p : trace)
+      {
+        Peak1D peak;
+        // Store RT as mz
+        peak.setMZ(p.first);
+        peak.setIntensity(p.second);
+        spec.push_back(peak);
+      }
+
+      sg_filter.filter(spec);
+
+      for (Size i = 0; i < trace.size(); ++i)
+      {
+        // update intensity
+        trace[i].second = spec[i].getIntensity();
+      }
+    }
+    // ----- sanity check. Check that data got smoothed
+    std::cout << "\n--- MS1 trace at index 100 (after SGolay smoothing) ---" << std::endl;
+    for (const auto& p : feature_points_ms1[100])
+    {
+      std::cout << "RT: " << p.first << ", Smoothed Intensity: " << p.second << std::endl;
+    }
+
+    /*
+    // ------ same to MS2. Randomly pick trace 100
+    std::cout << "\n--- Raw MS2 trace at index 100 (before smoothing) ---" << std::endl;
+    for (const auto& p : feature_points_ms2[100])
+    {
+      std::cout << "RT: " << p.first << ", Intensity: " << p.second << std::endl;
+    }
+
+    // Smooth MS2 traces
+
+    for (auto& trace : feature_points_ms2)
+    {
+      MSSpectrum spec;
+      for (const auto& p : trace)
+      {
+        Peak1D peak;
+        peak.setMZ(p.first);
+        peak.setIntensity(p.second);
+        spec.push_back(peak);
+      }
+      sg_filter.filter(spec);
+      for (Size i = 0; i < trace.size(); ++i)
+      {
+        trace[i].second = spec[i].getIntensity();
+      }
+    }
+    // ---- did we smooth MS2?
+    std::cout << "\n--- Smoothed MS2 trace at index 100 (before smoothing) ---" << std::endl;
+    for (const auto& p : feature_points_ms2[100])
+    {
+      std::cout << "RT: " << p.first << ", Intensity: " << p.second << std::endl;
+    }
+     */
+
+
 
     // cache the m/z of each MS1 feature
     std::vector< double > mz_cache_ms1;
@@ -233,8 +372,8 @@ class TOPPCorrelateMasstraces
       if (mz_cache_ms1[i] < swath_lower || mz_cache_ms1[i] > swath_upper) continue;
       ms1_assignment_map[i].clear();
 
-      // Identify a given precursor and get its RT (current_rt) 
-      // 
+      // Identify a given precursor and get its RT (current_rt)
+      //
       // Obtain a pointer to the beginning of the RT vector of all MS2 features
       // (and decrement by one since in the loop we first increment the ptr)
       current_rt = rt_cache_ms1[i];
@@ -251,13 +390,13 @@ class TOPPCorrelateMasstraces
         //  TODO : this implies we can assign only one feature to one
         //         precursor, we might have to change that! See DIA Umpire!
 
-//        std::cout << "---Sanity Check --- rt_cache_ptr value is :" << *rt_cache_ptr << std::endl;
-//        std::cout << "---Sanity Check --- rt value at j = " << j << " equals " << MS2_feature_map[j].getRT() << std::endl;
-//        std::cout << "---Sanity Check --- m/z value at j = " << j << " equals " << MS2_feature_map[j].getMZ() << std::endl;
-//        std::cout << "---Sanity Check --- im value at im_cache_ms2 = " << j << " equals " << im_cache_ms2[j] << std::endl;
+        //        std::cout << "---Sanity Check --- rt_cache_ptr value is :" << *rt_cache_ptr << std::endl;
+        //        std::cout << "---Sanity Check --- rt value at j = " << j << " equals " << MS2_feature_map[j].getRT() << std::endl;
+        //        std::cout << "---Sanity Check --- m/z value at j = " << j << " equals " << MS2_feature_map[j].getMZ() << std::endl;
+        //        std::cout << "---Sanity Check --- im value at im_cache_ms2 = " << j << " equals " << im_cache_ms2[j] << std::endl;
 
         if (fabs(current_rt - (*rt_cache_ptr) ) > rt_max_distance ) continue;
-//        if (ms2feature_used[j]) continue;
+        //        if (ms2feature_used[j]) continue;
 
         // Also check for ion mobility. For now, hard code it as ± 0.02
         double im_tolerance = 0.01;
@@ -265,25 +404,25 @@ class TOPPCorrelateMasstraces
 
 #ifdef DEBUG_MASSTRACES
         for (Size kk=0; kk<f1_points.size(); kk++)
-        { 
-          cout << f1_points[kk].first << " f/s " << f1_points[kk].second << endl; 
+        {
+          cout << f1_points[kk].first << " f/s " << f1_points[kk].second << endl;
         }
         cout << " above prec, below frag " << endl;
         for (Size kk=0; kk<f2_points.size(); kk++)
-        { 
-          cout << f2_points[kk].first << " f/s " << f2_points[kk].second << endl; 
+        {
+          cout << f2_points[kk].first << " f/s " << f2_points[kk].second << endl;
         }
 #endif
 
         // Score the MS1 mass trace against the MS2 mass trace
         int lag; double lag_intensity; double pearson_score;
-        mtcorr.scoreHullpoints(feature_points_ms1[i], feature_points_ms2[j], 
-            lag, lag_intensity, pearson_score, min_pscore, max_lag, mindiff);
+        mtcorr.scoreHullpoints(feature_points_ms1[i], feature_points_ms2[j],
+                               lag, lag_intensity, pearson_score, min_pscore, max_lag, mindiff);
 
         if (pearson_score > min_pscore && lag >= -max_lag && lag <= max_lag)
         {
 #ifdef DEBUG_MASSTRACES
-          cout <<  "assign fragment to precursor! " << f1.getMZ() << " -> " << f2.getMZ() << 
+          cout <<  "assign fragment to precursor! " << f1.getMZ() << " -> " << f2.getMZ() <<
             " [scores " <<  lag << " " << pearson_score << "]" << endl;
 #endif
           ms2feature_used[j] = true;
@@ -301,7 +440,7 @@ class TOPPCorrelateMasstraces
       }
 
       // only keep those assignments which have enough ions
-      if (ms1_assignment_map[i].size() <= min_nr_ions) 
+      if (ms1_assignment_map[i].size() <= min_nr_ions)
       {
         ms1_assignment_map[i].clear();
       }
@@ -325,7 +464,7 @@ class TOPPCorrelateMasstraces
     // Stats
     Size cnt_ms2_used = 0;
     Size cnt_ms1_used = 0;
-    for (Size i = 0; i < MS1_feature_map.size(); i++) 
+    for (Size i = 0; i < MS1_feature_map.size(); i++)
     {
       if (!ms1_assignment_map[i].empty()) cnt_ms1_used++;
     }
@@ -333,13 +472,13 @@ class TOPPCorrelateMasstraces
       if (ms2feature_used[i]) cnt_ms2_used++;
     }
 
-    std::cout <<"I have assigned " << cnt_ms2_used << " (out of " << MS2_feature_map.size() << 
+    std::cout <<"I have assigned " << cnt_ms2_used << " (out of " << MS2_feature_map.size() <<
       ") MS2 features to " << cnt_ms1_used << " (out of " << MS1_feature_map.size() << ") MS1 features " << std::endl;
 
     // -----------------------------------
     // Step 2 - assign the unused fragment ions (if requested)
     //
-    // TODO : 
+    // TODO :
     // i) just assign them to all potentially matching spectra
     // ii) assign a fragment ion only to a single precursor
     // ---------- I commented this out temporarily -------------
@@ -364,7 +503,7 @@ class TOPPCorrelateMasstraces
     }
     endProgress();
     cout << "There were " << cnt << " (out of " << MS2_feature_map.size() << " ) unused fragment ions that were assigned to all spectra within RT range." << endl;
-     // -----------------------------------
+    // -----------------------------------
     // Step 3 - create spectra and assign precursor and fragments to spectra
     cnt = 0;
     startProgress(0, MS1_feature_map.size(), "create the spectra and assign the fragments ");
@@ -377,8 +516,12 @@ class TOPPCorrelateMasstraces
       ConsensusFeature f2 = MS1_feature_map[i];
       spectrum.setRT(f2.getRT());
       spectrum.setMSLevel(2);
+      // set ion mobility
+      spectrum.setDriftTime(f2.getMetaValue("Ion Mobility Centroid"));
+
       Precursor p;
       p.setMZ(f2.getMZ());
+      p.setCharge(f2.getCharge());
       std::vector<Precursor> preclist;
       preclist.push_back(p);
       spectrum.setPrecursors(preclist);
@@ -393,6 +536,61 @@ class TOPPCorrelateMasstraces
       spectrum.getFloatDataArrays()[4].setName("lag_intensity");
       spectrum.getFloatDataArrays()[5].setName("MS2 IM");
       spectrum.getFloatDataArrays()[6].setName("Delta IM");
+
+      // ---- NEW addition. Check if spectrum is above 500. Filter by pearson corr ----
+      std::vector<std::pair<Size, double>> assignment_scores;
+
+      for (Size idx = 0; idx < ms1_assignment_map[i].size(); ++idx)
+      {
+        assignment_scores.emplace_back(idx, feature_attributes[i][idx][3]); // 3 = pearson_score
+      }
+
+      if (assignment_scores.size() > 300)
+      {
+        std::sort(assignment_scores.begin(), assignment_scores.end(),
+                  [](const std::pair<Size, double>& a, const std::pair<Size, double>& b)
+                  {
+                    return a.second > b.second;
+                  });
+
+        assignment_scores.resize(500); // keep only top 500
+      }
+      else
+      {
+        // otherwise, fill sequentially
+        assignment_scores.clear();
+        for (Size idx = 0; idx < ms1_assignment_map[i].size(); ++idx)
+        {
+          assignment_scores.emplace_back(idx, feature_attributes[i][idx][3]);
+        }
+      }
+
+      // Now build spectrum
+      for (const auto& [assignment_idx, pearson] : assignment_scores)
+      {
+        int ms2_index = ms1_assignment_map[i][assignment_idx];
+
+        ConsensusFeature f1 = MS2_feature_map[ms2_index];
+        Peak1D peak;
+        peak.setMZ(f1.getMZ());
+        peak.setIntensity(f1.getIntensity());
+        spectrum.push_back(peak);
+
+        spectrum.getFloatDataArrays()[0].push_back(feature_attributes[i][assignment_idx][0]);
+        spectrum.getFloatDataArrays()[1].push_back(feature_attributes[i][assignment_idx][1]);
+        spectrum.getFloatDataArrays()[2].push_back(feature_attributes[i][assignment_idx][2]);
+        spectrum.getFloatDataArrays()[3].push_back(feature_attributes[i][assignment_idx][3]);
+        spectrum.getFloatDataArrays()[4].push_back(feature_attributes[i][assignment_idx][4]);
+        spectrum.getFloatDataArrays()[5].push_back(feature_attributes[i][assignment_idx][5]);
+        spectrum.getFloatDataArrays()[6].push_back(feature_attributes[i][assignment_idx][6]);
+
+        // scale intensity of fragments
+        //scaleSpectrumByCorrelation(spectrum, 1.0);
+        //scaleSpectrumByCorrelationGaussian(spectrum, 0.4247);
+      }
+      // -------------------
+      /*
+
       int j = 0;
       for (std::vector<int>::iterator it = ms1_assignment_map[i].begin(); it != ms1_assignment_map[i].end(); ++it)
       {
@@ -411,7 +609,8 @@ class TOPPCorrelateMasstraces
         spectrum.getFloatDataArrays()[6].push_back(feature_attributes[i][j][6]);
         j++;
       }
- 
+       */
+
       if (spectrum.size() > min_nr_ions) 
       {
         pseudo_spectra_precursors1.addSpectrum(spectrum);
