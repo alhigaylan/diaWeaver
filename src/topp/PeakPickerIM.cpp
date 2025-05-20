@@ -125,7 +125,7 @@ protected:
         // Start with a deep copy of the original spectrum (incl. peaks + meta)
         current = original;
 
-        auto append_neighbor_peaks = [&](const MSSpectrum& neighbor)
+        auto append_neighbor_peaks = [&](const MSSpectrum& neighbor, double intensity_scale)
         {
           const auto& neighbor_peaks = neighbor;
           const auto& neighbor_fda = neighbor.getFloatDataArrays();
@@ -136,7 +136,7 @@ protected:
           for (Size j = 0; j < neighbor_peaks.size(); ++j)
           {
             Peak1D p = neighbor_peaks[j];
-            p.setIntensity(p.getIntensity() * 0.5);
+            p.setIntensity(p.getIntensity() * intensity_scale);
             current.push_back(p);
 
             // Copy over float metadata as-is (no scaling)
@@ -154,8 +154,11 @@ protected:
           }
         };
 
-        if (i > 0) append_neighbor_peaks(exp[i - 1]);
-        if (i + 1 < static_cast<Int64>(exp.size())) append_neighbor_peaks(exp[i + 1]);
+        // Add peaks from neighbors with appropriate scaling
+        if (i >= 2) append_neighbor_peaks(exp[i - 2], 0.25);
+        if (i >= 1) append_neighbor_peaks(exp[i - 1], 0.5);
+        if (i + 1 < static_cast<Int64>(exp.size())) append_neighbor_peaks(exp[i + 1], 0.5);
+        if (i + 2 < static_cast<Int64>(exp.size())) append_neighbor_peaks(exp[i + 2], 0.25);
 
         current.sortByPosition(); // optional, to preserve m/z order
       }
