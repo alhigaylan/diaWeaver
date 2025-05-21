@@ -553,7 +553,7 @@ public:
                     return a.second > b.second;
                   });
 
-        assignment_scores.resize(500); // keep only top 500
+        assignment_scores.resize(300); // keep only top 300
       }
       else
       {
