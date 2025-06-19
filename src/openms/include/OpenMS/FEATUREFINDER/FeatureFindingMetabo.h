@@ -66,6 +66,8 @@ public:
 
     std::vector<double> getAllCentroidRT() const;
 
+    std::vector<double> getAllCentroidIM() const;
+
     std::vector<double> getIsotopeDistances() const;
 
     double getCentroidMZ() const;
@@ -297,6 +299,7 @@ private:
 
     /// parameter stuff
     double local_rt_range_;
+    double local_im_range_;
     double local_mz_range_;
     Size charge_lower_bound_;
     Size charge_upper_bound_;
@@ -314,6 +317,7 @@ private:
     bool report_chromatograms_;
 
     bool remove_single_traces_;
+    bool overlapping_features_;
     std::vector<const Element*> elements_;
   };
 
