@@ -100,9 +100,17 @@ namespace OpenMS
     /// Extract ion mobility traces as MSSpectra from the raw TimsTOF frame
     /// Ion mobility is temporarily written in place of m/z inside Peak1D object.
     /// raw m/z values are allocated to float data arrays with the label 'raw_mz'
-    std::vector<MSSpectrum> extractIonMobilityTraces(
+   // std::vector<MSSpectrum> extractIonMobilityTraces(
+   //   const MSSpectrum& picked_spectrum,
+   //   const MSSpectrum& raw_spectrum);
+
+    std::pair<std::vector<MSSpectrum>, std::vector<bool>> extractIonMobilityTraces(
       const MSSpectrum& picked_spectrum,
       const MSSpectrum& raw_spectrum);
+
+    // This function takes in a boolean vector of unclaimed raw peaks and append them to the
+    // centroided spectrum
+    void Add_unclaimedPeaks(MSSpectrum& centroided_frame, const MSSpectrum& raw_frame, const std::vector<bool>& claimed);
 
     /// compute m/z and ion mobility centers for picked traces. Returns centroided spectrum.
     MSSpectrum computeCentroids_(const std::vector<MSSpectrum>& mobilogram_traces,

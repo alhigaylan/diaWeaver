@@ -161,9 +161,6 @@ protected:
         {
           if (i >= 1) append_neighbor_peaks(exp[i - 1], 0.5);
           if (i + 1 < static_cast<Int64>(exp.size())) append_neighbor_peaks(exp[i + 1], 0.5);
-
-          if (i >= 2) append_neighbor_peaks(exp[i - 2], 0.25);
-          if (i + 2 < static_cast<Int64>(exp.size())) append_neighbor_peaks(exp[i + 2], 0.25);
         }
         current.sortByPosition(); // optional, to preserve m/z order
       }

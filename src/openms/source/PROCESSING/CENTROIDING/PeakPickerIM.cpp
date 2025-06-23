@@ -178,15 +178,13 @@ namespace OpenMS
     // To enable recomputing of m/z center after ion mobility peak picking, we tack raw m/z peak values
     // in FloatDataArrays().
 
-    vector<MSSpectrum> PeakPickerIM::extractIonMobilityTraces(
+    std::pair<std::vector<MSSpectrum>, std::vector<bool>> PeakPickerIM::extractIonMobilityTraces(
       const MSSpectrum& picked_spectrum,
       const MSSpectrum& raw_spectrum)
     {
       const auto& float_data_arrays = picked_spectrum.getFloatDataArrays();
 
-      // Find FWHM array in picked_spectrum
       const MSSpectrum::FloatDataArray* fwhm_array = nullptr;
-
       for (const auto& array : float_data_arrays)
       {
         if (array.getName() == "FWHM_ppm")
@@ -208,19 +206,12 @@ namespace OpenMS
         return {};
       }
 
-      // Get the Ion Mobility array from raw_spectrum
       const auto& raw_float_data_arrays = raw_spectrum.getFloatDataArrays();
       const MSSpectrum::FloatDataArray* ion_mobility_array = nullptr;
 
       for (const auto& array : raw_float_data_arrays)
       {
-        if (array.getName() == "Ion Mobility")
-        {
-          ion_mobility_array = &array;
-          break;
-        }
-        // another possible ion mobility name
-        if (array.getName() == "mean inverse reduced ion mobility array")
+        if (array.getName() == "Ion Mobility" || array.getName() == "mean inverse reduced ion mobility array")
         {
           ion_mobility_array = &array;
           break;
@@ -233,20 +224,20 @@ namespace OpenMS
         return {};
       }
 
-      // Vector of MSSpectra for each picked m/z peak (each spectrum is a mobilogram trace)
-      vector<MSSpectrum> mobility_traces;
+      std::vector<MSSpectrum> mobility_traces;
+      // Instead of tossing away raw peaks that failed to be picked by HiRes
+      // we will pass them over to the output centroid spectrum as is!
+      std::vector<bool> claimed(raw_spectrum.size(), false);
 
       for (size_t i = 0; i < picked_spectrum.size(); ++i)
       {
         double picked_mz = picked_spectrum[i].getMZ();
         double fwhm_ppm = (*fwhm_array)[i];
-
         auto bounds = ppmBounds(picked_mz, fwhm_ppm);
         double lower_bound = bounds.first;
         double upper_bound = bounds.second;
 
         SignedSize center_idx = raw_spectrum.findNearest(picked_mz);
-
         if (center_idx == -1)
         {
           std::cerr << "No raw peaks found near picked m/z: " << picked_mz << std::endl;
@@ -254,47 +245,37 @@ namespace OpenMS
           continue;
         }
 
-        MSSpectrum trace_spectrum; // A single mobilogram trace
-        // Prepare FloatDataArray to store raw m/z values
+        MSSpectrum trace_spectrum;
         MSSpectrum::FloatDataArray raw_mz_array;
         raw_mz_array.setName("raw_mz");
 
-        // Expand left
         SignedSize left_idx = center_idx;
         while (left_idx >= 0 && raw_spectrum[left_idx].getMZ() >= lower_bound)
         {
-          trace_spectrum.emplace_back((*ion_mobility_array)[left_idx], raw_spectrum[left_idx].getIntensity()); // currently Ion Mobility as m/z
-
-          // Store the raw m/z
+          trace_spectrum.emplace_back((*ion_mobility_array)[left_idx], raw_spectrum[left_idx].getIntensity());
           raw_mz_array.push_back(raw_spectrum[left_idx].getMZ());
-
+          claimed[left_idx] = true;
           --left_idx;
         }
 
-        // Expand right
         SignedSize right_idx = center_idx + 1;
         while (right_idx < static_cast<SignedSize>(raw_spectrum.size()) &&
                raw_spectrum[right_idx].getMZ() <= upper_bound)
         {
           trace_spectrum.emplace_back((*ion_mobility_array)[right_idx], raw_spectrum[right_idx].getIntensity());
-
-          // Store the raw m/z data in floatDataArrays()
           raw_mz_array.push_back(raw_spectrum[right_idx].getMZ());
-
+          claimed[right_idx] = true;
           ++right_idx;
         }
 
-        // Attach the raw m/z array to trace_spectrum
         auto& trace_float_arrays = trace_spectrum.getFloatDataArrays();
         trace_float_arrays.push_back(std::move(raw_mz_array));
-
-        // Sort the trace_spectrum by ion mobility (m/z), while keeping raw m/z aligned
-        trace_spectrum.sortByPosition(); // Note: having the float arrays attached ensures that sorting is performed on everything
+        trace_spectrum.sortByPosition();
 
         mobility_traces.push_back(std::move(trace_spectrum));
       }
 
-      return mobility_traces;
+      return {mobility_traces, claimed};
     }
 
     // Function to compute m/z centers from mobilogram_traces and picked_traces
@@ -659,6 +640,97 @@ namespace OpenMS
       return centroided_frame;
     }
 
+    void PeakPickerIM::Add_unclaimedPeaks(
+      MSSpectrum& centroided_frame,
+      const MSSpectrum& raw_frame,
+      const std::vector<bool>& claimed)
+    {
+      if (claimed.size() != raw_frame.size())
+      {
+        std::cerr << "[ERROR] Claimed vector size (" << claimed.size()
+                  << ") does not match raw_frame size (" << raw_frame.size() << ")" << std::endl;
+        return;
+      }
+
+      // Find ion mobility array in raw_frame and normalize if needed
+      const auto& raw_float_arrays = raw_frame.getFloatDataArrays();
+      const MSSpectrum::FloatDataArray* raw_im_array = nullptr;
+
+      for (const auto& arr : raw_float_arrays)
+      {
+        if (arr.getName() == "Ion Mobility" || arr.getName() == "mean inverse reduced ion mobility array")
+        {
+          raw_im_array = &arr;
+          break;
+        }
+      }
+
+      if (!raw_im_array)
+      {
+        std::cerr << "[ERROR] Ion Mobility array not found in raw_frame!" << std::endl;
+        return;
+      }
+
+      // Create a new spectrum to hold merged result
+      MSSpectrum merged_frame;
+      MSSpectrum::FloatDataArray im_array;
+      im_array.setName("Ion Mobility");
+
+      // Add unclaimed peaks from raw_frame
+      for (size_t i = 0; i < raw_frame.size(); ++i)
+      {
+        if (!claimed[i])
+        {
+          Peak1D p;
+          p.setMZ(raw_frame[i].getMZ());
+          p.setIntensity(raw_frame[i].getIntensity());
+          merged_frame.push_back(p);
+          im_array.push_back((*raw_im_array)[i]);
+        }
+      }
+
+      //std::cerr << "[DEBUG] Added " << merged_frame.size() << " unclaimed raw peaks.\n";
+
+      // Add peaks from centroided_frame
+      const auto& old_peaks = centroided_frame;
+      const auto& centroid_im_array = centroided_frame.getFloatDataArrays();
+      const MSSpectrum::FloatDataArray* old_im_array = nullptr;
+
+      for (const auto& arr : centroided_frame.getFloatDataArrays())
+      {
+        if (arr.getName() == "Ion Mobility")
+        {
+          old_im_array = &arr;
+          break;
+        }
+      }
+
+      if (!old_im_array || old_im_array->size() != old_peaks.size())
+      {
+        std::cerr << "[ERROR] Centroided frame is missing valid 'Ion Mobility' float array!" << std::endl;
+        return;
+      }
+
+      for (size_t i = 0; i < old_peaks.size(); ++i)
+      {
+        merged_frame.push_back(old_peaks[i]);
+        im_array.push_back((*old_im_array)[i]);
+      }
+
+      //std::cerr << "[DEBUG] Final merged spectrum size: " << merged_frame.size()
+      //          << ", IM array size: " << im_array.size() << "\n";
+
+      // Attach the ion mobility float data array
+      auto& merged_arrays = merged_frame.getFloatDataArrays();
+      merged_arrays.push_back(std::move(im_array));
+
+      // Sort by m/z or IM as needed
+      merged_frame.sortByPosition();
+
+      // Replace centroided_frame with merged_frame
+      centroided_frame = std::move(merged_frame);
+    }
+
 
     PeakPickerIM::PeakPickerIM() :
         parameters_(getDefaultParameters())
@@ -752,7 +824,7 @@ namespace OpenMS
       gauss_filter.setParameters(gauss_params);
       gauss_filter.filter(summed_spectrum);
 #ifdef DEBUG_PICKER
-      std::cout << "Spectrum after Gaussian smoothing has " << summed_spectrum.size() << " peaks." << std::endl;
+      std::cout << "Spectrum after SGolay smoothing has " << summed_spectrum.size() << " peaks." << std::endl;
       for (const auto& peak : summed_spectrum)
       {
         std::cout << "m/z: " << peak.getMZ() << ", intensity: " << peak.getIntensity() << std::endl;
@@ -777,7 +849,9 @@ namespace OpenMS
 #endif
 
       // ---step 4a: Extract ion mobility traces for each picked m/z peak
-      auto mobilogram_traces = extractIonMobilityTraces(picked_spectrum, spectrum);
+      //auto mobilogram_traces = extractIonMobilityTraces(picked_spectrum, spectrum);
+      auto [mobilogram_traces, claimed] = PeakPickerIM::extractIonMobilityTraces(picked_spectrum, spectrum);
+
 
       // --- compute optimal sampling rate from well-populated mobilograms in this frame.
       // This is currently set to +20 peaks in a mobilogram. (Should this be a user parameter?)
@@ -925,6 +999,8 @@ namespace OpenMS
 
       // Recompute m/z centers and output centroided frame
       MSSpectrum centroided_frame = computeCentroids_(mobilogram_traces, picked_traces);
+      // Add unclaimed raw peaks to centroided data
+      PeakPickerIM::Add_unclaimedPeaks(centroided_frame, spectrum, claimed);
 
 #ifdef DEBUG_PICKER
       std::cout << "--- Centroided frame has  " << centroided_frame.size() << " --- peaks.\n";
@@ -933,10 +1009,19 @@ namespace OpenMS
       // Replace the input spectrum with the centroided result but ensure that other meta data is preserved
       // Maybe I am stupid but there is no better way if one just wants to 
       // swap the peaks and data arrays (while keeping meta data)
+
+      // 20250620 -- when I introduced function to append unclaimed raw peaks
+      // static_cast breaks the code. Disable for now.
+
       centroided_frame = static_cast<SpectrumSettings>(spectrum); // swaps meta data
       centroided_frame.setMSLevel(spectrum.getMSLevel());
       centroided_frame.setName(spectrum.getName());
       centroided_frame.setRT(spectrum.getRT());
+      centroided_frame.setNativeID(spectrum.getNativeID());
+
+      //std::cerr << "\n[DEBUG] Before removing float data arrays:\n";
+      //std::cerr << "  Centroided frame size: " << centroided_frame.size() << std::endl;
+      //std::cerr << "  FloatDataArrays present:\n";
       removeAllFloatDataArraysExcept(centroided_frame, "Ion Mobility");
       spectrum = std::move(centroided_frame);
       
