@@ -73,7 +73,7 @@ MSSpectrum input;
 START_SECTION(void pickIMTraces(MSSpectrum& spectrum))
 {
     PeakPickerIM pp_im;
-    pp_im.pickIMTraces(input);
+    pp_im.pickIMTraces(input, false);
     // TODO adapt
     TEST_EQUAL(input.size(), 10)
     TEST_REAL_SIMILAR(input[0].getIntensity(), 450)

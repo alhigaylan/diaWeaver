@@ -783,7 +783,7 @@ namespace OpenMS
       return parameters_;
     }
 
-    void PeakPickerIM::pickIMTraces(MSSpectrum& spectrum)
+    void PeakPickerIM::pickIMTraces(MSSpectrum& spectrum, bool add_unclaimed)
     {
       /*
       // IM format determination (Temporarily commented out)
@@ -800,6 +800,7 @@ namespace OpenMS
                   String(NamesOfIMFormat[(size_t)format]));
       }
       */
+
 
 
       // --- Step 1a: Sum m/z peaks
@@ -1000,7 +1001,10 @@ namespace OpenMS
       // Recompute m/z centers and output centroided frame
       MSSpectrum centroided_frame = computeCentroids_(mobilogram_traces, picked_traces);
       // Add unclaimed raw peaks to centroided data
-      PeakPickerIM::Add_unclaimedPeaks(centroided_frame, spectrum, claimed);
+      if (add_unclaimed)
+      {
+        PeakPickerIM::Add_unclaimedPeaks(centroided_frame, spectrum, claimed);
+      }
 
 #ifdef DEBUG_PICKER
       std::cout << "--- Centroided frame has  " << centroided_frame.size() << " --- peaks.\n";

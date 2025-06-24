@@ -76,7 +76,7 @@ START_SECTION(void pickIMTraces(MSSpectrum& spectrum))
                   << ", intensity: " << peak.getIntensity() << std::endl;
     }
 
-    pp_im.pickIMTraces(input);
+    pp_im.pickIMTraces(input, false);
     std::cout << "start printing dummy spectrum AFTER picking! " << std::endl;
     for (const auto& peak : input)
     {

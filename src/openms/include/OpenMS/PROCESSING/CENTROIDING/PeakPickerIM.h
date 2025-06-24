@@ -28,7 +28,8 @@ namespace OpenMS
     virtual ~PeakPickerIM();
 
     /// Picks ion mobility traces from the given spectrum.
-    void pickIMTraces(MSSpectrum& spectrum);
+    //void pickIMTraces(MSSpectrum& spectrum);
+    void pickIMTraces(MSSpectrum& spectrum, bool add_unclaimed);
 
     /// Sets the parameters for peak picking.
     void setParameters(const Param& param);

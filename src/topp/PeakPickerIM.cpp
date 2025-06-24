@@ -38,6 +38,8 @@ protected:
     setValidStrings_("method", { "mobilogram", "cluster", "traces" } );
 
     registerFlag_("merge_neighbors", "If set, merge peaks from neighboring spectra (n-1 and n+1) with half intensity");
+    registerFlag_("include_unclaimed", "If set, include unclaimed raw peaks into the centroided output");
+
   }
 
     /**
@@ -47,14 +49,14 @@ protected:
   {
     public:
 
-    Consumer(String filename, const String& method, const PeakPickerIM& pp) :
-      MSDataWritingConsumer(std::move(filename)), pp_(pp), method_(method) {}
+    Consumer(String filename, const String& method, const PeakPickerIM& pp, bool add_unclaimed) :
+      MSDataWritingConsumer(std::move(filename)), pp_(pp), method_(method), add_unclaimed_(add_unclaimed) {}
 
     void processSpectrum_(MapType::SpectrumType& spectrum) override
     {
       if (method_ == "mobilogram")
       {
-        pp_.pickIMTraces(spectrum);
+        pp_.pickIMTraces(spectrum, add_unclaimed_);
       }
       else if (method_ == "cluster")
       {
@@ -73,15 +75,16 @@ protected:
   private:
     PeakPickerIM pp_;
     String method_ = "mobilogram";
+    bool add_unclaimed_;
   };
 
 
-  ExitCodes doLowMemAlgorithm(const String method, const PeakPickerIM& pp, const String& input_file, const String& output_file)
+  ExitCodes doLowMemAlgorithm(const String method, const PeakPickerIM& pp, const String& input_file, const String& output_file, bool add_unclaimed)
   {
     ///////////////////////////////////
     // Create the consumer object, add data processing
     ///////////////////////////////////
-    Consumer pp_consumer(output_file, method, pp);
+    Consumer pp_consumer(output_file, method, pp, add_unclaimed);
     pp_consumer.addDataProcessing(getProcessingInfo_(DataProcessing::PEAK_PICKING));
 
     ///////////////////////////////////
@@ -102,15 +105,17 @@ protected:
     String process_option = getStringOption_("processOption");
     String method = getStringOption_("method");
 
+    // Retrieve user parameter
+    bool merge_neighbors = getFlag_("merge_neighbors");
+    bool add_unclaimed = getFlag_("include_unclaimed");
+
     PeakPickerIM picker;
     if (process_option == "lowmemory")
     {
-      return doLowMemAlgorithm(method, picker, input_file, output_file); // TODO: needs parallelization
+      return doLowMemAlgorithm(method, picker, input_file, output_file, add_unclaimed); // TODO: needs parallelization
     }
     else
     {
-      // Retrieve user parameter
-      bool merge_neighbors = getFlag_("merge_neighbors");
       // Load input mzML file
       PeakMap exp;
       MzMLFile mzml;
@@ -199,7 +204,7 @@ protected:
           << spectrum.size() << " peaks in the IM frame." << std::endl;
         if (method == "mobilogram")
         {
-          picker.pickIMTraces(spectrum);
+          picker.pickIMTraces(spectrum, add_unclaimed);
         }
         else if (method == "cluster")
         {
