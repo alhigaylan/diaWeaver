@@ -539,7 +539,14 @@ public:
 
       // ---- NEW addition. Check if spectrum is above 500. Filter by pearson corr ----
       std::vector<std::pair<Size, double>> assignment_scores;
+      // for now ignore filtering by top 500
+      assignment_scores.clear();
+      for (Size idx = 0; idx < ms1_assignment_map[i].size(); ++idx)
+      {
+        assignment_scores.emplace_back(idx, feature_attributes[i][idx][3]);
+      }
 
+        /*
       for (Size idx = 0; idx < ms1_assignment_map[i].size(); ++idx)
       {
         assignment_scores.emplace_back(idx, feature_attributes[i][idx][3]); // 3 = pearson_score
@@ -563,7 +570,7 @@ public:
         {
           assignment_scores.emplace_back(idx, feature_attributes[i][idx][3]);
         }
-      }
+      }*/
 
       // Now build spectrum
       for (const auto& [assignment_idx, pearson] : assignment_scores)
