@@ -565,7 +565,7 @@ namespace OpenMS
       sd = (0.0016633 * iso_pos - 0.0004751) / charge;
     }
 
-    double sigma_mult(1.0);
+    double sigma_mult(3.0);
     double mz_score(0.0);
 
     //standard deviation including the estimated isotope deviation
