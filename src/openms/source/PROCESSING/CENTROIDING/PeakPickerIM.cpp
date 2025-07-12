@@ -141,8 +141,9 @@ namespace OpenMS
     // There could be multiple 500.0 m/z peaks with different ion mobility values.
     // Peak picking (such as HiRes) will not work properly if there are multiple y measurements at a given x m/z position.
     // Note: does not clear the output_spectrum but add peaks to it (required for fast padding)
-    void PeakPickerIM::sumFrame_(const MSSpectrum& input_spectrum, MSSpectrum& output_spectrum, double ppm_tolerance)
+    void PeakPickerIM::sumFrame_(const MSSpectrum input_spectrum, MSSpectrum& output_spectrum, double ppm_tolerance)
     {
+      //std::cerr << "====SumFrame inner works=====" << std::endl;
       if (input_spectrum.empty()) return;
 
       OPENMS_PRECONDITION(input_spectrum.isSorted(), "Spectrum must be sorted by m/z before summing peaks.");
@@ -150,13 +151,17 @@ namespace OpenMS
       double current_mz = input_spectrum[0].getMZ();
       double current_intensity = input_spectrum[0].getIntensity();
 
+
       for (Size i = 1; i < input_spectrum.size(); ++i)
       {
         double next_mz = input_spectrum[i].getMZ();
         double next_intensity = input_spectrum[i].getIntensity();
 
         double delta_mz = std::abs(next_mz - current_mz);
+
+        //std::cerr << "current_mz peak: " << current_mz << " next_mz : " << next_mz << std::endl;
         double ppm_diff = (delta_mz / current_mz) * 1e6;
+        //std::cerr << " Delta m/z : " << delta_mz << " ppm_diff .. " << ppm_diff << std::endl;
 
         if (ppm_diff <= ppm_tolerance)
         {
@@ -275,6 +280,7 @@ namespace OpenMS
         mobility_traces.push_back(std::move(trace_spectrum));
       }
 
+
       return {mobility_traces, claimed};
     }
 
@@ -303,6 +309,22 @@ namespace OpenMS
         // std::cout << "Looping through picked_trace that has .. " << picked_traces[i].size() << std::endl;
         const MSSpectrum& picked_trace = picked_traces[i];
         const MSSpectrum& raw_trace = mobilogram_traces[i];
+
+
+        /*
+        std::cerr << "Raw Trace Peaks:\n";
+        for (const auto& peak : raw_trace)
+        {
+          std::cerr << "m/z: " << peak.getMZ() << ", intensity: " << peak.getIntensity() << "\n";
+        }
+        std::cerr << "Picked Trace Peaks:\n";
+        for (const auto& peak : picked_trace)
+        {
+          std::cerr << "m/z: " << peak.getMZ() << ", intensity: " << peak.getIntensity() << "\n";
+        }
+         */
+
+
 
         const auto& picked_float_arrays = picked_trace.getFloatDataArrays();
 
@@ -353,11 +375,13 @@ namespace OpenMS
         vector<double> sorted_intensity;
         
         // Iterate through picked peaks in this trace
+        //std::cerr << "ComputeCentroids -- iterating through picked mobilogram to find m/z center" << std::endl;
+
         for (Size j = 0; j < picked_trace.size(); ++j)
         {
           double centroid_im = picked_trace[j].getMZ();   // Ion mobility centroid (stored as m/z)
           double fwhm = fwhm_array[j];
-
+          //std::cerr << "centroid_im : " << centroid_im << " im fwhm : " << fwhm << std::endl;
           double im_lower = centroid_im - (fwhm / 2.0);
           double im_upper = centroid_im + (fwhm / 2.0);
 
@@ -368,6 +392,7 @@ namespace OpenMS
 #endif
           // Use findNearest() to get the index of the closest peak in the raw mobilogram trace
           SignedSize center_idx = raw_trace.findNearest(centroid_im);
+          //std::cerr << "the nearest ion mobility peak to centroid_im in raw_trace object is : " << raw_trace[center_idx].getMZ() << std::endl;
 
           if (center_idx == -1)
           {
@@ -387,6 +412,9 @@ namespace OpenMS
             new_peak.setIntensity(raw_trace[left_idx].getIntensity());    // intensity from raw_trace
             raw_peaks_within_bounds.push_back(new_peak);
 
+            //std::cerr << "Left expansion.. added peaks stats are: " << std::endl;
+            //std::cerr << "m/z :" << raw_mz_values[left_idx] << " intensity :" << raw_trace[left_idx] << std::endl;
+
             --left_idx;
           }
 
@@ -399,6 +427,9 @@ namespace OpenMS
             new_peak.setMZ(raw_mz_values[right_idx]);
             new_peak.setIntensity(raw_trace[right_idx].getIntensity());
             raw_peaks_within_bounds.push_back(new_peak);
+
+            //std::cerr << "Right expansion.. added peaks stats are: " << std::endl;
+            //std::cerr << "m/z :" << raw_mz_values[right_idx] << " intensity :" << raw_trace[right_idx] << std::endl;
 
             ++right_idx;
           }
@@ -417,6 +448,8 @@ namespace OpenMS
 
             // Add it directly to centroided_frame
             centroided_frame.push_back(single_peak);
+            //std::cerr << "We only found one raw peak from mobilogram extraction... " << std::endl;
+            //std::cerr << "peak m/z : " << single_peak.getMZ() << " peak intensity : " << single_peak.getIntensity() << std::endl;
 
             // Push corresponding ion mobility and FWHM arrays
             ion_mobility_array.push_back(centroid_im);
@@ -434,12 +467,27 @@ namespace OpenMS
           // If not sorted, sort both the peaks array and the corresponding raw m/z values array
           if (!raw_peaks_within_bounds.isSorted())
           {
+            //std::cerr << "======Sorting raw_peaks_within_bounds!======" << std::endl;
             raw_peaks_within_bounds.sortByPosition();
           }
            
           // Clear the spectrum for reuse
           raw_mz_peaks.clear(true);
-          sumFrame_(raw_peaks_within_bounds, raw_mz_peaks, 0.1);
+          sumFrame_(raw_peaks_within_bounds, raw_mz_peaks, 1.0);
+          // Print input spectrum (raw_peaks_within_bounds)
+          //std::cerr << "== raw_peaks_within_bounds INPUT ==" << std::endl;
+          //for (const auto& peak : raw_peaks_within_bounds)
+          //{
+            //std::cerr << "m/z: " << peak.getMZ() << ", intensity: " << peak.getIntensity() << std::endl;
+          //}
+
+          // Print output spectrum (raw_mz_peaks)
+          //std::cerr << "== raw_mz_peaks (after SumFrame_) OUTPUT ==" << std::endl;
+          //for (const auto& peak : raw_mz_peaks)
+          //{
+            //std::cerr << "m/z: " << peak.getMZ() << ", intensity: " << peak.getIntensity() << std::endl;
+          //}
+
           if (raw_mz_peaks.empty())
           {
             OPENMS_LOG_DEBUG << "No data in raw_mz_peaks for picked IM peak " << j << "!" << std::endl;
@@ -455,12 +503,17 @@ namespace OpenMS
             ion_mobility_fwhm.push_back(fwhm);
             mz_fwhm_array.push_back(0.0);
 
+            //std::cerr << "Only one raw peak occured after SumFrame was applied .. " << std::endl;
+            //std::cerr << "raw_mz_peaks[0] : " << raw_mz_peaks[0] << " centroid_im : " << centroid_im << std::endl;
+            //std::cerr << "peak m/z : " << raw_mz_peaks[0].getMZ() << " peak intensity : " << raw_mz_peaks[0].getIntensity() << std::endl;
+
 #ifdef DEBUG_PICKER
             std::cout << "[INFO] sumFrame_ reduced peaks to a single entry. Added directly to centroided_frame. m/z: " << single_peak.getMZ()
                       << " intensity: " << single_peak.getIntensity() << std::endl;
 #endif
             continue;
           }
+          //std::cerr << " Calculating m/z centroid using spline ..." << std::endl;
 
           // Clear and reuse vectors for spline data
           mz_values.clear();
@@ -478,6 +531,8 @@ namespace OpenMS
           {
             double current_mz = raw_mz_peaks[i].getMZ();
             double current_intensity = raw_mz_peaks[i].getIntensity();
+            //std::cerr << "current_mz : " << current_mz << " current_intensity : " << current_intensity << std::endl;
+
             
             // Check if still sorted (compare with previous value if not the first element)
             if (i > 0 && current_mz < mz_values.back())
@@ -520,6 +575,15 @@ namespace OpenMS
             mz_values = std::move(sorted_mz);
             intensity_values = std::move(sorted_intensity);
           }
+
+          //std::cerr << "After sorting the mz_values and intensity values vectors... " << std::endl;
+          //std::cerr << "m/z\tIntensity\n";
+          /*
+          for (size_t i = 0; i < mz_values.size(); ++i)
+          {
+            std::cerr << mz_values[i] << "\t" << intensity_values[i] << "\n";
+          }
+           */
 
           // Initialize spline with the two vectors
           CubicSpline2d spline(mz_values, intensity_values);
@@ -612,6 +676,9 @@ namespace OpenMS
           std::cout << "m/z FWHM: " << mz_fwhm << std::endl;
 #endif
 
+          //std::cerr << "Finalized apex intensity ..." << std::endl;
+          //std::cerr << "apex_mz : " << apex_mz << " apex_intensity : " << apex_intensity << std::endl;
+
           centroided_frame.emplace_back(apex_mz, apex_intensity);
           ion_mobility_array.push_back(centroid_im);
           ion_mobility_fwhm.push_back(fwhm);
@@ -640,6 +707,7 @@ namespace OpenMS
       return centroided_frame;
     }
 
+    /*
     void PeakPickerIM::Add_unclaimedPeaks(
       MSSpectrum& centroided_frame,
       const MSSpectrum& raw_frame,
@@ -686,14 +754,18 @@ namespace OpenMS
           p.setIntensity(raw_frame[i].getIntensity());
           merged_frame.push_back(p);
           im_array.push_back((*raw_im_array)[i]);
+          // print unclaimed peaks
+          std::cerr << "unclaimed m/z: " << raw_frame[i].getMZ() << std::endl;
+          std::cerr << "unclaimed inty: " << raw_frame[i].getIntensity() << std::endl;
+          std::cerr << "unclaimed ion mobility: " << (*raw_im_array)[i] << std::endl;
         }
       }
 
-      //std::cerr << "[DEBUG] Added " << merged_frame.size() << " unclaimed raw peaks.\n";
+      std::cerr << "[DEBUG] Added " << merged_frame.size() << " unclaimed raw peaks.\n";
 
       // Add peaks from centroided_frame
       const auto& old_peaks = centroided_frame;
-      const auto& centroid_im_array = centroided_frame.getFloatDataArrays();
+      //const auto& centroid_im_array = centroided_frame.getFloatDataArrays();
       const MSSpectrum::FloatDataArray* old_im_array = nullptr;
 
       for (const auto& arr : centroided_frame.getFloatDataArrays())
@@ -707,7 +779,7 @@ namespace OpenMS
 
       if (!old_im_array || old_im_array->size() != old_peaks.size())
       {
-        std::cerr << "[ERROR] Centroided frame is missing valid 'Ion Mobility' float array!" << std::endl;
+        //std::cerr << "[ERROR] Centroided frame is missing valid 'Ion Mobility' float array!" << std::endl;
         return;
       }
 
@@ -729,6 +801,124 @@ namespace OpenMS
 
       // Replace centroided_frame with merged_frame
       centroided_frame = std::move(merged_frame);
+    }
+     */
+
+    // Use PeakPickerCluster function to merge unclaimed peaks into distinct peak groups.
+    void PeakPickerIM::Add_unclaimedPeaks(
+      MSSpectrum& centroided_frame,
+      const MSSpectrum& raw_frame,
+      const std::vector<bool>& claimed)
+    {
+      if (claimed.size() != raw_frame.size())
+      {
+        std::cerr << "[ERROR] Claimed vector size (" << claimed.size()
+                  << ") does not match raw_frame size (" << raw_frame.size() << ")" << std::endl;
+        return;
+      }
+
+      // Find ion mobility array in raw_frame
+      const MSSpectrum::FloatDataArray* raw_im_array = nullptr;
+      for (const auto& arr : raw_frame.getFloatDataArrays())
+      {
+        if (arr.getName() == "Ion Mobility" || arr.getName() == "mean inverse reduced ion mobility array")
+        {
+          raw_im_array = &arr;
+          break;
+        }
+      }
+
+      if (!raw_im_array)
+      {
+        std::cerr << "[ERROR] Ion Mobility array not found in raw_frame!" << std::endl;
+        return;
+      }
+
+      // === STEP 1: Collect unclaimed raw peaks into a new frame ===
+      MSSpectrum unclaimed_frame;
+      MSSpectrum::FloatDataArray unclaimed_im_array;
+      unclaimed_im_array.setName("Ion Mobility");
+
+      for (size_t i = 0; i < raw_frame.size(); ++i)
+      {
+        if (!claimed[i])
+        {
+          Peak1D p;
+          p.setMZ(raw_frame[i].getMZ());
+          p.setIntensity(raw_frame[i].getIntensity());
+          unclaimed_frame.push_back(p);
+          unclaimed_im_array.push_back((*raw_im_array)[i]);
+        }
+      }
+
+      if (unclaimed_frame.size() != unclaimed_im_array.size())
+      {
+        std::cerr << "[ERROR] Mismatch between unclaimed_frame and IM array size!\n";
+        return;
+      }
+
+      unclaimed_frame.getFloatDataArrays().push_back(std::move(unclaimed_im_array));
+      //std::cerr << "[DEBUG] Added " << unclaimed_frame.size() << " unclaimed raw peaks.\n";
+
+      // === STEP 2: Run clustering on unclaimed peaks ===
+      PeakPickerIM::pickIMCluster(unclaimed_frame, 100.0, 0.04);
+      //std::cerr << "[Number of unclaimed peaks after clustering] " << unclaimed_frame.size() << " peaks.\n";
+
+      // PRINT CLUSTERED UNCLAIMED PEAKS //
+
+      //const auto& clustered_im_array = unclaimed_frame.getFloatDataArrays()[0];
+
+      /*
+      for (size_t i = 0; i < unclaimed_frame.size(); ++i)
+      {
+        std::cerr << "clustered m/z: " << unclaimed_frame[i].getMZ()
+                  << ", inty: " << unclaimed_frame[i].getIntensity()
+                  << ", ion mobility: " << clustered_im_array[i] << std::endl;
+      }
+       */
+
+
+      // === STEP 3: Merge with existing centroided_frame ===
+      const MSSpectrum::FloatDataArray* old_im_array = nullptr;
+      for (const auto& arr : centroided_frame.getFloatDataArrays())
+      {
+        if (arr.getName() == "Ion Mobility")
+        {
+          old_im_array = &arr;
+          break;
+        }
+      }
+
+      if (!old_im_array || old_im_array->size() != centroided_frame.size())
+      {
+        std::cerr << "[ERROR] Centroided frame is missing valid 'Ion Mobility' float array!" << std::endl;
+        return;
+      }
+
+      // Prepare final spectrum and mobility array
+      MSSpectrum final_frame = std::move(unclaimed_frame); // reusing the memory
+      MSSpectrum::FloatDataArray final_im_array = std::move(final_frame.getFloatDataArrays()[0]); // take ownership
+
+      for (size_t i = 0; i < centroided_frame.size(); ++i)
+      {
+        final_frame.push_back(centroided_frame[i]);
+        final_im_array.push_back((*old_im_array)[i]);
+      }
+
+      // Final integrity check
+      if (final_frame.size() != final_im_array.size())
+      {
+        std::cerr << "[ERROR] Final merged spectrum and ion mobility array size mismatch!" << std::endl;
+        return;
+      }
+
+      // Attach final IM array
+      final_frame.getFloatDataArrays().clear();
+      final_im_array.setName("Ion Mobility");
+      final_frame.getFloatDataArrays().push_back(std::move(final_im_array));
+
+      final_frame.sortByPosition();
+      centroided_frame = std::move(final_frame);
     }
 
 
@@ -807,7 +997,7 @@ namespace OpenMS
       // First, we project all timsTOF peaks into the m/z axis using sumFrame_
       // The ppm tolerance is a dynamic way of testing m/z floats being almost identical. Set it to 0.1 ppm
       MSSpectrum summed_spectrum;
-      sumFrame_(spectrum, summed_spectrum, 0.1);
+      sumFrame_(spectrum, summed_spectrum, 1.0);
 #ifdef DEBUG_PICKER
       std::cout << "Spectrum after sumFrame_ has " << summed_spectrum.size() << " peaks." << std::endl;
 #endif
@@ -1022,6 +1212,7 @@ namespace OpenMS
       centroided_frame.setName(spectrum.getName());
       centroided_frame.setRT(spectrum.getRT());
       centroided_frame.setNativeID(spectrum.getNativeID());
+      //std::cerr << "Finished processing frame at rt = " << centroided_frame.getRT() << std::endl;
 
       //std::cerr << "\n[DEBUG] Before removing float data arrays:\n";
       //std::cerr << "  Centroided frame size: " << centroided_frame.size() << std::endl;
@@ -1282,6 +1473,10 @@ void PeakPickerIM::pickIMCluster(OpenMS::MSSpectrum& spectrum, double ppm_tolera
         double cluster_im_min = points[seed_original_idx].im;
         double cluster_im_max = points[seed_original_idx].im;
 
+        //std::cerr << "Initial cluster boundaries are created....: " << std::endl;
+        //std::cerr << "min_mz : " << cluster_mz_min << " max_mz :" << cluster_mz_max << std::endl;
+        //std::cerr << "im_min : " << cluster_im_min << " im_max :" << cluster_im_max << std::endl;
+
         // 7. Expand the cluster using m/z sorted neighbors (same logic as before)
         OpenMS::Size seed_sorted_pos = original_to_sorted_pos[seed_original_idx];
         OpenMS::SignedSize left_idx = static_cast<OpenMS::SignedSize>(seed_sorted_pos) - 1;
@@ -1380,8 +1575,12 @@ void PeakPickerIM::pickIMCluster(OpenMS::MSSpectrum& spectrum, double ppm_tolera
                     static_cast<float>(sum_intensity),
                     0 // Original index is meaningless for averaged points
                  );
+
             }
         }
+        //std::cerr << "----Final cluster boundaries are created ----: " << std::endl;
+        //std::cerr << "min_mz : " << cluster_mz_min << " max_mz :" << cluster_mz_max << std::endl;
+        //std::cerr << "im_min : " << cluster_im_min << " im_max :" << cluster_im_max << std::endl;
 
         // Optimization: Check if all points are processed
         if (num_used == points.size()) {
@@ -1402,6 +1601,10 @@ void PeakPickerIM::pickIMCluster(OpenMS::MSSpectrum& spectrum, double ppm_tolera
       spectrum[i].setMZ(p.mz);
       spectrum[i].setIntensity(p.intensity);
       im_data[i] = p.im;
+
+      //std::cerr << "--- Final clustered peaks ---" << std::endl;
+      //std::cerr << "m/z : " << spectrum[i].getMZ() << " intensity : " << spectrum[i].getIntensity() << " im :" << im_data[i] << std::endl;
+
     }
 
     spectrum.sortByPosition();

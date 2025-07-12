@@ -166,11 +166,15 @@ protected:
         {
           if (i >= 1) append_neighbor_peaks(exp[i - 1], 0.5);
           if (i + 1 < static_cast<Int64>(exp.size())) append_neighbor_peaks(exp[i + 1], 0.5);
+          // merge across 5 frames
+          //if (i >= 2) append_neighbor_peaks(exp[i - 2], 0.25);
+          //if (i + 2 < static_cast<Int64>(exp.size())) append_neighbor_peaks(exp[i + 2], 0.25);
         }
         current.sortByPosition(); // optional, to preserve m/z order
       }
 
       // ---- sanity check. Print peaks from raw spectrum and modified spectrum ----
+      /*
       const MSSpectrum& original_spec = exp[50];
       const MSSpectrum& modified_spec = modified_exp[50];
 
@@ -193,6 +197,7 @@ protected:
 
         std::cout << ", float[0]: " << mod_fda[0][i] << std::endl;
       }
+       */
 
 
       // Process each spectrum with PeakPickerIM
