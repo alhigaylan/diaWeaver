@@ -94,8 +94,8 @@ protected:
   {
     registerInputFile_("in", "<file>", "", "Centroided mzML file");
     setValidFormats_("in", ListUtils::create<String>("mzML"));
-    registerOutputFile_("out", "<file>", "", "FeatureXML file with metabolite features");
-    setValidFormats_("out", ListUtils::create<String>("featureXML"));
+    registerOutputFile_("out", "<file>", "", "Output file, either FeatureXML with concise features or ConsensusXML with raw trace info");
+    setValidFormats_("out", ListUtils::create<String>("featureXML,consensusXML"));
 
     registerOutputFile_("out_chrom", "<file>", "", "Optional mzML file with chromatograms", false);
     setValidFormats_("out_chrom", ListUtils::create<String>("mzML"));
@@ -338,23 +338,125 @@ protected:
     // writing output
     //-------------------------------------------------------------
 
-    // annotate output with data processing info
-    addDataProcessing_(feat_map, getProcessingInfo_(DataProcessing::QUANTITATION));
 
-    // annotate "spectra_data" metavalue
-    if (getFlag_("test"))
+    // detect requested output format
+    FileTypes::Type out_type = FileHandler::getTypeByFileName(out);
+
+    if (out_type == FileTypes::FEATUREXML)
     {
-      // if test mode set, add file without path so we can compare it
-      feat_map.setPrimaryMSRunPath({"file://" + File::basename(in)});
+      // annotate "spectra_data" metavalue
+      if (getFlag_("test"))
+      {
+        // if test mode set, add file without path so we can compare it
+        feat_map.setPrimaryMSRunPath({"file://" + File::basename(in)});
+      }
+      else
+      {
+        feat_map.setPrimaryMSRunPath({in}, ms_peakmap);
+      }
+      // annotate output with data processing info
+      addDataProcessing_(feat_map, getProcessingInfo_(DataProcessing::QUANTITATION));
+
+      FileHandler().storeFeatures(out, feat_map, {FileTypes::FEATUREXML});
+    }
+    // ------- new code: write featuresXML as consensusXML.
+    // The output should be similar to MassTraceExtractor except we have charge and isotope labels
+    else if (out_type == FileTypes::CONSENSUSXML)
+    {
+      // build ConsensusMap for monoisotopic traces
+      ConsensusMap consensus_map;
+      if (getFlag_("test"))
+      {
+        consensus_map.setPrimaryMSRunPath({"file://" + File::basename(in)});
+      }
+      else
+      {
+        consensus_map.setPrimaryMSRunPath({in}, ms_peakmap);
+      }
+
+      // 1. Pre-build label → MassTrace map for log(N) lookup
+      std::map<String, const MassTrace*> trace_lookup;
+      for (const auto& tr : m_traces_final)
+      {
+        trace_lookup[tr.getLabel()] = &tr;
+      }
+
+      // 2. Iterate features
+      for (Size i = 0; i < feat_map.size(); ++i)
+      {
+        // Retrieve full feature label
+        String feat_label = feat_map[i].getMetaValue("label");
+        StringList label_tokens;
+        feat_label.split("_", label_tokens);
+        if (label_tokens.empty()) continue;
+
+        // First token is the monoisotopic trace label
+        String mono_label = label_tokens[0];
+
+        // Fast lookup from map (O(log N))
+        auto it = trace_lookup.find(mono_label);
+        if (it == trace_lookup.end()) continue; // no matching trace found
+        const MassTrace& mono_trace = *(it->second);
+
+        // Build ConsensusFeature
+        ConsensusFeature fcons;
+        int peak_idx = 0;
+        for (const Peak2D& peak : mono_trace)
+        {
+          FeatureHandle fh;
+          fh.setRT(peak.getRT());
+          fh.setMZ(peak.getMZ());
+          fh.setIntensity(peak.getIntensity());
+          fh.setUniqueId(++peak_idx);
+          fcons.insert(fh);
+        }
+
+        // Annotate centroid info
+        fcons.setRT(mono_trace.getCentroidRT());
+        fcons.setMZ(mono_trace.getCentroidMZ());
+        fcons.setIntensity(mono_trace.getIntensity(false));
+
+        // Add charge and full hypothesis label
+        fcons.setCharge(feat_map[i].getCharge());
+        fcons.setMetaValue("isotope_labels", feat_label);
+
+        // Estimate quality; optional width if needed
+        fcons.setQuality(1 - (1.0 / mono_trace.getSize()));
+        // fcons.setWidth(mono_trace.estimateFWHM(true)); // enable if desired
+
+        // Optional meta values for mz/IM FWHM
+        if (mono_trace.fwhm_mz_avg > 0)
+        {
+          fcons.setMetaValue(Constants::UserParam::FWHM_MZ_AVG, mono_trace.fwhm_mz_avg);
+        }
+        if (mono_trace.getCentroidIM() > 0)
+        {
+          fcons.setMetaValue(Constants::UserParam::ION_MOBILITY_CENTROID, mono_trace.getCentroidIM());
+        }
+        if (mono_trace.fwhm_im_avg > 0)
+        {
+          fcons.setMetaValue(Constants::UserParam::FWHM_IM_AVG, mono_trace.fwhm_im_avg);
+        }
+
+        consensus_map.push_back(fcons);
+      }
+
+      // Finalize and save ConsensusXML
+      consensus_map.applyMemberFunction(&UniqueIdInterface::setUniqueId);
+      addDataProcessing_(consensus_map, getProcessingInfo_(DataProcessing::QUANTITATION));
+      consensus_map.setUniqueId();
+
+      FileHandler().storeConsensusFeatures(out, consensus_map, {FileTypes::CONSENSUSXML});
     }
     else
     {
-      feat_map.setPrimaryMSRunPath({in}, ms_peakmap);
-    }    
-
-    FileHandler().storeFeatures(out, feat_map, {FileTypes::FEATUREXML});
-  
+      OPENMS_LOG_ERROR << "Output format not recognized. Please specify either .featureXML or .consensusXML for -out." << std::endl;
+      return ILLEGAL_PARAMETERS;
+    }
     return EXECUTION_OK;
+
+
+
   }
 
 };
