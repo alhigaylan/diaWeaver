@@ -780,6 +780,11 @@ namespace OpenMS
       Size iso_pos_max(static_cast<Size>(std::floor(charge * local_mz_range_)));
       for (Size iso_pos = 1; iso_pos <= iso_pos_max; ++iso_pos)
       {
+
+        // Constants
+        //const double neutron_mass = 1.0033548378;  // Da
+        //const double iso_ppm_tolerance = 20.0; // ppm tolerance
+
         //estimate expected m/z window for iso_pos
         Range isotope_window = getTheoreticIsotopicMassWindow_(elements_, iso_pos);
         // Find mass trace that best agrees with current hypothesis of charge
@@ -788,6 +793,22 @@ namespace OpenMS
         Size best_idx(0);
         for (Size mt_idx = last_iso_idx + 1; mt_idx < candidates.size(); ++mt_idx)
         {
+
+          /*
+          // before computing any of the scores -- implement a strict mz pattern cutoff
+          double mono_mz = candidates[0]->getCentroidMZ();
+          double cand_mz = candidates[mt_idx]->getCentroidMZ();
+
+          // Compute expected theoretical m/z shift for this isotope position and charge
+          double expected_shift = (neutron_mass * iso_pos) / charge;
+
+          // Actual observed m/z shift
+          double observed_shift = std::fabs(cand_mz - mono_mz);
+          double ppm_error = std::fabs(observed_shift - expected_shift) / expected_shift * 1e6;
+          // skip loop if isotope position is outside of expected range
+          if (ppm_error > iso_ppm_tolerance) continue;
+           */
+
           // double tmp_iso_rt(candidates[mt_idx]->getCentroidRT());
           // double tmp_iso_mz(candidates[mt_idx]->getCentroidMZ());
           // double tmp_iso_int(candidates[mt_idx]->computePeakArea());
@@ -969,6 +990,8 @@ namespace OpenMS
     // scoring one. Accept them if they do not contain traces that have 
     // already been used by a higher scoring hypothesis.
     // *********************************************************** //
+
+    /*
     std::map<String, bool> trace_excl_map;
     for (Size hypo_idx = 0; hypo_idx < feat_hypos.size(); ++hypo_idx)
     {
@@ -1077,3 +1100,159 @@ namespace OpenMS
   } // end of FeatureFindingMetabo::run
   
 }
+     */
+
+    // ---------- allow trace collision if it uses different isotopes / charge ----
+    std::multimap<String, int> trace_excl_map;
+
+    for (Size hypo_idx = 0; hypo_idx < feat_hypos.size(); ++hypo_idx)
+    {
+      const std::vector<String>& labels = feat_hypos[hypo_idx].getLabels();
+      int current_charge = feat_hypos[hypo_idx].getCharge();
+
+      bool trace_coll = false;
+
+      if (overlapping_features_)
+      {
+        // Only check the *first* label, but allow multiple charges
+        const String& first_label = labels[0];
+
+        auto range = trace_excl_map.equal_range(first_label);
+        for (auto it = range.first; it != range.second; ++it)
+        {
+          if (it->second == current_charge)
+          {
+            // Found same label + same charge → collision
+            trace_coll = true;
+            break;
+          }
+        }
+      }
+      else
+      {
+        // Old behavior: check all labels regardless of charge
+        for (Size lab_idx = 0; lab_idx < labels.size(); ++lab_idx)
+        {
+          auto range = trace_excl_map.equal_range(labels[lab_idx]);
+          if (range.first != range.second)  // label already used
+          {
+            trace_coll = true;
+            break;
+          }
+        }
+      }
+
+      // skip if collision
+      if (trace_coll)
+      {
+        continue;
+      }
+
+      // Accept hypothesis → mark its traces
+      if (overlapping_features_)
+      {
+        // mark only the *first* label + charge
+        trace_excl_map.emplace(labels[0], current_charge);
+      }
+      else
+      {
+        // mark all labels (but still allow multiple charges)
+        for (const auto& lab : labels)
+        {
+          trace_excl_map.emplace(lab, current_charge);
+        }
+      }
+
+
+
+
+
+
+      // Check whether the trace  passes the intensity filter (metabolites
+      // only). This is based on a pre-trained SVM model of isotopic
+      // intensities.
+      int pass_isotope_filter = -1; // -1 == 'did not test'; 0 = no pass; 1 = pass
+      if (isotope_filtering_model_ != "none" && isotope_filtering_model_ != "peptides")
+      {
+        pass_isotope_filter = isLegalIsotopePattern_(feat_hypos[hypo_idx]);
+      }
+
+      // std::cout << "\nlegal iso? " << feat_hypos[hypo_idx].getLabel() << " score: " << feat_hypos[hypo_idx].getScore() << " " << result << std::endl;
+
+      if (pass_isotope_filter == 0) // not passing filter
+      {
+        continue;
+      }
+
+      // filter out single traces if option is set
+      if (remove_single_traces_ && feat_hypos[hypo_idx].getCharge() == 0)
+      {
+        continue;
+      }
+
+      //
+      // Now accept hypothesis
+      //
+
+      Feature f;
+      f.setRT(feat_hypos[hypo_idx].getCentroidRT());
+      f.setMZ(feat_hypos[hypo_idx].getCentroidMZ());
+
+      if (report_summed_ints_)
+      {
+        // f.setIntensity(feat_hypos[hypo_idx].getSummedFeatureIntensity(report_smoothed_intensities_));
+        f.setIntensity(feat_hypos[hypo_idx].getSummedFeatureIntensity(use_smoothed_intensities_));
+      }
+      else
+      {
+        //f.setIntensity(feat_hypos[hypo_idx].getMonoisotopicFeatureIntensity(report_smoothed_intensities_));
+        f.setIntensity(feat_hypos[hypo_idx].getMonoisotopicFeatureIntensity(use_smoothed_intensities_));
+      }
+
+      f.setWidth(feat_hypos[hypo_idx].getFWHM());
+      f.setCharge(feat_hypos[hypo_idx].getCharge());
+      f.setMetaValue(3, feat_hypos[hypo_idx].getLabel());
+      //f.setMetaValue("max_height", feat_hypos[hypo_idx].getMaxIntensity(report_smoothed_intensities_));
+      f.setMetaValue("max_height", feat_hypos[hypo_idx].getMaxIntensity(use_smoothed_intensities_));
+
+      // store isotope intensities
+      //std::vector<double> all_ints(feat_hypos[hypo_idx].getAllIntensities(report_smoothed_intensities_));
+      std::vector<double> all_ints(feat_hypos[hypo_idx].getAllIntensities(use_smoothed_intensities_));
+      f.setMetaValue(Constants::UserParam::NUM_OF_MASSTRACES, all_ints.size());
+      if (report_convex_hulls_) f.setConvexHulls(feat_hypos[hypo_idx].getConvexHulls());
+      f.setOverallQuality(feat_hypos[hypo_idx].getScore());
+      f.setMetaValue("masstrace_intensity", all_ints);
+      f.setMetaValue("masstrace_centroid_rt", feat_hypos[hypo_idx].getAllCentroidRT());
+      f.setMetaValue("masstrace_centroid_mz", feat_hypos[hypo_idx].getAllCentroidMZ());
+      f.setMetaValue("masstrace_centroid_im", feat_hypos[hypo_idx].getAllCentroidIM());
+      f.setMetaValue("isotope_distances", feat_hypos[hypo_idx].getIsotopeDistances());
+      f.setMetaValue("legal_isotope_pattern", pass_isotope_filter);
+      f.applyMemberFunction(&UniqueIdInterface::setUniqueId);
+      output_featmap.push_back(f);
+
+      if (report_chromatograms_ && f.getIntensity() != 0)
+      {
+        output_chromatograms.push_back(feat_hypos[hypo_idx].getChromatograms(f.getUniqueId()));
+      }
+
+
+      if (overlapping_features_)
+      {
+        // ✅ mark only first label with its charge
+        trace_excl_map.emplace(labels[0], current_charge);
+      }
+      else
+      {
+        // ✅ old behavior: mark all labels (still include charge)
+        for (Size lab_idx = 0; lab_idx < labels.size(); ++lab_idx)
+        {
+          trace_excl_map.emplace(labels[lab_idx], current_charge);
+        }
+      }
+
+    }
+    output_featmap.setUniqueId(UniqueIdGenerator::getUniqueId());
+    output_featmap.sortByMZ();
+  } // end of FeatureFindingMetabo::run
+
+  }
