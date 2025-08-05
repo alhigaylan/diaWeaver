@@ -91,8 +91,16 @@ namespace OpenMS
     /// determine sampling rate for linear resampler
     double computeOptimalSamplingRate(const std::vector<MSSpectrum>& spectra);
 
-    /// Sum up the intensity of data points with nearly identical float values
-    void sumFrame_(const MSSpectrum& input_spectrum, MSSpectrum& output_spectrum, double ppm_tolerance = 0.01);
+    /**
+     * @brief Sum up the intensity of data points with nearly identical float values.
+     *
+     * By default, this function assumes the tolerance provided is in parts per million.
+     * But it can be adjusted to use absolute value tolerance.
+     * @param input Sorted raw spectrum with duplicate peaks due to scan merging or presence of ion mobility data.
+     * @param tolerance Mass tolerance between peaks
+     * * @param use_ppm Whether to use parts per million tolerance. If set to False, absolute tolerance will be used.
+     */
+    void sumFrame_(const MSSpectrum& input_spectrum, MSSpectrum& output_spectrum, double tolerance = 0.01, bool use_ppm = true);
 
     /// Compute lower and upper m/z bounds based on ppm
     std::pair<double, double> ppmBounds(double mz, double ppm);

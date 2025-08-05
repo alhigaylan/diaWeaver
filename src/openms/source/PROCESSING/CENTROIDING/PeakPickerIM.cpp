@@ -46,10 +46,10 @@ namespace OpenMS
       for (size_t s = 0; s < spectra.size(); ++s)
       {
         const MSSpectrum& spectrum = spectra[s];
-        // The spectrum could have multiple peaks at the same x position.
+        // The spectrum could have multiple ion mobility peaks at the same x position.
         // Sum the peak intensity
         MSSpectrum summed_trace;
-        sumFrame_(spectrum, summed_trace, 7000.0);
+        sumFrame_(spectrum, summed_trace, 0.0006, false);
 
         if (summed_trace.size() < 20)
         {
@@ -143,13 +143,17 @@ namespace OpenMS
       return std::make_pair(low, high);
     }
 
-    // PRECONDITION: input_spectrum is sorted by m/z
+    // PRECONDITION: input_spectrum is sorted by position (m/z peak or ion mobility)
     // This function sums peaks if they are nearly identical
     // OpenMS represents TimsTOF data in MSSpectrum() objects as one-array.
-    // There could be multiple 500.0 m/z peaks with different ion mobility values.
-    // Peak picking (such as HiRes) will not work properly if there are multiple y measurements at a given x m/z position.
+    // Example: There could be multiple 500.0 m/z peaks with different ion mobility values.
+    // Example2: extracted mobilogram could have multiple 0.88 1/k values from different m/z peaks.
+    // Peak picking (such as HiRes) will not work properly if there are multiple y measurements at a given x position.
     // Note: does not clear the output_spectrum but add peaks to it (required for fast padding)
-    void PeakPickerIM::sumFrame_(const MSSpectrum& input_spectrum, MSSpectrum& output_spectrum, double ppm_tolerance)
+    void PeakPickerIM::sumFrame_(const MSSpectrum& input_spectrum,
+                                 MSSpectrum& output_spectrum,
+                                 double tolerance,
+                                 bool use_ppm)
     {
       if (input_spectrum.empty()) return;
 
@@ -164,9 +168,11 @@ namespace OpenMS
         double next_intensity = input_spectrum[i].getIntensity();
 
         double delta_mz = std::abs(next_mz - current_mz);
-        double ppm_diff = (delta_mz / current_mz) * 1e6;
+        bool within_tolerance = use_ppm
+                                  ? ((delta_mz / current_mz) * 1e6 <= tolerance)
+                                  : (delta_mz <= tolerance);
 
-        if (ppm_diff <= ppm_tolerance)
+        if (within_tolerance)
         {
           current_intensity += next_intensity;
         }
@@ -460,7 +466,7 @@ namespace OpenMS
            
           // Clear the spectrum for reuse
           raw_mz_peaks.clear(true);
-          sumFrame_(raw_peaks_within_bounds, raw_mz_peaks, 0.1);
+          sumFrame_(raw_peaks_within_bounds, raw_mz_peaks, 0.1, true);
           if (raw_mz_peaks.empty())
           {
             OPENMS_LOG_DEBUG << "No data in raw_mz_peaks for picked IM peak " << j << "!" << std::endl;
@@ -737,7 +743,7 @@ namespace OpenMS
       // First, we project all timsTOF peaks into the m/z axis using sumFrame_
       // The ppm tolerance is a dynamic way of testing m/z floats being almost identical. Set it to 0.1 ppm
       MSSpectrum summed_spectrum;
-      sumFrame_(spectrum, summed_spectrum, 0.1);
+      sumFrame_(spectrum, summed_spectrum, 0.1, true);
 #ifdef DEBUG_PICKER
       std::cout << "Spectrum after sumFrame_ has " << summed_spectrum.size() << " peaks." << std::endl;
 #endif
@@ -822,11 +828,16 @@ namespace OpenMS
         std::cout << "\n--- Processing Trace " << i << " ---\n";
         std::cout << "Original trace has " << trace.size() << " peaks." << std::endl;
 #endif
-        // --- Step 1b: Sum peaks that are too close ---
+        // --- Step 1b: Sum ion mobility peaks that are too close ---
+        // This step is needed to prevent downstream processes from breaking (resampling, smoothing, peak picking).
+        // Example: if raw sampling rate is 0.0012 1/k -- then ion mobility peak 0.8800 1/k and 0.8806 1/k should be combined.
+        // Use 0.0006 1/k as default. Users are recommended to not adjust this parameter unless they are using a different
+        // ion mobility ramp time.
+
         MSSpectrum summed_trace;
         summed_trace.reserve(trace.size() + 1);
         summed_trace.emplace_back(-1.0, -1.0); // add now as we need an entry for padding later (faster than insert at front)
-        sumFrame_(trace, summed_trace, 7000.0); // 7000 ppm tolerance (temporary. Change function to accept absolute number)
+        sumFrame_(trace, summed_trace, 0.0006, false);
 #ifdef DEBUG_PICKER
         std::cout << "Trace after sumFrame_ has " << summed_trace.size() << " peaks." << std::endl;
 #endif
