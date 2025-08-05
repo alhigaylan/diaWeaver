@@ -335,6 +335,14 @@ public:
     {
       mz_cache_ms1.push_back(MS1_feature_map[i].getMZ());
     }
+    // Cache MS2 m/z values
+    std::vector<double> mz_cache_ms2;
+    mz_cache_ms2.reserve(MS2_feature_map.size());
+    for (Size i = 0; i < MS2_feature_map.size(); ++i)
+    {
+      mz_cache_ms2.push_back(MS2_feature_map[i].getMZ());
+    }
+
     // cache the ion mobility of each MS1 feature
     std::vector< double > im_cache_ms1;
     for (Size i = 0; i < MS1_feature_map.size(); ++i)
@@ -400,7 +408,12 @@ public:
 
         // Also check for ion mobility. For now, hard code it as ± 0.02
         double im_tolerance = 0.01;
-        if (fabs(im_cache_ms1[i] - im_cache_ms2[j]) > im_tolerance) continue;
+        //if (fabs(im_cache_ms1[i] - im_cache_ms2[j]) > im_tolerance) continue;
+        if (fabs(im_cache_ms1[i] - im_cache_ms2[j]) > im_tolerance ||
+            (mz_cache_ms2[j] >= swath_lower && mz_cache_ms2[j] <= swath_upper))
+        {
+          continue;
+        }
 
 #ifdef DEBUG_MASSTRACES
         for (Size kk=0; kk<f1_points.size(); kk++)
@@ -540,19 +553,20 @@ public:
       // ---- NEW addition. Check if spectrum is above 500. Filter by pearson corr ----
       std::vector<std::pair<Size, double>> assignment_scores;
       // for now ignore filtering by top 500
+      /*
       assignment_scores.clear();
       for (Size idx = 0; idx < ms1_assignment_map[i].size(); ++idx)
       {
         assignment_scores.emplace_back(idx, feature_attributes[i][idx][3]);
       }
+       */
 
-        /*
       for (Size idx = 0; idx < ms1_assignment_map[i].size(); ++idx)
       {
         assignment_scores.emplace_back(idx, feature_attributes[i][idx][3]); // 3 = pearson_score
       }
 
-      if (assignment_scores.size() > 300)
+      if (assignment_scores.size() > 500)
       {
         std::sort(assignment_scores.begin(), assignment_scores.end(),
                   [](const std::pair<Size, double>& a, const std::pair<Size, double>& b)
@@ -560,7 +574,7 @@ public:
                     return a.second > b.second;
                   });
 
-        assignment_scores.resize(300); // keep only top 300
+        assignment_scores.resize(500); // keep only top 500
       }
       else
       {
@@ -570,7 +584,7 @@ public:
         {
           assignment_scores.emplace_back(idx, feature_attributes[i][idx][3]);
         }
-      }*/
+      }
 
       // Now build spectrum
       for (const auto& [assignment_idx, pearson] : assignment_scores)
