@@ -702,6 +702,13 @@ namespace OpenMS
       p.setValue("missing", 0, "Maximum number of missing points allowed when extending a peak to the left or to the right. A missing data point occurs if the spacing between two subsequent data points exceeds 'spacing_difference * min_spacing'. 'min_spacing' is the smaller of the two spacings from the peak apex to its two neighboring points. Not applicable to chromatograms.");
       p.setValue("report_FWHM", "true");
       p.setValue("report_FWHM_unit", "absolute");
+
+      p.setValue("sum_tolerance_mz", 0.1, "Tolerance for summing adjacent m/z peaks in ppm.");
+      p.setValue("gauss_ppm_tolerance", 5.0, "Gaussian smoothing m/z tolerance in ppm.");
+      p.setValue("sum_tolerance_im", 0.0006, "Tolerance for summing adjacent ion mobility peaks in 1/k0.");
+      p.setValue("sgolay_frame_length", 5, "Savitzky-Golay smoothing frame length.");
+      p.setValue("sgolay_polynomial_order", 3, "Savitzky-Golay smoothing polynomial order.");
+      p.setValue("padding_points", 15, "Number of padding points for mobilograms.");
       return p;
     }
     void PeakPickerIM::updateMembers_()
@@ -743,7 +750,8 @@ namespace OpenMS
       // First, we project all timsTOF peaks into the m/z axis using sumFrame_
       // The ppm tolerance is a dynamic way of testing m/z floats being almost identical. Set it to 0.1 ppm
       MSSpectrum summed_spectrum;
-      sumFrame_(spectrum, summed_spectrum, 0.1, true);
+      double tol_mz = (double)parameters_.getValue("sum_tolerance_mz");
+      sumFrame_(spectrum, summed_spectrum, tol_mz, true);
 #ifdef DEBUG_PICKER
       std::cout << "Spectrum after sumFrame_ has " << summed_spectrum.size() << " peaks." << std::endl;
 #endif
@@ -753,11 +761,11 @@ namespace OpenMS
 #endif
       GaussFilter gauss_filter;
 
-      // Set Gaussian filter parameters. 5 ppm m/z is good approximation (make this a user parameter!)
+      // Set Gaussian filter parameters.
+      double gauss_tol = (double)parameters_.getValue("gauss_ppm_tolerance");
       Param gauss_params;
-      gauss_params.setValue("ppm_tolerance", 5.0);
+      gauss_params.setValue("ppm_tolerance", gauss_tol);
       gauss_params.setValue("use_ppm_tolerance", "true");
-
       gauss_filter.setParameters(gauss_params);
       gauss_filter.filter(summed_spectrum);
 #ifdef DEBUG_PICKER
@@ -775,10 +783,8 @@ namespace OpenMS
       hirez_mz_p.setValue("signal_to_noise", 0.0);
       hirez_mz_p.setValue("report_FWHM", "true");
       hirez_mz_p.setValue("report_FWHM_unit", "relative");
-
       picker.setParameters(hirez_mz_p);
       MSSpectrum picked_spectrum;
-
       picker.pick(summed_spectrum, picked_spectrum);
 #ifdef DEBUG_PICKER
       std::cout << "Size of picked spectrum: " << picked_spectrum.size() << std::endl;
@@ -793,8 +799,8 @@ namespace OpenMS
       // Add a parameter to allow user to control sampling). Here we simply multiply by 4.
       double sampling_rate = computeOptimalSamplingRate(mobilogram_traces) * 1;
       Param resampler_param;
-      resampler_param.setValue("spacing", sampling_rate, "Spacing of the resampled output peaks.");
-      resampler_param.setValue("ppm", "false", "Whether spacing is in ppm or Th");
+      resampler_param.setValue("spacing", sampling_rate);
+      resampler_param.setValue("ppm", "false");
 
 #ifdef DEBUG_PICKER
       std::cout << "Using sampling rate... : " << sampling_rate << std::endl;
@@ -812,6 +818,10 @@ namespace OpenMS
       }
 #endif
       vector<MSSpectrum> picked_traces;
+      double tol_im = (double)parameters_.getValue("sum_tolerance_im");
+      int padding_pts = (int)parameters_.getValue("padding_points");
+      int sg_frame_len = (int)parameters_.getValue("sgolay_frame_length");
+      int sg_poly_order = (int)parameters_.getValue("sgolay_polynomial_order");
 
 
       // TODO: check why there are so many mobilogram_traces that are empty. leads to segfault later
@@ -836,8 +846,8 @@ namespace OpenMS
 
         MSSpectrum summed_trace;
         summed_trace.reserve(trace.size() + 1);
-        summed_trace.emplace_back(-1.0, -1.0); // add now as we need an entry for padding later (faster than insert at front)
-        sumFrame_(trace, summed_trace, 0.0006, false);
+        summed_trace.emplace_back(-1.0, -1.0);
+        sumFrame_(trace, summed_trace, tol_im, false);
 #ifdef DEBUG_PICKER
         std::cout << "Trace after sumFrame_ has " << summed_trace.size() << " peaks." << std::endl;
 #endif
@@ -879,36 +889,13 @@ namespace OpenMS
           std::cout << "m/z: " << peak.getMZ() << ", intensity: " << peak.getIntensity() << std::endl;
         }
 #endif
-        /*
-        // --- Step 3b: Apply Gaussian Smoothing ---
-        std::cout << "Applying Gaussian smoothing..." << std::endl;
-
-        GaussFilter gauss_filter_2;
-        Param gauss_params;
-        gauss_params.setValue("gaussian_width", 0.005);
-        gauss_params.setValue("use_ppm_tolerance", "false"); // or "true" for ppm-based width
-
-        gauss_filter_2.setParameters(gauss_params);
-        gauss_filter_2.filter(summed_trace);
-
-#ifdef DEBUG_PICKER
-        std::cout << "Trace after Gaussian smoothing has " << summed_trace.size() << " peaks." << std::endl;
-        for (const auto& peak : summed_trace)
-        {
-          std::cout << "m/z: " << peak.getMZ() << ", intensity: " << peak.getIntensity() << std::endl;
-        }
-#endif
-        */
-
 
         // --- Step 3b: Apply SGolay Smoothing ---
         SavitzkyGolayFilter sgolay_filter;
         Param sgolay_params;
-
-        sgolay_params.setValue("frame_length", 5);
-        sgolay_params.setValue("polynomial_order", 3);
+        sgolay_params.setValue("frame_length", sg_frame_len);
+        sgolay_params.setValue("polynomial_order", sg_poly_order);
         sgolay_filter.setParameters(sgolay_params);
-
         sgolay_filter.filter(summed_trace);
 
 #ifdef DEBUG_PICKER

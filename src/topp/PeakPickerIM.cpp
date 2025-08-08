@@ -36,6 +36,36 @@ protected:
 
     registerStringOption_("method", "<name>", "", "Method to pick peaks in IM dimension", false, true);
     setValidStrings_("method", { "mobilogram", "cluster", "traces" } );
+
+    // --- pickIMTraces parameters ---
+    registerDoubleOption_("pickIMTraces:sum_tolerance_mz", "<num>", 0.1,
+                          "Tolerance for summing adjacent m/z peaks (ppm)", false);
+    registerDoubleOption_("pickIMTraces:gauss_ppm_tolerance", "<num>", 5.0,
+                          "Gaussian smoothing m/z tolerance in ppm", false);
+    registerDoubleOption_("pickIMTraces:sum_tolerance_im", "<num>", 0.0006,
+                          "Tolerance for summing adjacent ion mobility peaks (1/k0)", false);
+    registerIntOption_("pickIMTraces:sgolay_frame_length", "<num>", 5,
+                       "Savitzky-Golay smoothing frame length", false);
+    registerIntOption_("pickIMTraces:sgolay_polynomial_order", "<num>", 3,
+                       "Savitzky-Golay smoothing polynomial order", false);
+    registerIntOption_("pickIMTraces:padding_points", "<num>", 15,
+                       "Padding points on each side for mobilograms", false);
+
+    // --- pickIMCluster parameters ---
+    registerDoubleOption_("pickIMCluster:ppm_tolerance", "<num>", 10.0,
+                          "m/z tolerance in ppm for clustering", false);
+    registerDoubleOption_("pickIMCluster:im_tolerance", "<num>", 0.0006,
+                          "Ion mobility tolerance for clustering", false);
+
+    // --- pickIMElutionProfiles parameters ---
+    registerDoubleOption_("pickIMElutionProfiles:noise_threshold_int", "<num>", 0.1,
+                          "Noise threshold for elution profile detection", false);
+    registerDoubleOption_("pickIMElutionProfiles:chrom_fwhm", "<num>", 0.01,
+                          "Chromatographic FWHM for elution peak detection", false);
+    registerDoubleOption_("pickIMElutionProfiles:min_fwhm", "<num>", -1.0,
+                          "Minimum allowed chromatographic FWHM", false);
+    registerDoubleOption_("pickIMElutionProfiles:max_fwhm", "<num>", 1e6,
+                          "Maximum allowed chromatographic FWHM", false);
   }
 
     /**
