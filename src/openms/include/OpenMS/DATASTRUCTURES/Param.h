@@ -266,7 +266,7 @@ protected:
 
       @exception Exception::ElementNotFound is thrown if the parameter does not exists.
     */
-    const ParamValue& getValue(const std::string& key) const;
+    const String getValue(const std::string& key) const;
 
     /**
       @brief Returns the type of a parameter.

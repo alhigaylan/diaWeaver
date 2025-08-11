@@ -54,18 +54,12 @@ protected:
     // --- pickIMCluster parameters ---
     registerDoubleOption_("pickIMCluster:ppm_tolerance", "<num>", 10.0,
                           "m/z tolerance in ppm for clustering", false);
-    registerDoubleOption_("pickIMCluster:im_tolerance", "<num>", 0.0006,
-                          "Ion mobility tolerance for clustering", false);
+    registerDoubleOption_("pickIMCluster:im_tolerance", "<num>", 0.1,
+                          "Ion mobility tolerance in 1/k for clustering", false);
 
-    // --- pickIMElutionProfiles parameters ---
-    registerDoubleOption_("pickIMElutionProfiles:noise_threshold_int", "<num>", 0.1,
-                          "Noise threshold for elution profile detection", false);
-    registerDoubleOption_("pickIMElutionProfiles:chrom_fwhm", "<num>", 0.01,
-                          "Chromatographic FWHM for elution peak detection", false);
-    registerDoubleOption_("pickIMElutionProfiles:min_fwhm", "<num>", -1.0,
-                          "Minimum allowed chromatographic FWHM", false);
-    registerDoubleOption_("pickIMElutionProfiles:max_fwhm", "<num>", 1e6,
-                          "Maximum allowed chromatographic FWHM", false);
+    // --- pickIMElutionProfiles  ---
+    registerDoubleOption_("pickIMElutionProfiles:ppm_tolerance", "<ppm>", 10.0,
+                          "Mass trace m/z tolerance in ppm.", false);
   }
 
     /**
@@ -89,7 +83,7 @@ protected:
         PeakPickerIM::pickIMCluster(spectrum, 50.0, 0.08);
       }
       else if (method_ == "traces")
-      {    
+      {
         PeakPickerIM::pickIMElutionProfiles(spectrum, 50.0);
       }
     }
@@ -130,7 +124,13 @@ protected:
     String process_option = getStringOption_("processOption");
     String method = getStringOption_("method");
 
+    double cluster_ppm = getDoubleOption_("pickIMCluster:ppm_tolerance");
+    double cluster_im  = getDoubleOption_("pickIMCluster:im_tolerance");
+    double traces_ppm  = getDoubleOption_("pickIMElutionProfiles:ppm_tolerance");
+
+    // pull PeakIMTraces parameters
     PeakPickerIM picker;
+    Param pickimtr_params = getParam_().copy("pickIMTraces:", /*remove_prefix=*/true);
     if (process_option == "lowmemory")
     {
       return doLowMemAlgorithm(method, picker, input_file, output_file); // TODO: needs parallelization
@@ -155,11 +155,14 @@ protected:
         }
         else if (method == "cluster")
         {
-          PeakPickerIM::pickIMCluster(spectrum, 100.0, 0.08);
+          const double ppm_tol = getDoubleOption_("pickIMCluster:ppm_tolerance");
+          const double im_tol  = getDoubleOption_("pickIMCluster:im_tolerance");
+          PeakPickerIM::pickIMCluster(spectrum, cluster_ppm, cluster_im);
         }
         else if (method == "traces")
-        {    
-          PeakPickerIM::pickIMElutionProfiles(spectrum, 100.0);
+        {
+          double ppm_tol = getDoubleOption_("pickIMElutionProfiles:ppm_tolerance");
+          PeakPickerIM::pickIMElutionProfiles(spectrum, ppm_tol);
         }
         OPENMS_LOG_DEBUG << "Processed spectrum has " << spectrum.size() << " centroided IM peaks." << std::endl;
       }

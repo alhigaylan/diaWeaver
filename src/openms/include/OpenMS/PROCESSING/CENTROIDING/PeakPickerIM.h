@@ -10,6 +10,7 @@
 
 #include <OpenMS/KERNEL/MSSpectrum.h>
 #include <OpenMS/DATASTRUCTURES/Param.h>
+#include <OpenMS/DATASTRUCTURES/DefaultParamHandler.h>
 
 namespace OpenMS
 {
@@ -18,23 +19,24 @@ namespace OpenMS
 
   @ingroup PeakPicking
       */
-  class OPENMS_DLLAPI PeakPickerIM
+  class OPENMS_DLLAPI PeakPickerIM : public DefaultParamHandler
   {
   public:
     /// Default constructor initializing parameters with default values.
     PeakPickerIM();
 
     /// Destructor.
-    virtual ~PeakPickerIM();
+    ~PeakPickerIM() override = default;
 
     /// Picks ion mobility traces from the given spectrum.
     void pickIMTraces(MSSpectrum& spectrum);
 
     /// Sets the parameters for peak picking.
-    void setParameters(const Param& param);
+    using DefaultParamHandler::setParameters;
+    using DefaultParamHandler::getParameters;
 
     /// Gets the current parameters.
-    Param getParameters() const;
+    //Param getParameters() const;
 
         /**
      * @brief Converts an ion mobility frame to a single spectrum with averaged IM values
@@ -79,7 +81,7 @@ namespace OpenMS
 
   protected:
     /// Updates internal member variables when parameters are changed.
-    void updateMembers_();
+    void updateMembers_() override;
 
     /// Returns the default parameters.
     Param getDefaultParameters() const;
@@ -115,6 +117,15 @@ namespace OpenMS
     /// compute m/z and ion mobility centers for picked traces. Returns centroided spectrum.
     MSSpectrum computeCentroids_(const std::vector<MSSpectrum>& mobilogram_traces,
                               const std::vector<MSSpectrum>& picked_traces);
+
+    // PickIMTraces parameters
+    // cached values (no Param lookups inside hot loops)
+    double sum_tolerance_mz_{0.1};
+    double gauss_ppm_tolerance_{5.0};
+    double sum_tolerance_im_{0.0006};
+    int    sgolay_frame_length_{5};
+    int    sgolay_polynomial_order_{3};
+    int    padding_points_{15};
   };
 
 } // namespace OpenMS
