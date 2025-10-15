@@ -371,10 +371,26 @@ namespace OpenMS
     // *********************************************************************
 
     double scan_time(mt.getAverageMS1CycleTime());
+    //std::cerr << "averags ms1 cycle time of trace " << mt.getLabel() << " is.. " << mt.getAverageMS1CycleTime() << std::endl;
     Size win_size = std::ceil(chrom_fwhm_ / scan_time);
+    //std::cerr << "calculated window size of trace " << mt.getLabel() << " is.. " << win_size << std::endl;
 
     // add smoothed data (original data is still accessible)
     smoothData(mt, static_cast<Int>(win_size));
+
+    // Access smoothed intensities
+    //const std::vector<double>& smoothed_print = mt.getSmoothedIntensities();
+
+    /*
+    // Print both raw and smoothed together
+    std::cerr << "\nRaw vs Smoothed intensities:" << std::endl;
+    for (Size i = 0; i < mt.getSize(); ++i)
+    {
+      double raw_int = mt[i].getIntensity();
+      double smoothed_int = (i < smoothed_print.size()) ? smoothed_print[i] : -1.0;
+      std::cerr << mt[i].getRT() << "\t" << raw_int << "\t" << smoothed_int << std::endl;
+    }
+    */
 
 #ifdef DEBUG_EPD
     Size i = 0;
@@ -395,6 +411,21 @@ namespace OpenMS
     // *********************************************************************
     std::vector<Size> maxes, mins;
     findLocalExtrema(mt, win_size / 2, maxes, mins);
+
+    // --- Print minima ---
+    //std::cerr << "\nLocal minima (index, RT, intensity):" << std::endl;
+    /*
+    for (Size idx : mins)
+    {
+      if (idx < mt.getSize())
+      {
+        std::cerr << idx << "\t"
+                  << mt[idx].getRT() << "\t"
+                  << mt[idx].getIntensity() << std::endl;
+      }
+    }
+     */
+
 
 #ifdef DEBUG_EPD
     std::cout << "findLocalExtrema returned: maxima " << maxes.size() << " / minima " << mins.size() << std::endl;
@@ -450,19 +481,24 @@ namespace OpenMS
         }
 
       }
+//      std::cerr << "------- mass trace " << mt.getLabel() << " was not split because only 1 maxima was found! -------" << std::endl;
     }
+
     else if (maxes.empty())
     {
+//      std::cerr << "------- mass trace " << mt.getLabel() << " Had no Maxima! Will not be written -------" << std::endl;
       return;
     }
     else // split mt to sub-traces
     {
+//      std::cerr << "------- mass trace " << mt.getLabel() << " is getting split! -------" << std::endl;
       MassTrace::const_iterator cp_it = mt.begin();
       Size last_idx(0);
 
       // add last data point as last minimum (to grep the last chunk of the MT)
       mins.push_back(mt.getSize() - 1);
 
+//      std::cerr << "iterating through minima.. " << std::endl;
       for (Size min_idx = 0; min_idx < mins.size(); ++min_idx)
       {
 
@@ -482,6 +518,22 @@ namespace OpenMS
         // Create new mass trace, copy smoothed intensities
         MassTrace new_mt(tmp_mt);
         new_mt.setSmoothedIntensities(smoothed_tmp);
+
+        /*
+        std::cerr << "print new split trace peaks... " << std::endl;
+        // Access smoothed intensities
+        const std::vector<double>& smoothed_print_2 = new_mt.getSmoothedIntensities();
+
+        // Print both raw and smoothed together
+        std::cerr << "\nRaw vs Smoothed intensities:" << std::endl;
+        for (Size i = 0; i < new_mt.getSize(); ++i)
+        {
+          double raw_int = new_mt[i].getIntensity();
+          double smoothed_int = (i < smoothed_print_2.size()) ? smoothed_print_2[i] : -1.0;
+          std::cerr << new_mt[i].getRT() << "\t" << raw_int << "\t" << smoothed_int << std::endl;
+        }
+         */
+
         // copy ion mobility centroid and peak fwhm to split traces
 //        new_mt.centroid_im_ = mt.centroid_im_;
         new_mt.setCentroidIM(mt.getCentroidIM());
@@ -500,6 +552,7 @@ namespace OpenMS
           double act_fwhm(new_mt.estimateFWHM(true));
           if (act_fwhm < min_fwhm_ || act_fwhm > max_fwhm_)
           {
+            //std::cerr << "Failed mass trace length crietiera " << std::endl;
             pw_ok = false;
           }
         }
@@ -511,6 +564,7 @@ namespace OpenMS
         {
           if (computeApexSNR(mt) < chrom_peak_snr_)
           {
+            //std::cerr << "failed SNR criteria.. " << std::endl;
             snr_ok = false;
           }
         }
@@ -525,6 +579,7 @@ namespace OpenMS
           new_mt.setQuantMethod(mt.getQuantMethod());
           if (pw_filtering_ != "fixed")
           {
+            //std::cerr << "split trace passed all checks. New label is " << new_mt.getLabel() << std::endl;
             new_mt.estimateFWHM(true);
           }
 
@@ -535,6 +590,22 @@ namespace OpenMS
             single_mtraces.push_back(new_mt);
           }
         }
+      // *** New addition ***
+      // Currently, EPD only includes the split point minima in the trace eluting earlier (located to the left)
+      // This can leaves the trace eluting later (located to the right) with an apex point at the very start.
+      // Trace peak FWHM will end up being zero. Default parameters filtering based on FWHM will discard peaks with FWHM = 0.0
+      //
+      // I propose setting iterator back by one to ensure the split point minima is included in the left and right trace.
+
+      if (min_idx + 1 < mins.size())
+      {
+        if (last_idx > 0)
+        {
+          --last_idx;  // step back to the boundary minimum
+          --cp_it;     // iterator follows
+        }
+      }
+      // end of new addition
       }
 
     }

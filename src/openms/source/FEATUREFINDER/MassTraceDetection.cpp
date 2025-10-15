@@ -351,6 +351,9 @@ namespace OpenMS
         apex_peak.setRT(work_exp[apex_scan_idx].getRT());
         apex_peak.setMZ(work_exp[apex_scan_idx][apex_peak_idx].getMZ());
         apex_peak.setIntensity(work_exp[apex_scan_idx][apex_peak_idx].getIntensity());
+        //std::cerr << "------- mass trace seed mz:  " << apex_peak.getMZ() << std::endl;
+        //std::cerr << "------- mass trace seed inty:  " << apex_peak.getIntensity() << std::endl;
+        //std::cerr << "------- mass trace seed rt:  " << apex_peak.getRT() << std::endl;
 
         Size trace_up_idx(apex_scan_idx);
         Size trace_down_idx(apex_scan_idx);
@@ -411,6 +414,7 @@ namespace OpenMS
           // *********************************************************** //
           if ((trace_down_idx > 0) && toggle_down)
           {
+            //std::cerr << "Moving down..." << std::endl;
             const MSSpectrum& spec_trace_down = work_exp[trace_down_idx - 1];
             if (! spec_trace_down.empty())
             {
@@ -462,7 +466,12 @@ namespace OpenMS
                       next_down_peak_im = im_value;
                     }                    
                   }
-                }                              
+                }
+                //std::cerr << "The best candidate peak moving down.." << std::endl;
+                //std::cerr << "m/z: " << next_down_peak_mz
+                //          << "  -  im: " << next_down_peak_im
+                //          << "  -  intensity: " << next_down_peak_int
+                //          << std::endl;
               }
 
               // If the peak is within acceptable bounds and not visited, add peak to mass trace
@@ -470,6 +479,7 @@ namespace OpenMS
                   && (!has_centroid_im_ || (next_down_peak_im <= right_bound_im && next_down_peak_im >= left_bound_im))
                   && ! peak_visited[spec_offsets[trace_down_idx - 1] + next_down_peak_idx])
               {
+                //std::cerr << "--The peak was accepted!--" << std::endl;
                 Peak2D next_peak;
                 next_peak.setRT(spec_trace_down.getRT());
                 next_peak.setMZ(next_down_peak_mz);
@@ -501,7 +511,9 @@ namespace OpenMS
                 ++down_hitting_peak;
                 conseq_missed_peak_down = 0;
               }
-              else { ++conseq_missed_peak_down; }
+              else { ++conseq_missed_peak_down;
+              //std::cerr << "--The peak was REJECTED!--" << std::endl;
+              }
             }
 
             --trace_down_idx;
@@ -526,6 +538,7 @@ namespace OpenMS
 
           if ((trace_up_idx < work_exp.size() - 1) && toggle_up)
           {
+           // std::cerr << "Moving up..." << std::endl;
             const MSSpectrum& spec_trace_up = work_exp[trace_up_idx + 1];
             if (! spec_trace_up.empty())
             {
@@ -575,7 +588,12 @@ namespace OpenMS
                       next_up_peak_im = im_value;
                     }
                   }
-                }                              
+                }
+                //std::cerr << "The best candidate peak moving up.." << std::endl;
+                //std::cerr << "m/z: " << next_up_peak_mz
+                //          << "  -  im: " << next_up_peak_im
+                //          << "  -  intensity: " << next_up_peak_int
+                //          << std::endl;
               }
 
               // Unified peak acceptance logic
@@ -583,6 +601,7 @@ namespace OpenMS
                   && (!has_centroid_im_ || (next_up_peak_im <= right_bound_im && next_up_peak_im >= left_bound_im))
                   && ! peak_visited[spec_offsets[trace_up_idx + 1] + next_up_peak_idx])
               {
+                //std::cerr << "--The peak was accepted!--" << std::endl;
                 Peak2D next_peak;
                 next_peak.setRT(spec_trace_up.getRT());
                 next_peak.setMZ(next_up_peak_mz);
@@ -608,7 +627,9 @@ namespace OpenMS
                 ++up_hitting_peak;
                 conseq_missed_peak_up = 0;
               }
-              else { ++conseq_missed_peak_up; }
+              else { ++conseq_missed_peak_up;
+                //std::cerr << "--The peak was REJECTED!--" << std::endl;
+              }
             }
 
             ++trace_up_idx;
@@ -661,6 +682,7 @@ namespace OpenMS
           // new_trace.setCentroidSD(ftl_sd);
           new_trace.updateWeightedMZsd();
           new_trace.setLabel("T" + String(trace_number));
+          //std::cerr << "------- Formed a new Trace with label  " << new_trace.getLabel() << std::endl;
           ++trace_number;
 
           found_masstraces.push_back(new_trace);
