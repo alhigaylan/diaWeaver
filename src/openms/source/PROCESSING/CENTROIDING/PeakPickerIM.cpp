@@ -458,7 +458,7 @@ namespace OpenMS
 
           // Clear the spectrum for reuse
           raw_mz_peaks.clear(true);
-          sumFrame_(raw_peaks_within_bounds, raw_mz_peaks, 0.1, true);
+          sumFrame_(raw_peaks_within_bounds, raw_mz_peaks, sum_tolerance_mz_, true);
           if (raw_mz_peaks.empty())
           {
             OPENMS_LOG_DEBUG << "No data in raw_mz_peaks for picked IM peak " << j << "!\n";
