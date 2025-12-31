@@ -104,7 +104,7 @@ protected:
    * @param[in] mtd_param MassTraceDetection parameters
    * @param[in] epd_param ElutionPeakDetection parameters
    * @param[in] ffm_param FeatureFindingMetabo parameters
-   * @param[out] feat_map Output feature map
+   * @param[out] feat_map Output feature map as featureXML or ConsensusXML
    * @param[out] feat_chromatograms Output chromatograms (if enabled)
    * @return True on success, false on error
    */
@@ -114,7 +114,8 @@ protected:
                         Param epd_param,
                         Param ffm_param,
                         FeatureMap& feat_map,
-                        std::vector<std::vector<OpenMS::MSChromatogram>>& feat_chromatograms)
+                        std::vector<std::vector<OpenMS::MSChromatogram>>& feat_chromatograms,
+                        std::vector<MassTrace>& traces_final_out)
   {
     // make sure the spectra are sorted by m/z
     ms_peakmap.sortSpectra(true);
@@ -166,6 +167,7 @@ protected:
         ffm_param.setValue("use_smoothed_intensities", "false");
       }
     }
+    traces_final_out = m_traces_final;
 
     //-------------------------------------------------------------
     // configure and run feature finding
@@ -210,8 +212,8 @@ protected:
   {
     registerInputFile_("in", "<file>", "", "Centroided mzML file");
     setValidFormats_("in", ListUtils::create<String>("mzML"));
-    registerOutputFile_("out", "<file>", "", "FeatureXML file with metabolite features");
-    setValidFormats_("out", ListUtils::create<String>("featureXML"));
+    registerOutputFile_("out", "<file>", "", "Output file, either FeatureXML with concise features or ConsensusXML with raw trace info");
+    setValidFormats_("out", ListUtils::create<String>("featureXML,consensusXML"));
 
     registerOutputFile_("out_chrom", "<file>", "", "Optional mzML file with chromatograms", false);
     setValidFormats_("out_chrom", ListUtils::create<String>("mzML"));
@@ -341,6 +343,8 @@ protected:
 
     FeatureMap feat_map;
     std::vector<std::vector<OpenMS::MSChromatogram>> feat_chromatograms;
+    // output mass traces for consensusXML file output
+    std::vector<MassTrace> all_traces_final;
 
     // Process each FAIMS CV group (or single group for non-FAIMS data)
     for (auto& [group_cv, faims_group] : faims_groups)
@@ -353,9 +357,10 @@ protected:
       // Process this group
       FeatureMap feat_map_cv;
       std::vector<std::vector<OpenMS::MSChromatogram>> feat_chromatograms_cv;
+      std::vector<MassTrace> traces_final_cv;
 
       if (!processOneGroup_(faims_group, common_param, mtd_param, epd_param, ffm_param,
-                            feat_map_cv, feat_chromatograms_cv))
+                            feat_map_cv, feat_chromatograms_cv, traces_final_cv))
       {
         if (has_faims)
         {
@@ -379,6 +384,8 @@ protected:
       {
         feat_chromatograms.push_back(std::move(chrom_group));
       }
+      // combine mass traces
+      all_traces_final.insert(all_traces_final.end(), traces_final_cv.begin(), traces_final_cv.end());
     }
 
     if (has_faims)
@@ -437,26 +444,122 @@ protected:
     // writing output
     //-------------------------------------------------------------
 
-    // ensure unique IDs for the combined feature map
-    feat_map.ensureUniqueId();
-
-    // annotate output with data processing info
-    addDataProcessing_(feat_map, getProcessingInfo_(DataProcessing::QUANTITATION));
-
-    // annotate "spectra_data" metavalue
-    // Note: use simple form since ms_peakmap may have been moved for FAIMS processing
-    if (getFlag_("test"))
+    // detect requested output format
+    FileTypes::Type out_type = FileHandler::getTypeByFileName(out);
+    if (out_type == FileTypes::FEATUREXML)
     {
-      // if test mode set, add file without path so we can compare it
-      feat_map.setPrimaryMSRunPath({"file://" + File::basename(in)});
+      // ensure unique IDs for the combined feature map
+      feat_map.ensureUniqueId();
+      // annotate output with data processing info
+      addDataProcessing_(feat_map, getProcessingInfo_(DataProcessing::QUANTITATION));
+      // annotate "spectra_data" metavalue
+      // Note: use simple form since ms_peakmap may have been moved for FAIMS processing
+      if (getFlag_("test"))
+      {
+        // if test mode set, add file without path so we can compare it
+        feat_map.setPrimaryMSRunPath({"file://" + File::basename(in)});
+      }
+      else
+      {
+        feat_map.setPrimaryMSRunPath({in});
+      }
+
+      FileHandler().storeFeatures(out, feat_map, {FileTypes::FEATUREXML});
+    }
+
+    // ------- new code: write featuresXML as consensusXML (needed for ClusterMassTrace)
+    // The output should be similar to MassTraceExtractor except we have charge and isotope labels
+    else if (out_type == FileTypes::CONSENSUSXML)
+    {
+      // build ConsensusMap for monoisotopic traces
+      ConsensusMap consensus_map;
+      if (getFlag_("test"))
+      {
+        consensus_map.setPrimaryMSRunPath({"file://" + File::basename(in)});
+      }
+      else
+      {
+        consensus_map.setPrimaryMSRunPath({in}, ms_peakmap);
+      }
+
+      // 1. Pre-build label → MassTrace map for log(N) lookup
+      std::map<String, const MassTrace*> trace_lookup;
+      for (const auto& tr : all_traces_final)
+      {
+        trace_lookup[tr.getLabel()] = &tr;
+      }
+
+      // 2. Iterate features
+      for (Size i = 0; i < feat_map.size(); ++i)
+      {
+        // Retrieve full feature label
+        String feat_label = feat_map[i].getMetaValue("label");
+        StringList label_tokens;
+        feat_label.split("_", label_tokens);
+        if (label_tokens.empty()) continue;
+
+        // First token is the monoisotopic trace label
+        String mono_label = label_tokens[0];
+
+        // Fast lookup from map (O(log N))
+        auto it = trace_lookup.find(mono_label);
+        if (it == trace_lookup.end()) continue; // no matching trace found
+        const MassTrace& mono_trace = *(it->second);
+
+        // Build ConsensusFeature
+        ConsensusFeature fcons;
+        int peak_idx = 0;
+        for (const Peak2D& peak : mono_trace)
+        {
+          FeatureHandle fh;
+          fh.setRT(peak.getRT());
+          fh.setMZ(peak.getMZ());
+          fh.setIntensity(peak.getIntensity());
+          fh.setUniqueId(++peak_idx);
+          fcons.insert(fh);
+        }
+        // Annotate centroid info
+        fcons.setRT(mono_trace.getCentroidRT());
+        fcons.setMZ(mono_trace.getCentroidMZ());
+        fcons.setIntensity(mono_trace.getIntensity(false));
+
+        // Add charge and full hypothesis label
+        fcons.setCharge(feat_map[i].getCharge());
+        fcons.setMetaValue("isotope_labels", feat_label);
+
+        // Estimate quality; optional width if needed
+        fcons.setQuality(1 - (1.0 / mono_trace.getSize()));
+        // fcons.setWidth(mono_trace.estimateFWHM(true)); // enable if desired
+
+        // Optional meta values for mz/IM FWHM
+        if (mono_trace.fwhm_mz_avg > 0)
+        {
+          fcons.setMetaValue(Constants::UserParam::FWHM_MZ_AVG, mono_trace.fwhm_mz_avg);
+        }
+        if (mono_trace.getCentroidIM() > 0)
+        {
+          fcons.setMetaValue(Constants::UserParam::ION_MOBILITY_CENTROID, mono_trace.getCentroidIM());
+        }
+        if (mono_trace.fwhm_im_avg > 0)
+        {
+          fcons.setMetaValue(Constants::UserParam::FWHM_IM_AVG, mono_trace.fwhm_im_avg);
+        }
+
+        consensus_map.push_back(fcons);
+      }
+
+      // Finalize and save ConsensusXML
+      consensus_map.applyMemberFunction(&UniqueIdInterface::setUniqueId);
+      addDataProcessing_(consensus_map, getProcessingInfo_(DataProcessing::QUANTITATION));
+      consensus_map.setUniqueId();
+
+      FileHandler().storeConsensusFeatures(out, consensus_map, {FileTypes::CONSENSUSXML});
     }
     else
     {
-      feat_map.setPrimaryMSRunPath({in});
-    }    
-
-    FileHandler().storeFeatures(out, feat_map, {FileTypes::FEATUREXML});
-  
+      OPENMS_LOG_ERROR << "Output format not recognized. Please specify either .featureXML or .consensusXML for -out." << std::endl;
+      return ILLEGAL_PARAMETERS;
+    }
     return EXECUTION_OK;
   }
 

@@ -1238,12 +1238,12 @@ namespace OpenMS
 
       if (overlapping_features_)
       {
-        // mark only first label with its charge
+        // We only consider the monoisotope and charge combination as used.
         trace_excl_map.emplace(labels[0], current_charge);
       }
       else
       {
-        // old behavior: mark all labels (still include charge)
+        // old behavior: mark all traces in the feature as used and prevent them from forming new hypotheses
         for (Size lab_idx = 0; lab_idx < labels.size(); ++lab_idx)
         {
           trace_excl_map.emplace(labels[lab_idx], current_charge);
