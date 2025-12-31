@@ -548,6 +548,21 @@ namespace OpenMS
             single_mtraces.push_back(new_mt);
           }
         }
+        // ------------------------------- New addition -------------------------------
+        // Currently, EPD only includes the split point minima in the trace eluting earlier (located to the left)
+        // This can leave the trace eluting later (located to the right) with an apex point at the very start.
+        // Trace peak FWHM will end up being zero. Default parameters filtering based on FWHM will discard peaks with FWHM = 0.0
+        //
+        // I propose setting iterator back by one to ensure the split point minima is included in the left and right trace.
+        if (min_idx + 1 < mins.size())
+        {
+          if (last_idx > 0)
+          {
+            --last_idx;  // step back to the boundary minimum
+            --cp_it;     // iterator follows
+          }
+        }
+        // ------------------------------- end of new addition -------------------------------
       }
     }
     return;
