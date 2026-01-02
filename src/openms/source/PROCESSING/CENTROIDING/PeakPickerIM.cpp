@@ -796,7 +796,7 @@ namespace OpenMS
       gauss_ppm_tolerance_   = (double)param_.getValue("pickIMTraces:gauss_ppm_tolerance");
       sgolay_frame_length_   = (int)param_.getValue("pickIMTraces:sgolay_frame_length");
       sgolay_polynomial_order_= (int)param_.getValue("pickIMTraces:sgolay_polynomial_order");
-      include_unclaimed_= param_.getValue("pickIMTraces:include_unclaimed");
+      include_unclaimed_ = param_.getValue("pickIMTraces:include_unclaimed").toBool();
 
       ppm_tolerance_cluster_ = (double)param_.getValue("pickIMCluster:ppm_tolerance_cluster");
       im_tolerance_cluster_ = (double)param_.getValue("pickIMCluster:im_tolerance_cluster");
