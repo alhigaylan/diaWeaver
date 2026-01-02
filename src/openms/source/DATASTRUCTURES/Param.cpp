@@ -538,7 +538,7 @@ namespace OpenMS
     entry.max_float = max;
   }
 
-  bool Param::getValue(const std::string& key) const
+  const ParamValue& Param::getValue(const std::string& key) const
   {
     return getEntry_(key).value;
   }
