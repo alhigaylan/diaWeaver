@@ -197,7 +197,7 @@ namespace OpenMS
     // To enable recomputing of m/z center after ion mobility peak picking, we tack raw m/z peak values
     // in FloatDataArrays().
 
-    vector<MSSpectrum> PeakPickerIM::extractIonMobilityTraces(
+    std::pair<std::vector<MSSpectrum>, std::vector<bool>> PeakPickerIM::extractIonMobilityTraces(
       const MSSpectrum& picked_spectrum,
       const MSSpectrum& raw_spectrum)
     {
@@ -235,7 +235,11 @@ namespace OpenMS
       const auto [im_data_index, im_unit] = raw_spectrum.getIMData();
       const auto& ion_mobility_array = raw_spectrum.getFloatDataArrays()[im_data_index];
       // Vector of MSSpectra for each picked m/z peak (each spectrum is a mobilogram trace)
-      vector<MSSpectrum> mobility_traces;
+      std::vector<MSSpectrum> mobility_traces;
+
+      // Instead of tossing away raw peaks that failed to be picked by mass picker PeakPickerHiRes
+      // we will pass them over to the output centroid spectrum
+      std::vector<bool> claimed(raw_spectrum.size(), false);
 
       for (size_t i = 0; i < picked_spectrum.size(); ++i)
       {
@@ -268,7 +272,7 @@ namespace OpenMS
 
           // Store the raw m/z
           raw_mz_array.push_back(raw_spectrum[left_idx].getMZ());
-
+          claimed[left_idx] = true;
           --left_idx;
         }
 
@@ -281,7 +285,7 @@ namespace OpenMS
 
           // Store the raw m/z data in floatDataArrays()
           raw_mz_array.push_back(raw_spectrum[right_idx].getMZ());
-
+          claimed[right_idx] = true;
           ++right_idx;
         }
 
@@ -295,7 +299,7 @@ namespace OpenMS
         mobility_traces.push_back(std::move(trace_spectrum));
       }
 
-      return mobility_traces;
+      return {mobility_traces, claimed};
     }
 
     // Function to compute m/z centers from mobilogram_traces and picked_traces
@@ -674,6 +678,98 @@ namespace OpenMS
       float_arrays.erase(new_end, float_arrays.end());
     }
 
+    // Use PeakPickerIMCluster to merge unpicked raw peaks with centroided peaks from PickIMTraces
+    void PeakPickerIM::Add_unclaimedPeaks(
+      MSSpectrum& centroided_frame,
+      const MSSpectrum& raw_frame,
+      const std::vector<bool>& claimed) const
+    {
+      if (claimed.size() != raw_frame.size())
+      {
+        std::cerr << "[ERROR] Claimed peaks vector size (" << claimed.size()
+                  << ") does not match raw_frame size (" << raw_frame.size() << ")" << std::endl;
+        return;
+      }
+      // Get the Ion Mobility array index from raw_frame
+      if (!raw_frame.containsIMData())
+      {
+        OPENMS_LOG_WARN << "No ion mobility data found in raw_frame" << std::endl;
+        return;
+      }
+      const auto [im_data_index, im_unit] = raw_frame.getIMData();
+      const auto& raw_im_array = raw_frame.getFloatDataArrays()[im_data_index];
+
+      // === STEP 1: Collect unclaimed raw peaks into a new frame ===
+      MSSpectrum unclaimed_frame;
+      MSSpectrum::FloatDataArray unclaimed_im_array;
+      unclaimed_im_array.setName(Constants::UserParam::ION_MOBILITY_CENTROID);
+
+      for (size_t i = 0; i < raw_frame.size(); ++i)
+      {
+        if (!claimed[i])
+        {
+          Peak1D p;
+          p.setMZ(raw_frame[i].getMZ());
+          p.setIntensity(raw_frame[i].getIntensity());
+          unclaimed_frame.push_back(p);
+          unclaimed_im_array.push_back((raw_im_array)[i]);
+        }
+      }
+      if (unclaimed_frame.size() != unclaimed_im_array.size())
+      {
+        std::cerr << "[ERROR] Mismatch between unclaimed_frame and corresponding IM array size!\n";
+        return;
+      }
+      unclaimed_frame.getFloatDataArrays().push_back(std::move(unclaimed_im_array));
+      // === STEP 2: Run clustering on unclaimed peaks ===
+      pickIMCluster(unclaimed_frame);
+
+      #ifdef DEBUG_PICKER
+      OPENMS_LOG_DEBUG << "[Number of unclaimed peaks after clustering] " << unclaimed_frame.size() << " peaks.\n" << std::endl;
+      // PRINT CLUSTERED UNCLAIMED PEAKS //
+      for (size_t i = 0; i < unclaimed_frame.size(); ++i)
+      {
+        OPENMS_LOG_DEBUG << "clustered m/z: " << unclaimed_frame[i].getMZ()
+                  << ", inty: " << unclaimed_frame[i].getIntensity()
+                  << ", ion mobility: " << clustered_im_array[i] << std::endl;
+      }
+      #endif
+
+      // === STEP 3: Merge with existing centroided_frame ===
+      if (!centroided_frame.containsIMData())
+      {
+        OPENMS_LOG_WARN << "No ion mobility data found in centroided_frame." << std::endl;
+        return;
+      }
+      const auto [im_data_index_2, im_unit_2] = centroided_frame.getIMData();
+      auto& old_im_array = centroided_frame.getFloatDataArrays()[im_data_index_2];
+
+      if (old_im_array.size() != centroided_frame.size())
+      {
+        std::cerr << "[ERROR] Centroided frame has mismatched ion mobility array length!" << std::endl;
+        return;
+      }
+      // store the number of centroided peaks and clustered peaks to verify successful merging later on
+      const Size centroided_size = centroided_frame.size();
+      const Size clustered_size = unclaimed_frame.size();
+
+      // Append clustered unclaimed peaks
+      const auto [im_data_index_3, im_unit_3] = unclaimed_frame.getIMData();
+      const auto& clustered_im_array = unclaimed_frame.getFloatDataArrays()[im_data_index_3];
+
+      for (size_t i = 0; i < unclaimed_frame.size(); ++i)
+      {
+        centroided_frame.push_back(unclaimed_frame[i]);
+        old_im_array.push_back(clustered_im_array[i]);
+      }
+      centroided_frame.sortByPosition();
+      // verify the updated spectrum is the sum of old centroided_frame + clustered unclaimed peaks
+      if (centroided_frame.size() != centroided_size + clustered_size)
+      {
+        std::cerr << "[ERROR] Spectrum size mismatch after merging!" << std::endl;
+      }
+    }
+
     PeakPickerIM::PeakPickerIM()
         : DefaultParamHandler("PeakPickerIM")
     {
@@ -683,6 +779,7 @@ namespace OpenMS
       defaults_.setValue("pickIMTraces:gauss_ppm_tolerance",     5.0,   "Gaussian smoothing m/z tolerance in ppm");
       defaults_.setValue("pickIMTraces:sgolay_frame_length",     5,     "Savitzky-Golay smoothing frame length");
       defaults_.setValue("pickIMTraces:sgolay_polynomial_order", 3,     "Savitzky-Golay smoothing polynomial order");
+      defaults_.setValue("pickIMTraces:include_unclaimed", false,     "If set, include unpicked raw peaks into the centroided output. PickIMCluster will group unpicked peaks.");
       // --- PickIMCluster parameters ---
       defaults_.setValue("pickIMCluster:ppm_tolerance_cluster", 50.0, "m/z tolerance in ppm for clustering");
       defaults_.setValue("pickIMCluster:im_tolerance_cluster", 0.1, "Ion mobility tolerance in 1/k for clustering");
@@ -699,6 +796,7 @@ namespace OpenMS
       gauss_ppm_tolerance_   = (double)param_.getValue("pickIMTraces:gauss_ppm_tolerance");
       sgolay_frame_length_   = (int)param_.getValue("pickIMTraces:sgolay_frame_length");
       sgolay_polynomial_order_= (int)param_.getValue("pickIMTraces:sgolay_polynomial_order");
+      include_unclaimed_= param_.getValue("pickIMTraces:include_unclaimed");
 
       ppm_tolerance_cluster_ = (double)param_.getValue("pickIMCluster:ppm_tolerance_cluster");
       im_tolerance_cluster_ = (double)param_.getValue("pickIMCluster:im_tolerance_cluster");
@@ -816,7 +914,7 @@ namespace OpenMS
       // We dynamically determine the raw sampling rate from well-populated extracted mobilograms
       // (currently we have this hard-coded as +20 raw peaks in a mobilogram to be considered well-populated).
 
-      auto mobilogram_traces = extractIonMobilityTraces(picked_spectrum, spectrum);
+      auto [mobilogram_traces, claimed] = PeakPickerIM::extractIonMobilityTraces(picked_spectrum, spectrum);
 
       // Compute optimal sampling rate from the native spacing of mobilogram data points
       double sampling_rate = computeOptimalSamplingRate(mobilogram_traces);
@@ -947,6 +1045,11 @@ namespace OpenMS
 
       // Recompute m/z centers and output centroided frame
       MSSpectrum centroided_frame = computeCentroids_(mobilogram_traces, picked_traces);
+      // Add unclaimed raw peaks to centroided data
+      if (include_unclaimed_)
+      {
+        Add_unclaimedPeaks(centroided_frame, spectrum, claimed);
+      }
 
 #ifdef DEBUG_PICKER
       OPENMS_LOG_DEBUG << "--- Centroided frame has  " << centroided_frame.size() << " --- peaks.\n";
