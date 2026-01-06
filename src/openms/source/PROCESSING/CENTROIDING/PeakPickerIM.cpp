@@ -779,7 +779,7 @@ namespace OpenMS
       defaults_.setValue("pickIMTraces:gauss_ppm_tolerance",     5.0,   "Gaussian smoothing m/z tolerance in ppm");
       defaults_.setValue("pickIMTraces:sgolay_frame_length",     5,     "Savitzky-Golay smoothing frame length");
       defaults_.setValue("pickIMTraces:sgolay_polynomial_order", 3,     "Savitzky-Golay smoothing polynomial order");
-      defaults_.setValue("pickIMTraces:include_unclaimed", false,     "If set, include unpicked raw peaks into the centroided output. PickIMCluster will group unpicked peaks.");
+      defaults_.setValue("pickIMTraces:include_unclaimed", "false",     "If set, include unpicked raw peaks into the centroided output. PickIMCluster will group unpicked peaks.");
       // --- PickIMCluster parameters ---
       defaults_.setValue("pickIMCluster:ppm_tolerance_cluster", 50.0, "m/z tolerance in ppm for clustering");
       defaults_.setValue("pickIMCluster:im_tolerance_cluster", 0.1, "Ion mobility tolerance in 1/k for clustering");
