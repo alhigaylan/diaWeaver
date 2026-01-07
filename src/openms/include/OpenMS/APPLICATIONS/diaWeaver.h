@@ -67,6 +67,38 @@ namespace OpenMS
     using WindowedExperiments = std::map<DIAWindow, MSExperiment>;
 
     /**
+      @brief Information about ion mobility data availability in the dataset
+
+      Used to determine once whether ion mobility filtering should be applied
+      and which float data array indices contain the IM data for MS1 and MS2 spectra.
+    */
+    struct IMInfo
+    {
+      bool available{false};     ///< True if IM filtering should be applied
+      Size ms1_im_index{0};      ///< Index of IM data in MS1 FloatDataArrays (valid only if available=true)
+      Size ms2_im_index{0};      ///< Index of IM data in MS2 FloatDataArrays (valid only if available=true)
+    };
+
+    /**
+      @brief Determine if ion mobility filtering should be used for this dataset
+
+      Checks three conditions:
+      1. At least one DIA window has ion mobility bounds
+      2. MS1 spectra contain ion mobility data arrays
+      3. MS2 spectra contain ion mobility data arrays
+
+      All conditions must be true for ion mobility filtering to be enabled.
+      The IM array index is assumed to be consistent across all spectra.
+
+      @param raw Input MSExperiment containing DIA data
+      @param window_map Map of DIA windows to check for IM bounds
+      @return IMInfo struct with availability flag and array index
+    */
+    static IMInfo determineIMInfo(
+      const MSExperiment& raw,
+      const WindowMap& window_map);
+
+    /**
       @brief Determine DIA windows from MS2 spectra
 
       Analyzes all MS2 spectra in the experiment and groups them by their

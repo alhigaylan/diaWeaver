@@ -7,6 +7,7 @@
 // --------------------------------------------------------------------------
 
 #include <OpenMS/APPLICATIONS/diaWeaver.h>
+#include <OpenMS/CONCEPT/Constants.h>
 #include <OpenMS/CONCEPT/LogStream.h>
 
 using namespace OpenMS;
@@ -96,6 +97,92 @@ void DiaWeaver::determineWindows(
 }
 
 // ----------------------------------------------------------------------
+// Determine ion mobility info for the dataset
+// ----------------------------------------------------------------------
+DiaWeaver::IMInfo DiaWeaver::determineIMInfo(
+  const MSExperiment& raw,
+  const WindowMap& window_map)
+{
+  IMInfo info;
+
+  // Check 1: Do any windows have ion mobility bounds?
+  bool windows_have_im = false;
+  for (const auto& it : window_map)
+  {
+    if (it.first.hasIonMobility())
+    {
+      windows_have_im = true;
+      break;
+    }
+  }
+
+  if (!windows_have_im)
+  {
+    OPENMS_LOG_INFO << "DIA windows do not have ion mobility bounds. "
+                    << "Filtering by m/z only." << std::endl;
+    return info; // available = false
+  }
+
+  // Check 2: Do spectra contain ion mobility data arrays?
+  // Check first MS1 spectrum
+  bool ms1_has_im = false;
+  Size ms1_im_index = 0;
+  for (const MSSpectrum& spec : raw)
+  {
+    if (spec.getMSLevel() != 1) continue;
+    if (spec.containsIMData())
+    {
+      const auto [idx, unit] = spec.getIMData();
+      ms1_im_index = idx;
+      ms1_has_im = true;
+    }
+    break;
+  }
+
+  // Check first MS2 spectrum
+  bool ms2_has_im = false;
+  Size ms2_im_index = 0;
+  for (const MSSpectrum& spec : raw)
+  {
+    if (spec.getMSLevel() != 2) continue;
+    if (spec.containsIMData())
+    {
+      const auto [idx, unit] = spec.getIMData();
+      ms2_im_index = idx;
+      ms2_has_im = true;
+    }
+    break;
+  }
+
+  // All conditions must be met for IM filtering
+  if (!ms1_has_im || !ms2_has_im)
+  {
+    OPENMS_LOG_WARN << "DIA windows have ion mobility bounds but spectra lack ion mobility data. "
+                    << "MS1 has IM: " << (ms1_has_im ? "yes" : "no")
+                    << ", MS2 has IM: " << (ms2_has_im ? "yes" : "no")
+                    << ". Filtering by m/z only." << std::endl;
+    return info;
+  }
+
+  // Log if IM array indices differ between MS1 and MS2
+  if (ms1_im_index != ms2_im_index)
+  {
+    OPENMS_LOG_WARN << "Ion mobility array index differs between MS1 (" << ms1_im_index
+                    << ") and MS2 (" << ms2_im_index << ")." << std::endl;
+  }
+
+  info.available = true;
+  info.ms1_im_index = ms1_im_index;
+  info.ms2_im_index = ms2_im_index;
+
+  OPENMS_LOG_INFO << "Ion mobility filtering enabled. MS1 IM index: "
+                  << info.ms1_im_index << ", MS2 IM index: "
+                  << info.ms2_im_index << std::endl;
+
+  return info;
+}
+
+// ----------------------------------------------------------------------
 // Extract MS2 windows
 // ----------------------------------------------------------------------
 void DiaWeaver::extractMS2Windows(
@@ -134,36 +221,31 @@ void DiaWeaver::extractMS1Windows(
 {
   out_ms1.clear();
 
+  // Determine ion mobility availability once for the entire dataset
+  const IMInfo im_info = determineIMInfo(raw, window_map);
+
   for (const auto& it : window_map)
   {
     const DIAWindow& window = it.first;
     MSExperiment exp;
 
-    // Check if this window has ion mobility filtering
-    const bool filter_by_im = window.hasIonMobility();
-
     for (const MSSpectrum& spec : raw)
     {
       if (spec.getMSLevel() != 1) continue;
-
-      // If filtering by IM, we need the float data array
-      const MSSpectrum::FloatDataArray* im_array = nullptr;
-      if (filter_by_im)
-      {
-        if (spec.getFloatDataArrays().empty())
-        {
-          continue; // Skip spectra without IM data when IM filtering is needed
-        }
-        im_array = &spec.getFloatDataArrays()[0];
-      }
 
       MSSpectrum new_spec;
       new_spec.setRT(spec.getRT());
 
       MSSpectrum::FloatDataArray im_fda;
-      if (filter_by_im)
+      if (im_info.available)
       {
-        im_fda.setName("Ion Mobility");
+        im_fda.setName(Constants::UserParam::ION_MOBILITY);
+      }
+
+      const MSSpectrum::FloatDataArray* im_array = nullptr;
+      if (im_info.available)
+      {
+        im_array = &spec.getFloatDataArrays()[im_info.ms1_im_index];
       }
 
       for (Size i = 0; i < spec.size(); ++i)
@@ -177,7 +259,7 @@ void DiaWeaver::extractMS1Windows(
         }
 
         // Optionally filter by ion mobility
-        if (filter_by_im)
+        if (im_info.available)
         {
           const double im = (*im_array)[i];
           if (im < window.lower_im || im > window.upper_im)
@@ -192,8 +274,7 @@ void DiaWeaver::extractMS1Windows(
 
       if (new_spec.empty()) continue;
 
-      // Only add IM array if we were filtering by IM
-      if (filter_by_im)
+      if (im_info.available)
       {
         new_spec.getFloatDataArrays().push_back(std::move(im_fda));
       }
