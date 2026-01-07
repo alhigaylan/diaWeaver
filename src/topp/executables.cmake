@@ -138,6 +138,7 @@ TextExporter
 TriqlerConverter
 XFDR
 XMLValidator
+diaWeaver
 )
 
 if(NOT DISABLE_OPENSWATH)

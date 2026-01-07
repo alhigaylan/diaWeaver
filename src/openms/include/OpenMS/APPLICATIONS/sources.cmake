@@ -11,6 +11,7 @@ ParameterInformation.h
 SearchEngineBase.h
 ToolHandler.h
 TOPPBase.h
+diaWeaver.h
 )
 
 ### add path to the filenames

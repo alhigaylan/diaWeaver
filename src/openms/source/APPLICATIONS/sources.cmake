@@ -10,6 +10,7 @@ OpenSwathBase.cpp
 SearchEngineBase.cpp
 ToolHandler.cpp
 TOPPBase.cpp
+diaWeaver.cpp
 )
 
 ### add path to the filenames
