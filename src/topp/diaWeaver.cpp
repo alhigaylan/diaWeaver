@@ -60,10 +60,16 @@ protected:
       "<prefix>",
       "",
       "Output directory prefix (default: <input>_diaWindows)");
+
+    registerFlag_(
+      "save_unfragmented_precursors",
+      "If set, save peaks within precursor isolation window in MS2 and apply precursor detection algorithm");
   }
+
   ExitCodes main_(int, const char**) override
   {
     const String in = getStringOption_("in");
+    const bool save_precursors = getFlag_("save_unfragmented_precursors");
 
     String out = getStringOption_("out");
     if (out.empty())
@@ -87,8 +93,10 @@ protected:
 
     DiaWeaver::WindowedExperiments ms2_windows;
     DiaWeaver::WindowedExperiments ms1_windows;
+    DiaWeaver::WindowedExperiments precursor_windows;
 
-    DiaWeaver::extractMS2Windows(raw, windows, ms2_windows);
+    DiaWeaver::extractMS2Windows(raw, windows, ms2_windows,
+                                  save_precursors ? &precursor_windows : nullptr);
     DiaWeaver::extractMS1Windows(raw, windows, ms1_windows);
 
     // ------------------------------
@@ -122,6 +130,24 @@ protected:
       fname.substitute(".", "-");
 
       mzml.store(out + "/" + fname, exp);
+    }
+
+    // Write unfragmented precursor files if requested
+    if (save_precursors)
+    {
+      for (const auto& it : precursor_windows)
+      {
+        const auto& w = it.first;
+        const MSExperiment& exp = it.second;
+
+        String fname = "precursor_" +
+          String(w.lower_mz) + "-" + String(w.upper_mz) + "_" +
+          String(w.lower_im) + "-" + String(w.upper_im) + ".mzML";
+
+        fname.substitute(".", "-");
+
+        mzml.store(out + "/" + fname, exp);
+      }
     }
 
     return EXECUTION_OK;

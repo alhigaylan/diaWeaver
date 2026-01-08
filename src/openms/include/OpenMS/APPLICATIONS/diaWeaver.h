@@ -116,16 +116,20 @@ namespace OpenMS
       @brief Extract MS2 spectra for each window
 
       Creates separate MSExperiment objects for each DIA window containing
-      the corresponding MS2 spectra.
+      the corresponding MS2 spectra. Peaks within the precursor isolation
+      window are always excluded from the output (fragment ions only).
 
       @param raw Input MSExperiment containing DIA data
       @param window_map Map of windows to spectrum indices (from determineWindows)
-      @param out_ms2 Output map of DIAWindow to MSExperiment
+      @param out_ms2 Output map of DIAWindow to MSExperiment (fragment ions only)
+      @param out_precursors Optional output map for unfragmented precursor peaks
+             (peaks within isolation window). If nullptr, precursor peaks are discarded.
     */
     static void extractMS2Windows(
       const MSExperiment& raw,
       const WindowMap& window_map,
-      WindowedExperiments& out_ms2);
+      WindowedExperiments& out_ms2,
+      WindowedExperiments* out_precursors = nullptr);
 
     /**
       @brief Extract MS1 spectra for each window

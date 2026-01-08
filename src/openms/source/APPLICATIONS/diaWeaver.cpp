@@ -188,26 +188,121 @@ DiaWeaver::IMInfo DiaWeaver::determineIMInfo(
 void DiaWeaver::extractMS2Windows(
   const MSExperiment& raw,
   const WindowMap& window_map,
-  DiaWeaver::WindowedExperiments& out_ms2)
+  DiaWeaver::WindowedExperiments& out_ms2,
+  DiaWeaver::WindowedExperiments* out_precursors)
 {
   out_ms2.clear();
+
+  const bool save_precursors = (out_precursors != nullptr);
+  if (save_precursors)
+  {
+    out_precursors->clear();
+  }
+
+  // Determine ion mobility info for proper handling of float data arrays
+  const IMInfo im_info = determineIMInfo(raw, window_map);
 
   for (const auto& it : window_map)
   {
     const DIAWindow& window = it.first;
     const std::vector<Size>& scan_indices = it.second;
 
-    MSExperiment exp;
+    MSExperiment fragment_exp;
+    MSExperiment precursor_exp;
 
     for (Size idx : scan_indices)
     {
-      MSSpectrum spec = raw[idx];  // copy
-      spec.setMSLevel(1);          // required by downstream tools
-      exp.addSpectrum(spec);
+      const MSSpectrum& orig_spec = raw[idx];
+
+      // Fragment spectrum (peaks outside precursor window)
+      MSSpectrum frag_spec;
+      frag_spec.setRT(orig_spec.getRT());
+      frag_spec.setMSLevel(1);  // required by downstream tools
+
+      // Precursor spectrum (peaks inside precursor window)
+      MSSpectrum prec_spec;
+      if (save_precursors)
+      {
+        prec_spec.setRT(orig_spec.getRT());
+        prec_spec.setMSLevel(1);
+      }
+
+      // Prepare IM arrays if available
+      MSSpectrum::FloatDataArray frag_im_fda;
+      MSSpectrum::FloatDataArray prec_im_fda;
+      const MSSpectrum::FloatDataArray* im_array = nullptr;
+
+      if (im_info.available)
+      {
+        frag_im_fda.setName(Constants::UserParam::ION_MOBILITY);
+        im_array = &orig_spec.getFloatDataArrays()[im_info.ms2_im_index];
+
+        if (save_precursors)
+        {
+          prec_im_fda.setName(Constants::UserParam::ION_MOBILITY);
+        }
+      }
+
+      // Separate peaks into fragments and precursors
+      for (Size i = 0; i < orig_spec.size(); ++i)
+      {
+        const double mz = orig_spec[i].getMZ();
+        const bool in_precursor_window = (mz >= window.lower_mz && mz <= window.upper_mz);
+
+        if (in_precursor_window)
+        {
+          // Peak is within precursor isolation window (unfragmented precursor)
+          if (save_precursors)
+          {
+            prec_spec.push_back(orig_spec[i]);
+            if (im_info.available)
+            {
+              prec_im_fda.push_back((*im_array)[i]);
+            }
+          }
+        }
+        else
+        {
+          // Peak is outside precursor window (fragment ion)
+          frag_spec.push_back(orig_spec[i]);
+          if (im_info.available)
+          {
+            frag_im_fda.push_back((*im_array)[i]);
+          }
+        }
+      }
+      
+      // Add fragment spectrum
+      if (!frag_spec.empty())
+      {
+        if (im_info.available)
+        {
+          frag_spec.getFloatDataArrays().push_back(std::move(frag_im_fda));
+        }
+        frag_spec.sortByPosition();
+        fragment_exp.addSpectrum(frag_spec);
+      }
+
+      // Add precursor spectrum
+      if (save_precursors && !prec_spec.empty())
+      {
+        if (im_info.available)
+        {
+          prec_spec.getFloatDataArrays().push_back(std::move(prec_im_fda));
+        }
+        prec_spec.sortByPosition();
+        precursor_exp.addSpectrum(prec_spec);
+      }
     }
 
-    exp.sortSpectra();
-    out_ms2.emplace(window, std::move(exp));
+    fragment_exp.sortSpectra();
+    out_ms2.emplace(window, std::move(fragment_exp));
+
+    if (save_precursors && !precursor_exp.empty())
+    {
+      precursor_exp.sortSpectra();
+      out_precursors->emplace(window, std::move(precursor_exp));
+    }
   }
 }
 
