@@ -342,6 +342,14 @@ namespace OpenMS
       }
       return true;
     }
+    // Check for "inverse reduced ion mobility" prefix (case-insensitive)
+    String name_lower = fda.getName();
+    name_lower.toLower();
+    if (name_lower.hasPrefix(Constants::UserParam::INVERSE_REDUCED_ION_MOBILITY))
+    {
+      unit = DriftTimeUnit::VSSC;
+      return true;
+    }
     try
     {
       const auto& cv_term = cv.getTermByName(fda.getName()); // may throw if term is unknown

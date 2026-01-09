@@ -245,10 +245,15 @@ namespace OpenMS
       inline const std::string FAIMS_CV = "FAIMS_CV";
 
       /** MetaValue key for raw TimsTOF ion mobility array (from MSConvert).
-       * Note: TODO check. I saw files with other names as well (e.g. mean inverse ion mobility).
        * PeakPickerIM expects to find 'Ion Mobility' array and will treat it as raw timsTOF data.
        */
       inline const std::string ION_MOBILITY = "Ion Mobility";
+
+      /** Alternative MetaValue key for ion mobility data (inverse reduced ion mobility).
+       * Some files store ion mobility data with this prefix instead of "Ion Mobility".
+       * Unit is typically volt-seconds per square centimeter (Vs/cm^2) also known as 1/k0.
+       */
+      inline const std::string INVERSE_REDUCED_ION_MOBILITY = "inverse reduced ion mobility";
 
       /** MetaValue key for centroided ion mobility data output by PeakPickerIM and MassTraceDetection.
        * PeakPickerIM outputs centroided peaks with this array name.

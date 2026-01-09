@@ -13,6 +13,18 @@
 using namespace OpenMS;
 
 // ----------------------------------------------------------------------
+// IMInfo helper - get appropriate array name for the detected unit
+// ----------------------------------------------------------------------
+const std::string& DiaWeaver::IMInfo::getIMArrayName() const
+{
+  if (unit == DriftTimeUnit::VSSC)
+  {
+    return Constants::UserParam::INVERSE_REDUCED_ION_MOBILITY;
+  }
+  return Constants::UserParam::ION_MOBILITY;
+}
+
+// ----------------------------------------------------------------------
 // DIAWindow comparator
 // ----------------------------------------------------------------------
 bool DiaWeaver::DIAWindow::operator<(const DIAWindow& rhs) const
@@ -127,6 +139,7 @@ DiaWeaver::IMInfo DiaWeaver::determineIMInfo(
   // Check first MS1 spectrum
   bool ms1_has_im = false;
   Size ms1_im_index = 0;
+  DriftTimeUnit im_unit = DriftTimeUnit::NONE;
   for (const MSSpectrum& spec : raw)
   {
     if (spec.getMSLevel() != 1) continue;
@@ -134,6 +147,7 @@ DiaWeaver::IMInfo DiaWeaver::determineIMInfo(
     {
       const auto [idx, unit] = spec.getIMData();
       ms1_im_index = idx;
+      im_unit = unit;
       ms1_has_im = true;
     }
     break;
@@ -149,6 +163,11 @@ DiaWeaver::IMInfo DiaWeaver::determineIMInfo(
     {
       const auto [idx, unit] = spec.getIMData();
       ms2_im_index = idx;
+      // Use MS2 unit if MS1 didn't have IM
+      if (im_unit == DriftTimeUnit::NONE)
+      {
+        im_unit = unit;
+      }
       ms2_has_im = true;
     }
     break;
@@ -174,6 +193,7 @@ DiaWeaver::IMInfo DiaWeaver::determineIMInfo(
   info.available = true;
   info.ms1_im_index = ms1_im_index;
   info.ms2_im_index = ms2_im_index;
+  info.unit = im_unit;
 
   OPENMS_LOG_INFO << "Ion mobility filtering enabled. MS1 IM index: "
                   << info.ms1_im_index << ", MS2 IM index: "
@@ -234,12 +254,12 @@ void DiaWeaver::extractMS2Windows(
 
       if (im_info.available)
       {
-        frag_im_fda.setName(Constants::UserParam::ION_MOBILITY);
+        frag_im_fda.setName(im_info.getIMArrayName());
         im_array = &orig_spec.getFloatDataArrays()[im_info.ms2_im_index];
 
         if (save_precursors)
         {
-          prec_im_fda.setName(Constants::UserParam::ION_MOBILITY);
+          prec_im_fda.setName(im_info.getIMArrayName());
         }
       }
 
@@ -334,7 +354,7 @@ void DiaWeaver::extractMS1Windows(
       MSSpectrum::FloatDataArray im_fda;
       if (im_info.available)
       {
-        im_fda.setName(Constants::UserParam::ION_MOBILITY);
+        im_fda.setName(im_info.getIMArrayName());
       }
 
       const MSSpectrum::FloatDataArray* im_array = nullptr;
@@ -512,6 +532,7 @@ DiaWeaver::IMInfo DiaWeaver::determineIMInfo(
   // Check first MS1 spectrum by loading it from disk
   bool ms1_has_im = false;
   Size ms1_im_index = 0;
+  DriftTimeUnit im_unit = DriftTimeUnit::NONE;
   for (Size i = 0; i < meta->size(); ++i)
   {
     if ((*meta)[i].getMSLevel() != 1) continue;
@@ -521,6 +542,7 @@ DiaWeaver::IMInfo DiaWeaver::determineIMInfo(
     {
       const auto [idx, unit] = spec.getIMData();
       ms1_im_index = idx;
+      im_unit = unit;
       ms1_has_im = true;
     }
     break;
@@ -538,6 +560,11 @@ DiaWeaver::IMInfo DiaWeaver::determineIMInfo(
     {
       const auto [idx, unit] = spec.getIMData();
       ms2_im_index = idx;
+      // Use MS2 unit if MS1 didn't have IM
+      if (im_unit == DriftTimeUnit::NONE)
+      {
+        im_unit = unit;
+      }
       ms2_has_im = true;
     }
     break;
@@ -563,6 +590,7 @@ DiaWeaver::IMInfo DiaWeaver::determineIMInfo(
   info.available = true;
   info.ms1_im_index = ms1_im_index;
   info.ms2_im_index = ms2_im_index;
+  info.unit = im_unit;
 
   OPENMS_LOG_INFO << "Ion mobility filtering enabled. MS1 IM index: "
                   << info.ms1_im_index << ", MS2 IM index: "
@@ -625,12 +653,12 @@ void DiaWeaver::extractMS2Windows(
 
       if (im_info.available && orig_spec.getFloatDataArrays().size() > im_info.ms2_im_index)
       {
-        frag_im_fda.setName(Constants::UserParam::ION_MOBILITY);
+        frag_im_fda.setName(im_info.getIMArrayName());
         im_array = &orig_spec.getFloatDataArrays()[im_info.ms2_im_index];
 
         if (save_precursors)
         {
-          prec_im_fda.setName(Constants::UserParam::ION_MOBILITY);
+          prec_im_fda.setName(im_info.getIMArrayName());
         }
       }
 
@@ -737,7 +765,7 @@ void DiaWeaver::extractMS1Windows(
       MSSpectrum::FloatDataArray im_fda;
       if (im_info.available)
       {
-        im_fda.setName(Constants::UserParam::ION_MOBILITY);
+        im_fda.setName(im_info.getIMArrayName());
       }
 
       const MSSpectrum::FloatDataArray* im_array = nullptr;
@@ -836,12 +864,12 @@ void DiaWeaver::extractSingleMS2Window(
 
     if (im_info.available && orig_spec.getFloatDataArrays().size() > im_info.ms2_im_index)
     {
-      frag_im_fda.setName(Constants::UserParam::ION_MOBILITY);
+      frag_im_fda.setName(im_info.getIMArrayName());
       im_array = &orig_spec.getFloatDataArrays()[im_info.ms2_im_index];
 
       if (save_precursors)
       {
-        prec_im_fda.setName(Constants::UserParam::ION_MOBILITY);
+        prec_im_fda.setName(im_info.getIMArrayName());
       }
     }
 
@@ -934,7 +962,7 @@ void DiaWeaver::extractSingleMS1Window(
     MSSpectrum::FloatDataArray im_fda;
     if (im_info.available)
     {
-      im_fda.setName(Constants::UserParam::ION_MOBILITY);
+      im_fda.setName(im_info.getIMArrayName());
     }
 
     const MSSpectrum::FloatDataArray* im_array = nullptr;

@@ -10,6 +10,7 @@
 
 #include <OpenMS/KERNEL/MSExperiment.h>
 #include <OpenMS/KERNEL/OnDiscMSExperiment.h>
+#include <OpenMS/IONMOBILITY/IMTypes.h>
 #include <OpenMS/OpenMSConfig.h>
 #include <cmath>
 #include <map>
@@ -78,6 +79,10 @@ namespace OpenMS
       bool available{false};     ///< True if IM filtering should be applied
       Size ms1_im_index{0};      ///< Index of IM data in MS1 FloatDataArrays (valid only if available=true)
       Size ms2_im_index{0};      ///< Index of IM data in MS2 FloatDataArrays (valid only if available=true)
+      DriftTimeUnit unit{DriftTimeUnit::NONE};  ///< Unit of ion mobility data (for proper output naming)
+
+      /// Get the appropriate array name for the detected IM unit
+      const std::string& getIMArrayName() const;
     };
 
     /**
