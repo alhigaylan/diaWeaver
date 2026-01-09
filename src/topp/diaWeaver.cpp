@@ -8,6 +8,7 @@
 
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
 #include <OpenMS/FORMAT/MzMLFile.h>
+#include <OpenMS/KERNEL/OnDiscMSExperiment.h>
 #include <OpenMS/SYSTEM/File.h>
 #include <OpenMS/APPLICATIONS/diaWeaver.h>
 
@@ -80,75 +81,73 @@ protected:
     File::makeDir(out);
 
     // ------------------------------
-    // Load input mzML
+    // Load input mzML using on-disk access
     // ------------------------------
-    MSExperiment raw;
-    MzMLFile().load(in, raw);
+    OnDiscMSExperiment raw;
+    if (!raw.openFile(in))
+    {
+      OPENMS_LOG_ERROR << "Failed to open file as indexed mzML." << std::endl;
+      return INPUT_FILE_NOT_FOUND;
+    }
 
     // ------------------------------
-    // Run DiaWeaver algorithm
+    // Determine DIA windows and IM info
     // ------------------------------
     DiaWeaver::WindowMap windows;
     DiaWeaver::determineWindows(raw, windows);
 
-    DiaWeaver::WindowedExperiments ms2_windows;
-    DiaWeaver::WindowedExperiments ms1_windows;
-    DiaWeaver::WindowedExperiments precursor_windows;
+    // Determine IM info once upfront
+    DiaWeaver::IMInfo im_info = DiaWeaver::determineIMInfo(raw, windows);
 
-    DiaWeaver::extractMS2Windows(raw, windows, ms2_windows,
-                                  save_precursors ? &precursor_windows : nullptr);
-    DiaWeaver::extractMS1Windows(raw, windows, ms1_windows);
+    OPENMS_LOG_INFO << "Processing " << windows.size() << " DIA windows..." << std::endl;
 
     // ------------------------------
-    // Write outputs
+    // Process each window incrementally: extract, write, release memory
     // ------------------------------
     MzMLFile mzml;
+    MSExperiment ms2_exp;
+    MSExperiment ms1_exp;
+    MSExperiment precursor_exp;
 
-    for (const auto& it : ms2_windows)
+    Size window_idx = 0;
+    for (const auto& it : windows)
     {
-      const auto& w = it.first;
-      const MSExperiment& exp = it.second;
+      const DiaWeaver::DIAWindow& w = it.first;
+      const std::vector<Size>& indices = it.second;
+      ++window_idx;
 
-      String fname = "ms2_" +
+      OPENMS_LOG_INFO << "Processing window " << window_idx << "/" << windows.size()
+                      << " (m/z: " << w.lower_mz << "-" << w.upper_mz << ")" << std::endl;
+
+      // Build filename base
+      String fname_base =
         String(w.lower_mz) + "-" + String(w.upper_mz) + "_" +
         String(w.lower_im) + "-" + String(w.upper_im) + ".mzML";
+      fname_base.substitute(".", "-");
 
-      fname.substitute(".", "-");
-
-      mzml.store(out + "/" + fname, exp);
-    }
-
-    for (const auto& it : ms1_windows)
-    {
-      const auto& w = it.first;
-      const MSExperiment& exp = it.second;
-
-      String fname = "ms1_" +
-        String(w.lower_mz) + "-" + String(w.upper_mz) + "_" +
-        String(w.lower_im) + "-" + String(w.upper_im) + ".mzML";
-
-      fname.substitute(".", "-");
-
-      mzml.store(out + "/" + fname, exp);
-    }
-
-    // Write unfragmented precursor files if requested
-    if (save_precursors)
-    {
-      for (const auto& it : precursor_windows)
+      // Extract and write MS2
+      DiaWeaver::extractSingleMS2Window(raw, w, indices, im_info, ms2_exp,
+                                         save_precursors ? &precursor_exp : nullptr);
+      if (!ms2_exp.empty())
       {
-        const auto& w = it.first;
-        const MSExperiment& exp = it.second;
+        mzml.store(out + "/ms2_" + fname_base, ms2_exp);
+      }
 
-        String fname = "precursor_" +
-          String(w.lower_mz) + "-" + String(w.upper_mz) + "_" +
-          String(w.lower_im) + "-" + String(w.upper_im) + ".mzML";
+      // Write precursors if requested
+      if (save_precursors && !precursor_exp.empty())
+      {
+        mzml.store(out + "/precursor_" + fname_base, precursor_exp);
+      }
 
-        fname.substitute(".", "-");
-
-        mzml.store(out + "/" + fname, exp);
+      // Extract and write MS1
+      DiaWeaver::extractSingleMS1Window(raw, w, im_info, ms1_exp);
+      if (!ms1_exp.empty())
+      {
+        mzml.store(out + "/ms1_" + fname_base, ms1_exp);
       }
     }
+
+    OPENMS_LOG_INFO << "Finished processing all windows." << std::endl;
 
     return EXECUTION_OK;
   }

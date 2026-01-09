@@ -9,6 +9,7 @@
 #pragma once
 
 #include <OpenMS/KERNEL/MSExperiment.h>
+#include <OpenMS/KERNEL/OnDiscMSExperiment.h>
 #include <OpenMS/OpenMSConfig.h>
 #include <cmath>
 #include <map>
@@ -145,5 +146,107 @@ namespace OpenMS
       const MSExperiment& raw,
       const WindowMap& window_map,
       WindowedExperiments& out_ms1);
+
+    // ========================================================================
+    // OnDiscMSExperiment overloads for memory-efficient processing
+    // ========================================================================
+
+    /**
+      @brief Determine DIA windows from MS2 spectra (on-disk version)
+
+      Uses only metadata from OnDiscMSExperiment without loading peak data.
+      This is memory-efficient for large files as only precursor information
+      is needed to determine windows.
+
+      @param raw Input OnDiscMSExperiment containing DIA data
+      @param window_map Output map of DIAWindow to spectrum indices
+    */
+    static void determineWindows(
+      OnDiscMSExperiment& raw,
+      WindowMap& window_map);
+
+    /**
+      @brief Determine if ion mobility filtering should be used (on-disk version)
+
+      @param raw Input OnDiscMSExperiment containing DIA data
+      @param window_map Map of DIA windows to check for IM bounds
+      @return IMInfo struct with availability flag and array index
+    */
+    static IMInfo determineIMInfo(
+      OnDiscMSExperiment& raw,
+      const WindowMap& window_map);
+
+    /**
+      @brief Extract MS2 spectra for each window (on-disk version)
+
+      Loads spectra on-demand from disk, processing one spectrum at a time
+      to minimize memory usage.
+
+      @param raw Input OnDiscMSExperiment containing DIA data
+      @param window_map Map of windows to spectrum indices (from determineWindows)
+      @param out_ms2 Output map of DIAWindow to MSExperiment (fragment ions only)
+      @param out_precursors Optional output map for unfragmented precursor peaks
+    */
+    static void extractMS2Windows(
+      OnDiscMSExperiment& raw,
+      const WindowMap& window_map,
+      WindowedExperiments& out_ms2,
+      WindowedExperiments* out_precursors = nullptr);
+
+    /**
+      @brief Extract MS1 spectra for each window (on-disk version)
+
+      Loads MS1 spectra on-demand from disk, processing one at a time.
+
+      @param raw Input OnDiscMSExperiment containing DIA data
+      @param window_map Map of windows (used for window definitions)
+      @param out_ms1 Output map of DIAWindow to filtered MS1 MSExperiment
+    */
+    static void extractMS1Windows(
+      OnDiscMSExperiment& raw,
+      const WindowMap& window_map,
+      WindowedExperiments& out_ms1);
+
+    // ========================================================================
+    // Single-window extraction for incremental/streaming processing
+    // ========================================================================
+
+    /**
+      @brief Extract MS2 spectra for a single window (on-disk version)
+
+      Processes only the specified window, allowing incremental processing
+      where each window can be written to disk immediately after extraction.
+
+      @param raw Input OnDiscMSExperiment containing DIA data
+      @param window The DIA window to extract
+      @param indices Spectrum indices belonging to this window
+      @param im_info Pre-computed ion mobility info (from determineIMInfo)
+      @param out_ms2 Output MSExperiment for fragment ions
+      @param out_precursor Optional output MSExperiment for unfragmented precursors
+    */
+    static void extractSingleMS2Window(
+      OnDiscMSExperiment& raw,
+      const DIAWindow& window,
+      const std::vector<Size>& indices,
+      const IMInfo& im_info,
+      MSExperiment& out_ms2,
+      MSExperiment* out_precursor = nullptr);
+
+    /**
+      @brief Extract MS1 spectra for a single window (on-disk version)
+
+      Processes only the specified window, allowing incremental processing
+      where each window can be written to disk immediately after extraction.
+
+      @param raw Input OnDiscMSExperiment containing DIA data
+      @param window The DIA window to extract
+      @param im_info Pre-computed ion mobility info (from determineIMInfo)
+      @param out_ms1 Output MSExperiment for filtered MS1 spectra
+    */
+    static void extractSingleMS1Window(
+      OnDiscMSExperiment& raw,
+      const DIAWindow& window,
+      const IMInfo& im_info,
+      MSExperiment& out_ms1);
   };
 } // namespace OpenMS
