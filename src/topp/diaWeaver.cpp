@@ -12,6 +12,8 @@
 #include <OpenMS/SYSTEM/File.h>
 #include <OpenMS/APPLICATIONS/diaWeaver.h>
 
+#include <cmath>
+
 using namespace OpenMS;
 
 //-------------------------------------------------------------
@@ -119,11 +121,20 @@ protected:
       OPENMS_LOG_INFO << "Processing window " << window_idx << "/" << windows.size()
                       << " (m/z: " << w.lower_mz << "-" << w.upper_mz << ")" << std::endl;
 
-      // Build filename base
-      String fname_base =
-        String(w.lower_mz) + "-" + String(w.upper_mz) + "_" +
-        String(w.lower_im) + "-" + String(w.upper_im) + ".mzML";
-      fname_base.substitute(".", "-");
+      // Build human-readable filename: mz<lower>-<upper>_im<lower>-<upper>.mzML
+      // Round m/z to integers, IM to 2 decimal places for readability
+      String fname_base = "mz" + String(static_cast<int>(std::round(w.lower_mz))) +
+                          "-" + String(static_cast<int>(std::round(w.upper_mz)));
+      if (w.hasIonMobility())
+      {
+        // Format IM with 2 decimal places, replace decimal point with 'p' for filename safety
+        String im_lower = String::number(w.lower_im, 2);
+        String im_upper = String::number(w.upper_im, 2);
+        im_lower.substitute(".", "p");
+        im_upper.substitute(".", "p");
+        fname_base += "_im" + im_lower + "-" + im_upper;
+      }
+      fname_base += ".mzML";
 
       // Extract and write MS2
       DiaWeaver::extractSingleMS2Window(raw, w, indices, im_info, ms2_exp,
