@@ -497,7 +497,15 @@ namespace OpenMS
           std::string unit_accession = sm.convert(currentElement->getAttribute(TAG_unit_accession));
 
           // set precision, data_type
-          Internal::MzMLHandlerHelper::handleBinaryDataArrayCVParam(data, accession, value, name, unit_accession);
+          bool handled = Internal::MzMLHandlerHelper::handleBinaryDataArrayCVParam(data, accession, value, name, unit_accession);
+
+          // For unhandled CV params (e.g., ion mobility arrays like MS:1003006),
+          // set the array name from the cvParam's name attribute if not already set.
+          // This mirrors the behavior in MzMLHandler.cpp for non-default binary arrays.
+          if (!handled && !name.empty() && data.back().meta.getName().empty())
+          {
+            data.back().meta.setName(name);
+          }
         }
         else if (xercesc::XMLString::equals(currentElement->getTagName(), TAG_userParam))
         {

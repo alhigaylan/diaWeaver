@@ -330,9 +330,10 @@ namespace OpenMS
   bool IMDataConverter::getIMUnit(const DataArrays::FloatDataArray& fda, DriftTimeUnit& unit)
   {
     const auto& cv = ControlledVocabulary::getPSIMSCV();
-    if (fda.getName().hasPrefix(Constants::UserParam::ION_MOBILITY) ||
-    fda.getName().hasPrefix(Constants::UserParam::INVERSE_REDUCED_ION_MOBILITY))
+    if (fda.getName().hasPrefix(Constants::UserParam::ION_MOBILITY))
     { // fallback for non-standard IM arrays (as created by Mobi-DIK, or "Ion Mobility Centroid" from PeakPickerIM)
+      // MS:1002815 --> inverse reduced ion mobility, units VSSC
+      // MS:1003006 --> mean inverse reduced ion mobility array. units VSSC.
       if (fda.getName().hasSubstring("MS:1002815"))
       {
         unit = DriftTimeUnit::VSSC;

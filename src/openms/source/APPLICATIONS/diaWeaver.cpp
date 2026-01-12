@@ -19,7 +19,7 @@ const std::string& DiaWeaver::IMInfo::getIMArrayName() const
 {
   if (unit == DriftTimeUnit::VSSC)
   {
-    return Constants::UserParam::INVERSE_REDUCED_ION_MOBILITY;
+    return Constants::UserParam::MEAN_INVERSE_REDUCED_ION_MOBILITY_ARRAY;
   }
   return Constants::UserParam::ION_MOBILITY;
 }
@@ -493,8 +493,7 @@ void DiaWeaver::determineWindows(
 }
 
 // ----------------------------------------------------------------------
-// Determine ion mobility info for the dataset
-// Loads only the first MS1 and MS2 spectra to check for IM data
+// Determine ion mobility info for the dataset (on-disk version)
 // ----------------------------------------------------------------------
 DiaWeaver::IMInfo DiaWeaver::determineIMInfo(
   OnDiscMSExperiment& raw,
@@ -529,14 +528,13 @@ DiaWeaver::IMInfo DiaWeaver::determineIMInfo(
   }
 
   // Check 2: Do spectra contain ion mobility data arrays?
-  // Check first MS1 spectrum by loading it from disk
+  // Check first MS1 spectrum
   bool ms1_has_im = false;
   Size ms1_im_index = 0;
   DriftTimeUnit im_unit = DriftTimeUnit::NONE;
   for (Size i = 0; i < meta->size(); ++i)
   {
     if ((*meta)[i].getMSLevel() != 1) continue;
-    // Load the actual spectrum to check for IM data
     MSSpectrum spec = raw.getSpectrum(i);
     if (spec.containsIMData())
     {
@@ -554,7 +552,6 @@ DiaWeaver::IMInfo DiaWeaver::determineIMInfo(
   for (Size i = 0; i < meta->size(); ++i)
   {
     if ((*meta)[i].getMSLevel() != 2) continue;
-    // Load the actual spectrum to check for IM data
     MSSpectrum spec = raw.getSpectrum(i);
     if (spec.containsIMData())
     {
