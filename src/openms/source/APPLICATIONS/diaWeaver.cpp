@@ -291,7 +291,7 @@ void DiaWeaver::extractMS2Windows(
           }
         }
       }
-      
+
       // Add fragment spectrum
       if (!frag_spec.empty())
       {
@@ -373,18 +373,22 @@ void DiaWeaver::extractMS1Windows(
           continue;
         }
 
-        // Optionally filter by ion mobility
-        if (im_array)
+        // Filter by ion mobility only if window has IM bounds
+        if (im_array && window.hasIonMobility())
         {
           const double im = (*im_array)[i];
           if (im < window.lower_im || im > window.upper_im)
           {
             continue;
           }
-          im_fda.push_back(im);
         }
 
+        // Add peak and corresponding IM value (if available)
         new_spec.push_back(spec[i]);
+        if (im_array)
+        {
+          im_fda.push_back((*im_array)[i]);
+        }
       }
 
       if (new_spec.empty()) continue;
@@ -781,18 +785,22 @@ void DiaWeaver::extractMS1Windows(
           continue;
         }
 
-        // Optionally filter by ion mobility
-        if (im_array)
+        // Filter by ion mobility only if window has IM bounds
+        if (im_array && window.hasIonMobility())
         {
           const double im = (*im_array)[j];
           if (im < window.lower_im || im > window.upper_im)
           {
             continue;
           }
-          im_fda.push_back(im);
         }
 
+        // Add peak and corresponding IM value (if available)
         new_spec.push_back(spec[j]);
+        if (im_array)
+        {
+          im_fda.push_back((*im_array)[j]);
+        }
       }
 
       if (new_spec.empty()) continue;
@@ -978,18 +986,22 @@ void DiaWeaver::extractSingleMS1Window(
         continue;
       }
 
-      // Optionally filter by ion mobility
-      if (im_array)
+      // Filter by ion mobility only if window has IM bounds
+      if (im_array && window.hasIonMobility())
       {
         const double im = (*im_array)[k];
         if (im < window.lower_im || im > window.upper_im)
         {
           continue;
         }
-        im_fda.push_back(im);
       }
 
+      // Add peak and corresponding IM value (if available)
       new_spec.push_back(spec[k]);
+      if (im_array)
+      {
+        im_fda.push_back((*im_array)[k]);
+      }
     }
 
     if (new_spec.empty()) continue;

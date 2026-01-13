@@ -31,7 +31,7 @@
 
 
 using namespace std;
-
+#define DEBUG_PICKER
 #ifdef DEBUG_PICKER
 #include <OpenMS/FORMAT/MzMLFile.h>
 #endif
@@ -727,11 +727,16 @@ namespace OpenMS
       #ifdef DEBUG_PICKER
       OPENMS_LOG_DEBUG << "[Number of unclaimed peaks after clustering] " << unclaimed_frame.size() << " peaks.\n" << std::endl;
       // PRINT CLUSTERED UNCLAIMED PEAKS //
-      for (size_t i = 0; i < unclaimed_frame.size(); ++i)
+      if (unclaimed_frame.containsIMData())
       {
-        OPENMS_LOG_DEBUG << "clustered m/z: " << unclaimed_frame[i].getMZ()
-                  << ", inty: " << unclaimed_frame[i].getIntensity()
-                  << ", ion mobility: " << clustered_im_array[i] << std::endl;
+        const auto [debug_im_idx, debug_im_unit] = unclaimed_frame.getIMData();
+        const auto& debug_im_array = unclaimed_frame.getFloatDataArrays()[debug_im_idx];
+        for (size_t i = 0; i < unclaimed_frame.size(); ++i)
+        {
+          OPENMS_LOG_DEBUG << "clustered m/z: " << unclaimed_frame[i].getMZ()
+                    << ", inty: " << unclaimed_frame[i].getIntensity()
+                    << ", ion mobility: " << debug_im_array[i] << std::endl;
+        }
       }
       #endif
 
@@ -1045,6 +1050,10 @@ namespace OpenMS
 
       // Recompute m/z centers and output centroided frame
       MSSpectrum centroided_frame = computeCentroids_(mobilogram_traces, picked_traces);
+
+      // Remove extra FDAs (IM FWHM, MZ FWHM) BEFORE Add_unclaimedPeaks,
+      removeAllFloatDataArraysExcept(centroided_frame, Constants::UserParam::ION_MOBILITY_CENTROID);
+
       // Add unclaimed raw peaks to centroided data
       if (include_unclaimed_)
       {
@@ -1059,7 +1068,6 @@ namespace OpenMS
       centroided_frame.setMSLevel(spectrum.getMSLevel());
       centroided_frame.setName(spectrum.getName());
       centroided_frame.setRT(spectrum.getRT());
-      removeAllFloatDataArraysExcept(centroided_frame, Constants::UserParam::ION_MOBILITY_CENTROID);
       centroided_frame.setIMFormat(IMFormat::CENTROIDED);
       spectrum = std::move(centroided_frame);
       
