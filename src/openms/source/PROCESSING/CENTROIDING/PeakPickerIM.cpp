@@ -907,8 +907,34 @@ namespace OpenMS
 #endif
       if (picked_spectrum.empty())
       {
-        OPENMS_LOG_WARN << "No m/z peaks picked. Returning empty spectrum.\n";
-        spectrum.clear(true);
+        if (!include_unclaimed_)
+        {
+          OPENMS_LOG_WARN << "No m/z peaks picked. Returning empty spectrum.\n";
+          spectrum.clear(true);
+          return;
+        }
+
+        // No peaks picked but include_unclaimed_ is true: cluster all raw peaks directly
+        OPENMS_LOG_INFO << "No m/z peaks picked, but include_unclaimed is enabled. "
+                        << "Clustering all raw peaks directly.\n";
+
+        // Create empty centroided frame and mark all peaks as unclaimed
+        MSSpectrum centroided_frame;
+        MSSpectrum::FloatDataArray empty_im_array;
+        empty_im_array.setName(Constants::UserParam::ION_MOBILITY_CENTROID);
+        centroided_frame.getFloatDataArrays().push_back(std::move(empty_im_array));
+
+        // claimed[i] = false means peak i is unclaimed; all false = all peaks unclaimed
+        std::vector<bool> claimed(spectrum.size(), false);
+        Add_unclaimedPeaks(centroided_frame, spectrum, claimed);
+
+        // Copy spectrum settings to output
+        static_cast<SpectrumSettings&>(centroided_frame) = static_cast<const SpectrumSettings&>(spectrum);
+        centroided_frame.setMSLevel(spectrum.getMSLevel());
+        centroided_frame.setName(spectrum.getName());
+        centroided_frame.setRT(spectrum.getRT());
+        centroided_frame.setIMFormat(IMFormat::CENTROIDED);
+        spectrum = std::move(centroided_frame);
         return;
       }
 
