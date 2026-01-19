@@ -9,6 +9,7 @@
 #include <OpenMS/ANALYSIS/OPENSWATH/MasstraceCorrelator.h>
 #include <OpenMS/PROCESSING/SMOOTHING/SavitzkyGolayFilter.h>
 #include <OpenMS/FORMAT/FileHandler.h>
+#include <OpenMS/IONMOBILITY/IMTypes.h>
 
 #ifdef TESTING
 #define DEBUG_MASSTRACES
@@ -401,12 +402,12 @@ class TOPPCorrelateMasstraces
           ms1_assignment_map[i].push_back(j);
           std::vector< double > feature_arr;
           feature_arr.push_back(rt_cache_ms2[j]);  // MS2 retention time
-          feature_arr.push_back(fabs(rt_cache_ms1[i] - rt_cache_ms2[j] ) ); // difference between MS1 and MS2 RT
-          feature_arr.push_back(lag); // lag
-          feature_arr.push_back(pearson_score); // pearson score
-          feature_arr.push_back(lag_intensity); // lag intensity
-          feature_arr.push_back(im_cache_ms2[j]); // MS2 fragment ion mobility
-          feature_arr.push_back((fabs(im_cache_ms1[i] - im_cache_ms2[j]))); // delta im
+          //feature_arr.push_back(fabs(rt_cache_ms1[i] - rt_cache_ms2[j] ) ); // difference between MS1 and MS2 RT
+          //feature_arr.push_back(lag); // lag
+          //feature_arr.push_back(pearson_score); // pearson score
+          //feature_arr.push_back(lag_intensity); // lag intensity
+          //feature_arr.push_back(im_cache_ms2[j]); // MS2 fragment ion mobility
+          //feature_arr.push_back((fabs(im_cache_ms1[i] - im_cache_ms2[j]))); // delta im
           feature_attributes[i].push_back(feature_arr);
         }
       }
@@ -487,26 +488,29 @@ class TOPPCorrelateMasstraces
       ConsensusFeature f2 = MS1_feature_map[i];
       spectrum.setRT(f2.getRT());
       spectrum.setMSLevel(2);
+      spectrum.setType(SpectrumSettings::SpectrumType::CENTROID);
       // set ion mobility
       spectrum.setDriftTime(f2.getMetaValue("Ion Mobility Centroid"));
 
       Precursor p;
       p.setMZ(f2.getMZ());
       p.setCharge(f2.getCharge());
+      p.setDriftTime(f2.getMetaValue("Ion Mobility Centroid"));
+      p.setDriftTimeUnit(DriftTimeUnit::VSSC);
       std::vector<Precursor> preclist;
       preclist.push_back(p);
       spectrum.setPrecursors(preclist);
 
       // fill meta data
       spectrum.getFloatDataArrays().clear();
-      spectrum.getFloatDataArrays().resize(7);
-      spectrum.getFloatDataArrays()[0].setName("RT_apex");
-      spectrum.getFloatDataArrays()[1].setName("RT_diff");
-      spectrum.getFloatDataArrays()[2].setName("lag");
-      spectrum.getFloatDataArrays()[3].setName("pearson_score");
-      spectrum.getFloatDataArrays()[4].setName("lag_intensity");
-      spectrum.getFloatDataArrays()[5].setName("MS2 IM");
-      spectrum.getFloatDataArrays()[6].setName("Delta IM");
+      //spectrum.getFloatDataArrays().resize(7);
+      //spectrum.getFloatDataArrays()[0].setName("RT_apex");
+      //spectrum.getFloatDataArrays()[1].setName("RT_diff");
+      //spectrum.getFloatDataArrays()[2].setName("lag");
+      //spectrum.getFloatDataArrays()[3].setName("pearson_score");
+      //spectrum.getFloatDataArrays()[4].setName("lag_intensity");
+      //spectrum.getFloatDataArrays()[5].setName("MS2 IM");
+      //spectrum.getFloatDataArrays()[6].setName("Delta IM");
 
       // ---- NEW addition. Check if spectrum is above 500. Filter by pearson corr ----
       std::vector<std::pair<Size, double>> assignment_scores;
@@ -546,13 +550,13 @@ class TOPPCorrelateMasstraces
         peak.setIntensity(f1.getIntensity());
         spectrum.push_back(peak);
 
-        spectrum.getFloatDataArrays()[0].push_back(feature_attributes[i][assignment_idx][0]);
-        spectrum.getFloatDataArrays()[1].push_back(feature_attributes[i][assignment_idx][1]);
-        spectrum.getFloatDataArrays()[2].push_back(feature_attributes[i][assignment_idx][2]);
-        spectrum.getFloatDataArrays()[3].push_back(feature_attributes[i][assignment_idx][3]);
-        spectrum.getFloatDataArrays()[4].push_back(feature_attributes[i][assignment_idx][4]);
-        spectrum.getFloatDataArrays()[5].push_back(feature_attributes[i][assignment_idx][5]);
-        spectrum.getFloatDataArrays()[6].push_back(feature_attributes[i][assignment_idx][6]);
+        //spectrum.getFloatDataArrays()[0].push_back(feature_attributes[i][assignment_idx][0]);
+        //spectrum.getFloatDataArrays()[1].push_back(feature_attributes[i][assignment_idx][1]);
+        //spectrum.getFloatDataArrays()[2].push_back(feature_attributes[i][assignment_idx][2]);
+        //spectrum.getFloatDataArrays()[3].push_back(feature_attributes[i][assignment_idx][3]);
+        //spectrum.getFloatDataArrays()[4].push_back(feature_attributes[i][assignment_idx][4]);
+        //spectrum.getFloatDataArrays()[5].push_back(feature_attributes[i][assignment_idx][5]);
+        //spectrum.getFloatDataArrays()[6].push_back(feature_attributes[i][assignment_idx][6]);
 
         // scale intensity of fragments
         //scaleSpectrumByCorrelation(spectrum, 1.0);
