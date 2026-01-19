@@ -86,7 +86,7 @@ namespace OpenMS
         if (!fda.empty())
         {
           auto it_fwhm = getDataArrayByName(fda, Constants::UserParam::FWHM_MZ_ppm);
-          auto it_im = getDataArrayByName(fda, Constants::UserParam::ION_MOBILITY);
+          auto it_im = getDataArrayByName(fda, Constants::UserParam::ION_MOBILITY_CENTROID);
           auto it_imf = getDataArrayByName(fda, Constants::UserParam::FWHM_IM);
 
           if (it_fwhm != fda.end())
@@ -135,7 +135,7 @@ namespace OpenMS
       };
 
       validate_meta_array(Constants::UserParam::FWHM_MZ_ppm, fwhm_meta_idx);
-      validate_meta_array(Constants::UserParam::ION_MOBILITY, im_idx);
+      validate_meta_array(Constants::UserParam::ION_MOBILITY_CENTROID, im_idx);
       validate_meta_array(Constants::UserParam::FWHM_IM, im_fwhm_idx);
     }
 
