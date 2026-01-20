@@ -12,6 +12,8 @@
 #include <OpenMS/KERNEL/OnDiscMSExperiment.h>
 #include <OpenMS/SYSTEM/File.h>
 #include <OpenMS/APPLICATIONS/diaWeaver.h>
+#include <OpenMS/PROCESSING/CENTROIDING/PeakPickerIM.h>
+#include <OpenMS/PROCESSING/CENTROIDING/PeakPickerHiRes.h>
 
 #include <cmath>
 
@@ -73,6 +75,10 @@ protected:
       "save_unfragmented_precursors",
       "If set, save peaks within precursor isolation window in MS2 and apply precursor detection algorithm");
 
+    registerSubsection_("PeakPickerIM", "Parameters for ion mobility peak picking (used when input has IM data)");
+
+    registerSubsection_("PeakPickerHiRes", "Parameters for high-resolution peak picking (used when input has no IM data)");
+
     registerIntOption_(
       "threads",
       "<n>",
@@ -82,10 +88,27 @@ protected:
     setMinInt_("threads", 1);
   }
 
+  Param getSubsectionDefaults_(const String& name) const override
+  {
+    if (name == "PeakPickerIM")
+    {
+      PeakPickerIM ppim;
+      return ppim.getDefaults();
+    }
+    if (name == "PeakPickerHiRes")
+    {
+      PeakPickerHiRes pphr;
+      return pphr.getDefaults();
+    }
+    return Param();
+  }
+
   ExitCodes main_(int, const char**) override
   {
     const String in = getStringOption_("in");
     const bool save_precursors = getFlag_("save_unfragmented_precursors");
+    const Param ppim_params = getParam_().copy("PeakPickerIM:", true);
+    const Param pphr_params = getParam_().copy("PeakPickerHiRes:", true);
 #ifdef _OPENMP
     const int num_threads = getIntOption_("threads");
 #endif
@@ -143,6 +166,15 @@ protected:
 #endif
     OPENMS_LOG_INFO << " with fast binary cache..." << std::endl;
 
+    if (im_info.available)
+    {
+      OPENMS_LOG_INFO << "Ion mobility data detected. Using PeakPickerIM (mobilogram method)." << std::endl;
+    }
+    else
+    {
+      OPENMS_LOG_INFO << "No ion mobility data detected. Using PeakPickerHiRes." << std::endl;
+    }
+
     // ------------------------------
     // Step 3: Process windows in parallel
     // Each thread opens its own CachedmzML for thread-safe fast reading
@@ -160,6 +192,18 @@ protected:
 
       // Each thread opens its own CachedmzML for thread-safe fast binary access
       CachedmzML thread_cache(cache_file);
+
+      // Thread-local peak picker instances (avoids lock contention)
+      PeakPickerIM peak_picker_im;
+      PeakPickerHiRes peak_picker_hr;
+      if (im_info.available)
+      {
+        peak_picker_im.setParameters(ppim_params);
+      }
+      else
+      {
+        peak_picker_hr.setParameters(pphr_params);
+      }
 
       // Thread-local buffers
       MzMLFile mzml;
@@ -180,22 +224,67 @@ protected:
       }
       fname_base += ".mzML";
 
-      // Extract and write MS2 (using fast binary cache)
+      // Extract MS2 (using fast binary cache)
       DiaWeaver::extractSingleMS2Window(thread_cache, w, indices, im_info, ms2_exp,
                                          save_precursors ? &precursor_exp : nullptr);
+
+      // Apply peak picking to MS2 spectra
+      for (auto& spec : ms2_exp)
+      {
+        if (im_info.available)
+        {
+          peak_picker_im.pickIMTraces(spec);
+        }
+        else
+        {
+          MSSpectrum picked;
+          peak_picker_hr.pick(spec, picked);
+          spec = std::move(picked);
+        }
+      }
+
       if (!ms2_exp.empty())
       {
         mzml.store(out + "/ms2_" + fname_base, ms2_exp);
       }
 
-      // Write precursors if requested
+      // Apply peak picking to precursors and write if requested
       if (save_precursors && !precursor_exp.empty())
       {
+        for (auto& spec : precursor_exp)
+        {
+          if (im_info.available)
+          {
+            peak_picker_im.pickIMTraces(spec);
+          }
+          else
+          {
+            MSSpectrum picked;
+            peak_picker_hr.pick(spec, picked);
+            spec = std::move(picked);
+          }
+        }
         mzml.store(out + "/precursor_" + fname_base, precursor_exp);
       }
 
-      // Extract and write MS1 (using fast binary cache)
+      // Extract MS1 (using fast binary cache)
       DiaWeaver::extractSingleMS1Window(thread_cache, w, im_info, ms1_exp);
+
+      // Apply peak picking to MS1 spectra
+      for (auto& spec : ms1_exp)
+      {
+        if (im_info.available)
+        {
+          peak_picker_im.pickIMTraces(spec);
+        }
+        else
+        {
+          MSSpectrum picked;
+          peak_picker_hr.pick(spec, picked);
+          spec = std::move(picked);
+        }
+      }
+
       if (!ms1_exp.empty())
       {
         mzml.store(out + "/ms1_" + fname_base, ms1_exp);
