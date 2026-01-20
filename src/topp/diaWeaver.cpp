@@ -998,6 +998,80 @@ protected:
 
     OPENMS_LOG_INFO << "Finished processing all windows." << std::endl;
 
+    // ------------------------------
+    // Combine all pseudo spectra files into one
+    // ------------------------------
+    OPENMS_LOG_INFO << "Combining pseudo spectra files..." << std::endl;
+
+    // Collect all mzML files from the output directory
+    std::vector<String> pseudo_files;
+    for (Size idx = 0; idx < total_windows; ++idx)
+    {
+      const DiaWeaver::DIAWindow& w = window_vec[idx].first;
+
+      // Reconstruct the filename
+      String fname_base = "mz" + String(static_cast<int>(std::round(w.lower_mz))) +
+                          "-" + String(static_cast<int>(std::round(w.upper_mz)));
+      if (w.hasIonMobility())
+      {
+        String im_lower = String::number(w.lower_im, 2);
+        String im_upper = String::number(w.upper_im, 2);
+        im_lower.substitute(".", "p");
+        im_upper.substitute(".", "p");
+        fname_base += "_im" + im_lower + "-" + im_upper;
+      }
+      fname_base += ".mzML";
+
+      String filepath = out + "/" + fname_base;
+      if (File::exists(filepath))
+      {
+        pseudo_files.push_back(filepath);
+      }
+    }
+
+    if (pseudo_files.empty())
+    {
+      OPENMS_LOG_WARN << "No pseudo spectra files were generated." << std::endl;
+      return EXECUTION_OK;
+    }
+
+    // Combine all pseudo spectra into one MSExperiment
+    // Load files sequentially to minimize memory usage
+    MSExperiment combined_spectra;
+    MzMLFile mzml_reader;
+
+    for (const String& filepath : pseudo_files)
+    {
+      MSExperiment temp_exp;
+      mzml_reader.load(filepath, temp_exp);
+
+      // Append spectra to combined experiment
+      for (auto& spectrum : temp_exp)
+      {
+        combined_spectra.addSpectrum(std::move(spectrum));
+      }
+    }
+
+    // Sort combined spectra by RT for better organization
+    combined_spectra.sortSpectra(false);  // Sort by RT
+
+    // Write the combined file
+    String combined_filepath = out + "/pseudo_spectra_combined.mzML";
+    OPENMS_LOG_INFO << "Writing combined pseudo spectra (" << combined_spectra.size()
+                    << " spectra) to: " << combined_filepath << std::endl;
+    MzMLFile().store(combined_filepath, combined_spectra);
+
+    // Clean up individual pseudo spectra files
+    for (const String& filepath : pseudo_files)
+    {
+      if (File::remove(filepath))
+      {
+        OPENMS_LOG_DEBUG << "Removed temporary file: " << filepath << std::endl;
+      }
+    }
+
+    OPENMS_LOG_INFO << "Done. Combined pseudo spectra saved to: " << combined_filepath << std::endl;
+
     return EXECUTION_OK;
   }
 };
