@@ -8,7 +8,6 @@
 
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
 #include <OpenMS/FORMAT/MzMLFile.h>
-#include <OpenMS/FORMAT/CachedMzML.h>
 #include <OpenMS/KERNEL/OnDiscMSExperiment.h>
 #include <OpenMS/SYSTEM/File.h>
 #include <OpenMS/APPLICATIONS/diaWeaver.h>
@@ -83,9 +82,18 @@ protected:
       "threads",
       "<n>",
       1,
-      "Number of threads to use for parallel window processing (default: 1)",
+      "Total number of threads to use for processing",
       false);
     setMinInt_("threads", 1);
+
+    registerIntOption_(
+      "threads_outer_loop",
+      "<n>",
+      -1,
+      "Number of threads for the outer loop (over DIA windows). Remaining threads are used for "
+      "inner loop (peak picking within each window). Set to -1 to use all threads in outer loop only (no nested parallelism). "
+      "Example: with 24 total threads and 4 outer threads, each window gets 6 threads for peak picking.",
+      false);
   }
 
   Param getSubsectionDefaults_(const String& name) const override
@@ -111,6 +119,7 @@ protected:
     const Param pphr_params = getParam_().copy("PeakPickerHiRes:", true);
 #ifdef _OPENMP
     const int num_threads = getIntOption_("threads");
+    const int threads_outer_loop = getIntOption_("threads_outer_loop");
 #endif
 
     String out = getStringOption_("out");
@@ -145,26 +154,14 @@ protected:
       windows.begin(), windows.end());
     const Size total_windows = window_vec.size();
 
-    // ------------------------------
-    // Step 2: Create binary cache for fast parallel I/O
-    // Load the full file once and cache it for parallel access
-    // ------------------------------
-    OPENMS_LOG_INFO << "Loading and caching data for fast parallel access..." << std::endl;
-    MzMLFile mzml_loader;
-    MSExperiment full_exp;
-    mzml_loader.load(in, full_exp);
-
-    const String cache_file = out + "/.diaWeaver_cache.mzML";
-    CachedmzML::store(cache_file, full_exp);
-
-    // Clear full_exp to free memory - we'll read from cache now
-    full_exp.clear(true);
+    // Note: OnDiscMSExperiment provides memory-efficient on-demand spectrum loading
+    // Each thread will get its own copy via firstprivate (creates separate file handles)
 
     OPENMS_LOG_INFO << "Processing " << total_windows << " DIA windows";
 #ifdef _OPENMP
     OPENMS_LOG_INFO << " using " << num_threads << " thread(s)";
 #endif
-    OPENMS_LOG_INFO << " with fast binary cache..." << std::endl;
+    OPENMS_LOG_INFO << " with on-disc random access..." << std::endl;
 
     if (im_info.available)
     {
@@ -176,34 +173,42 @@ protected:
     }
 
     // ------------------------------
-    // Step 3: Process windows in parallel
-    // Each thread opens its own CachedmzML for thread-safe fast reading
+    // Step 3: Process windows in parallel with nested parallelism
+    // Outer loop: over DIA windows
+    // Inner loop: over spectra within each window (for peak picking)
     // ------------------------------
     Size processed = 0;
 
 #ifdef _OPENMP
-    omp_set_num_threads(num_threads);
-#pragma omp parallel for schedule(dynamic, 1)
+    // Store total number of threads available
+    const int total_threads = num_threads;
+
+    // Calculate outer and inner thread counts
+    int outer_threads = total_threads;
+    int inner_threads = 1;
+
+    if (threads_outer_loop > 0)
+    {
+      // User specified nested parallelism
+      outer_threads = std::min(threads_outer_loop, total_threads);
+      inner_threads = std::max(1, total_threads / outer_threads);
+      omp_set_nested(1);
+      omp_set_dynamic(0);
+      OPENMS_LOG_INFO << "Using nested parallelism: " << outer_threads << " outer threads x "
+                      << inner_threads << " inner threads for peak picking." << std::endl;
+    }
+    else
+    {
+      OPENMS_LOG_INFO << "Using " << outer_threads << " threads for window processing (no nested parallelism)." << std::endl;
+    }
+
+    omp_set_num_threads(outer_threads);
+#pragma omp parallel for schedule(dynamic, 1) firstprivate(on_disc)
 #endif
     for (SignedSize idx = 0; idx < static_cast<SignedSize>(total_windows); ++idx)
     {
       const DiaWeaver::DIAWindow& w = window_vec[idx].first;
       const std::vector<Size>& indices = window_vec[idx].second;
-
-      // Each thread opens its own CachedmzML for thread-safe fast binary access
-      CachedmzML thread_cache(cache_file);
-
-      // Thread-local peak picker instances (avoids lock contention)
-      PeakPickerIM peak_picker_im;
-      PeakPickerHiRes peak_picker_hr;
-      if (im_info.available)
-      {
-        peak_picker_im.setParameters(ppim_params);
-      }
-      else
-      {
-        peak_picker_hr.setParameters(pphr_params);
-      }
 
       // Thread-local buffers
       MzMLFile mzml;
@@ -224,66 +229,172 @@ protected:
       }
       fname_base += ".mzML";
 
-      // Extract MS2 (using fast binary cache)
-      DiaWeaver::extractSingleMS2Window(thread_cache, w, indices, im_info, ms2_exp,
+      // Extract MS2 (on-demand from disk - each thread has its own file handle)
+      DiaWeaver::extractSingleMS2Window(on_disc, w, indices, im_info, ms2_exp,
                                          save_precursors ? &precursor_exp : nullptr);
 
-      // Apply peak picking to MS2 spectra
-      for (auto& spec : ms2_exp)
+      // Apply peak picking to MS2 spectra (inner parallel loop)
+      // Use parallel region to create thread-private pickers (more efficient than per-iteration)
+#ifdef _OPENMP
+#pragma omp parallel num_threads(inner_threads)
       {
+        PeakPickerIM picker_im;
+        PeakPickerHiRes picker_hr;
         if (im_info.available)
         {
-          peak_picker_im.pickIMTraces(spec);
+          picker_im.setParameters(ppim_params);
         }
         else
         {
-          MSSpectrum picked;
-          peak_picker_hr.pick(spec, picked);
-          spec = std::move(picked);
+          picker_hr.setParameters(pphr_params);
+        }
+
+#pragma omp for schedule(dynamic, 1)
+        for (SignedSize s = 0; s < static_cast<SignedSize>(ms2_exp.size()); ++s)
+        {
+          if (im_info.available)
+          {
+            picker_im.pickIMTraces(ms2_exp[s]);
+          }
+          else
+          {
+            MSSpectrum picked;
+            picker_hr.pick(ms2_exp[s], picked);
+            ms2_exp[s] = std::move(picked);
+          }
         }
       }
+#else
+      for (SignedSize s = 0; s < static_cast<SignedSize>(ms2_exp.size()); ++s)
+      {
+        PeakPickerIM picker_im;
+        PeakPickerHiRes picker_hr;
+        if (im_info.available)
+        {
+          picker_im.setParameters(ppim_params);
+          picker_im.pickIMTraces(ms2_exp[s]);
+        }
+        else
+        {
+          picker_hr.setParameters(pphr_params);
+          MSSpectrum picked;
+          picker_hr.pick(ms2_exp[s], picked);
+          ms2_exp[s] = std::move(picked);
+        }
+      }
+#endif
 
       if (!ms2_exp.empty())
       {
         mzml.store(out + "/ms2_" + fname_base, ms2_exp);
       }
 
-      // Apply peak picking to precursors and write if requested
+      // Apply peak picking to precursors (inner parallel loop)
       if (save_precursors && !precursor_exp.empty())
       {
-        for (auto& spec : precursor_exp)
+#ifdef _OPENMP
+#pragma omp parallel num_threads(inner_threads)
+        {
+          PeakPickerIM picker_im;
+          PeakPickerHiRes picker_hr;
+          if (im_info.available)
+          {
+            picker_im.setParameters(ppim_params);
+          }
+          else
+          {
+            picker_hr.setParameters(pphr_params);
+          }
+
+#pragma omp for schedule(dynamic, 1)
+          for (SignedSize s = 0; s < static_cast<SignedSize>(precursor_exp.size()); ++s)
+          {
+            if (im_info.available)
+            {
+              picker_im.pickIMTraces(precursor_exp[s]);
+            }
+            else
+            {
+              MSSpectrum picked;
+              picker_hr.pick(precursor_exp[s], picked);
+              precursor_exp[s] = std::move(picked);
+            }
+          }
+        }
+#else
+        for (SignedSize s = 0; s < static_cast<SignedSize>(precursor_exp.size()); ++s)
+        {
+          PeakPickerIM picker_im;
+          PeakPickerHiRes picker_hr;
+          if (im_info.available)
+          {
+            picker_im.setParameters(ppim_params);
+            picker_im.pickIMTraces(precursor_exp[s]);
+          }
+          else
+          {
+            picker_hr.setParameters(pphr_params);
+            MSSpectrum picked;
+            picker_hr.pick(precursor_exp[s], picked);
+            precursor_exp[s] = std::move(picked);
+          }
+        }
+#endif
+        mzml.store(out + "/precursor_" + fname_base, precursor_exp);
+      }
+
+      // Extract MS1 (on-demand from disk - each thread has its own file handle)
+      DiaWeaver::extractSingleMS1Window(on_disc, w, im_info, ms1_exp);
+
+      // Apply peak picking to MS1 spectra (inner parallel loop)
+#ifdef _OPENMP
+#pragma omp parallel num_threads(inner_threads)
+      {
+        PeakPickerIM picker_im;
+        PeakPickerHiRes picker_hr;
+        if (im_info.available)
+        {
+          picker_im.setParameters(ppim_params);
+        }
+        else
+        {
+          picker_hr.setParameters(pphr_params);
+        }
+
+#pragma omp for schedule(dynamic, 1)
+        for (SignedSize s = 0; s < static_cast<SignedSize>(ms1_exp.size()); ++s)
         {
           if (im_info.available)
           {
-            peak_picker_im.pickIMTraces(spec);
+            picker_im.pickIMTraces(ms1_exp[s]);
           }
           else
           {
             MSSpectrum picked;
-            peak_picker_hr.pick(spec, picked);
-            spec = std::move(picked);
+            picker_hr.pick(ms1_exp[s], picked);
+            ms1_exp[s] = std::move(picked);
           }
         }
-        mzml.store(out + "/precursor_" + fname_base, precursor_exp);
       }
-
-      // Extract MS1 (using fast binary cache)
-      DiaWeaver::extractSingleMS1Window(thread_cache, w, im_info, ms1_exp);
-
-      // Apply peak picking to MS1 spectra
-      for (auto& spec : ms1_exp)
+#else
+      for (SignedSize s = 0; s < static_cast<SignedSize>(ms1_exp.size()); ++s)
       {
+        PeakPickerIM picker_im;
+        PeakPickerHiRes picker_hr;
         if (im_info.available)
         {
-          peak_picker_im.pickIMTraces(spec);
+          picker_im.setParameters(ppim_params);
+          picker_im.pickIMTraces(ms1_exp[s]);
         }
         else
         {
+          picker_hr.setParameters(pphr_params);
           MSSpectrum picked;
-          peak_picker_hr.pick(spec, picked);
-          spec = std::move(picked);
+          picker_hr.pick(ms1_exp[s], picked);
+          ms1_exp[s] = std::move(picked);
         }
       }
+#endif
 
       if (!ms1_exp.empty())
       {
@@ -301,9 +412,13 @@ protected:
       }
     }
 
-    // Clean up cache file
-    File::remove(cache_file);
-    File::remove(cache_file + ".cached");
+#ifdef _OPENMP
+    // Restore total thread count if nested parallelism was used
+    if (threads_outer_loop > 0)
+    {
+      omp_set_num_threads(total_threads);
+    }
+#endif
 
     OPENMS_LOG_INFO << "Finished processing all windows." << std::endl;
 
