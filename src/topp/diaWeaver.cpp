@@ -8,12 +8,9 @@
 
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
 #include <OpenMS/FORMAT/MzMLFile.h>
-#include <OpenMS/FORMAT/FileHandler.h>
 #include <OpenMS/KERNEL/OnDiscMSExperiment.h>
 #include <OpenMS/KERNEL/FeatureMap.h>
-#include <OpenMS/KERNEL/ConsensusMap.h>
 #include <OpenMS/KERNEL/MassTrace.h>
-#include <OpenMS/KERNEL/ConvexHull2D.h>
 #include <OpenMS/SYSTEM/File.h>
 #include <OpenMS/APPLICATIONS/diaWeaver.h>
 #include <OpenMS/PROCESSING/CENTROIDING/PeakPickerIM.h>
@@ -22,7 +19,6 @@
 #include <OpenMS/FEATUREFINDER/ElutionPeakDetection.h>
 #include <OpenMS/FEATUREFINDER/FeatureFindingMetabo.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/MasstraceCorrelator.h>
-#include <OpenMS/PROCESSING/SMOOTHING/SavitzkyGolayFilter.h>
 #include <OpenMS/CONCEPT/Constants.h>
 
 #include <cmath>
@@ -41,18 +37,18 @@ using namespace OpenMS;
 /**
 @page TOPP_diaWeaver diaWeaver
 
-@brief Splits a DIA mzML file into per-window MS1 and MS2 mzML files with feature detection and pseudo spectra generation.
+@brief Generates pseudo spectra from DIA data by correlating MS1 precursor features with MS2 fragment traces.
 
-This tool extracts DIA windows from ion mobility DIA data and writes separate mzML files
-for each precursor isolation window. It processes both MS1 and MS2 spectra, filtering
-peaks by m/z and ion mobility ranges defined by the DIA acquisition windows.
+This tool processes DIA (Data Independent Acquisition) data to generate pseudo MS/MS spectra
+by correlating precursor elution profiles with fragment ion traces. It outputs one mzML file
+per DIA window containing the reconstructed spectra.
 
-The tool applies peak picking to all extracted spectra using either PeakPickerIM (for
-ion mobility data) or PeakPickerHiRes (for non-IM data). After peak picking:
-- FeatureFinderMetabo runs on MS1 data to detect monoisotopic peptide features (featureXML output)
-- FeatureFinderMetabo runs on unfragmented precursor data to detect precursor features (featureXML output)
-- MassTraceExtractor runs on MS2 data to extract fragment mass traces (consensusXML output)
-- ClusterMassTraces correlates MS1 features (monoisotopic) with MS2 fragment traces to create pseudo spectra (mzML output)
+The processing pipeline for each DIA window:
+1. Peak picking on MS1 and MS2 spectra (PeakPickerIM for ion mobility data, PeakPickerHiRes otherwise)
+2. FeatureFinderMetabo on MS1 to detect monoisotopic peptide precursor features
+3. MassTraceExtractor on MS2 to extract fragment mass traces
+4. Correlation of MS1 feature elution profiles with MS2 fragment traces using Pearson correlation
+5. Assembly of correlated fragments into pseudo MS/MS spectra
 
 <B>The command line parameters of this tool are:</B>
 @verbinclude TOPP_diaWeaver.cli
@@ -139,14 +135,21 @@ protected:
 
       // Common parameters for all FFM sub-algorithms
       Param p_com;
-      p_com.setValue("noise_threshold_int", 10.0, "Intensity threshold below which peaks are regarded as noise.");
-      p_com.setValue("chrom_peak_snr", 3.0, "Minimum signal-to-noise a mass trace should have.");
+      p_com.setValue("noise_threshold_int", 60.0, "Intensity threshold below which peaks are regarded as noise.");
+      p_com.setValue("chrom_peak_snr", 1.0, "Minimum signal-to-noise a mass trace should have.");
       p_com.setValue("chrom_fwhm", 5.0, "Expected chromatographic peak width (in seconds).");
       combined.insert("common:", p_com);
       combined.setSectionDescription("common", "Common parameters for all other subsections");
 
       // MassTraceDetection parameters
       Param p_mtd = MassTraceDetection().getDefaults();
+      p_mtd.setValue("mass_error_ppm", 7.0, "Allowed mass deviation (in ppm).");
+      p_mtd.setValue("min_trace_length", 5.0, "Minimum expected length of a mass trace (in seconds).");
+      p_mtd.setValue("ion_mobility_tolerance", 0.01, "Allowed ion mobility deviation (in 1/k0).");
+      p_mtd.setValue("reestimate_mt_sd", "false", "Enables dynamic re-estimation of m/z variance during mass trace collection stage.");
+      p_mtd.setValue("quant_method", "max_height", "Method of quantification for mass traces. For LC data 'area' is recommended, 'median' for direct injection data. 'max_height' simply uses the most intense peak in the trace.");
+      p_mtd.setValue("trace_termination_outliers", 2, "Mass trace extension in one direction cancels if this number of consecutive spectra with no detectable peaks is reached.");
+
       p_mtd.remove("noise_threshold_int");
       p_mtd.remove("chrom_peak_snr");
       combined.insert("mtd:", p_mtd);
@@ -155,8 +158,10 @@ protected:
       // ElutionPeakDetection parameters
       Param p_epd;
       p_epd.setValue("enabled", "true", "Enable splitting of isobaric mass traces by chromatographic peak detection. Disable for direct injection.");
+      p_epd.setValue("width_filtering", "off", "Enable filtering of unlikely peak widths. The fixed setting filters out mass traces outside the [min_fwhm, max_fwhm] interval (set parameters accordingly!). The auto setting filters with the 5 and 95% quantiles of the peak width distribution.");
       p_epd.setValidStrings("enabled", {"true", "false"});
       p_epd.insert("", ElutionPeakDetection().getDefaults());
+
       p_epd.remove("chrom_peak_snr");
       p_epd.remove("chrom_fwhm");
       combined.insert("epd:", p_epd);
@@ -164,6 +169,16 @@ protected:
 
       // FeatureFindingMetabo parameters
       Param p_ffm = FeatureFindingMetabo().getDefaults();
+      p_ffm.setValue("isotope_filtering_model", "peptides", "Use peptide isotope model for filtering");
+      p_ffm.setValue("local_rt_range", 5.0, "RT range where to look for coeluting mass traces");
+      p_ffm.setValue("local_mz_range", 3.0, "MZ range where to look for isotopic mass traces");
+      p_ffm.setValue("local_im_range", 0.02, "IM range where to look for isotopic mass traces");
+      p_ffm.setValue("charge_lower_bound", 2, "Lowest charge state to consider");
+      p_ffm.setValue("charge_upper_bound", 4, "Highest charge state to consider");
+      p_ffm.setValue("remove_single_traces", "true", "Remove unassembled traces (single traces).");
+      p_ffm.setValue("mz_scoring_13C", "true", "Use the 13C isotope peak position (~1.003355 Da) as the expected shift in m/z for isotope mass traces (highly recommended for lipidomics!). Disable for general metabolites (as described in Kenar et al. 2014, MCP.)");
+      p_ffm.setValue("use_smoothed_intensities", "false", "Use LOWESS intensities instead of raw intensities.");
+
       p_ffm.remove("chrom_fwhm");
       p_ffm.remove("report_chromatograms");
       combined.insert("ffm:", p_ffm);
@@ -177,14 +192,22 @@ protected:
 
       // Common parameters
       Param p_com;
-      p_com.setValue("noise_threshold_int", 10.0, "Intensity threshold below which peaks are regarded as noise.");
-      p_com.setValue("chrom_peak_snr", 3.0, "Minimum signal-to-noise a mass trace should have.");
-      p_com.setValue("chrom_fwhm", 5.0, "Expected chromatographic peak width (in seconds).");
+      p_com.setValue("noise_threshold_int", 30.0, "Intensity threshold below which peaks are regarded as noise.");
+      p_com.setValue("chrom_peak_snr", 1.0, "Minimum signal-to-noise a mass trace should have.");
+      p_com.setValue("chrom_fwhm", 3.0, "Expected chromatographic peak width (in seconds).");
+
       combined.insert("common:", p_com);
       combined.setSectionDescription("common", "Common parameters for all other subsections");
 
       // MassTraceDetection parameters
       Param p_mtd = MassTraceDetection().getDefaults();
+      p_mtd.setValue("mass_error_ppm", 7.0, "Allowed mass deviation (in ppm).");
+      p_mtd.setValue("min_trace_length", 2.0, "Minimum expected length of a mass trace (in seconds).");
+      p_mtd.setValue("ion_mobility_tolerance", 0.01, "Allowed ion mobility deviation (in 1/k0).");
+      p_mtd.setValue("reestimate_mt_sd", "false", "Enables dynamic re-estimation of m/z variance during mass trace collection stage.");
+      p_mtd.setValue("quant_method", "max_height", "Method of quantification for mass traces. For LC data 'area' is recommended, 'median' for direct injection data. 'max_height' simply uses the most intense peak in the trace.");
+      p_mtd.setValue("trace_termination_outliers", 2, "Mass trace extension in one direction cancels if this number of consecutive spectra with no detectable peaks is reached.");
+
       p_mtd.remove("noise_threshold_int");
       p_mtd.remove("chrom_peak_snr");
       combined.insert("mtd:", p_mtd);
@@ -193,8 +216,10 @@ protected:
       // ElutionPeakDetection parameters
       Param p_epd;
       p_epd.setValue("enabled", "true", "Enable splitting of isobaric mass traces by chromatographic peak detection.");
+      p_epd.setValue("width_filtering", "off", "Enable filtering of unlikely peak widths. The fixed setting filters out mass traces outside the [min_fwhm, max_fwhm] interval (set parameters accordingly!). The auto setting filters with the 5 and 95% quantiles of the peak width distribution.");
       p_epd.setValidStrings("enabled", {"true", "false"});
       p_epd.insert("", ElutionPeakDetection().getDefaults());
+
       p_epd.remove("chrom_peak_snr");
       p_epd.remove("chrom_fwhm");
       combined.insert("epd:", p_epd);
@@ -205,22 +230,11 @@ protected:
     if (name == "ClusterMassTraces")
     {
       Param p;
-      p.setValue("min_pearson_correlation", 0.7, "Minimal pearson correlation score to match elution profiles to each other.");
-      p.setMinFloat("min_pearson_correlation", 0.0);
-      p.setMaxFloat("min_pearson_correlation", 1.0);
-
+      p.setValue("min_pearson_correlation", 0.3, "Minimal pearson correlation score to match elution profiles to each other.");
       p.setValue("max_lag", 1, "Maximal lag (e.g. by how many spectra the peak may be shifted at most).");
-      p.setMinInt("max_lag", 0);
-
-      p.setValue("min_nr_ions", 3, "Minimal number of ions to report a spectrum.");
-      p.setMinInt("min_nr_ions", 1);
-
+      p.setValue("min_nr_ions", 30, "Minimal number of ions to report a spectrum.");
       p.setValue("max_rt_apex_difference", 5.0, "Maximal difference of the apex in retention time (in seconds).");
-      p.setMinFloat("max_rt_apex_difference", 0.0);
-
       p.setValue("im_tolerance", 0.02, "Ion mobility tolerance for matching precursors to fragments.");
-      p.setMinFloat("im_tolerance", 0.0);
-
       return p;
     }
     return Param();
@@ -234,6 +248,7 @@ protected:
    * @param[in] epd_param ElutionPeakDetection parameters
    * @param[in] ffm_param FeatureFindingMetabo parameters
    * @param[out] feat_map Output feature map
+   * @param[out] traces_out Output mass traces (for accessing raw intensity data)
    * @return True on success, false on error
    */
   bool runFeatureFinderMetabo_(MSExperiment& ms_peakmap,
@@ -241,7 +256,8 @@ protected:
                                Param mtd_param,
                                Param epd_param,
                                Param ffm_param,
-                               FeatureMap& feat_map)
+                               FeatureMap& feat_map,
+                               std::vector<MassTrace>& traces_out)
   {
     if (ms_peakmap.empty())
     {
@@ -316,6 +332,9 @@ protected:
     auto intensity_zero = [](Feature& f) { return f.getIntensity() == 0; };
     feat_map.erase(std::remove_if(feat_map.begin(), feat_map.end(), intensity_zero), feat_map.end());
 
+    // Output the mass traces for use in clustering (contains raw intensity data)
+    traces_out = m_traces_final;
+
     OPENMS_LOG_INFO << "FFMetabo: " << m_traces_final.size() << " traces -> "
                     << feat_map.size() << " features" << std::endl;
 
@@ -328,14 +347,14 @@ protected:
    * @param[in] common_param Common parameters for MTE algorithms
    * @param[in] mtd_param MassTraceDetection parameters
    * @param[in] epd_param ElutionPeakDetection parameters
-   * @param[out] consensus_map Output consensus map with mass traces
+   * @param[out] traces_out Output mass traces
    * @return True on success, false on error
    */
   bool runMassTraceExtractor_(MSExperiment& ms_peakmap,
                               const Param& common_param,
                               Param mtd_param,
                               Param epd_param,
-                              ConsensusMap& consensus_map)
+                              std::vector<MassTrace>& traces_out)
   {
     if (ms_peakmap.empty())
     {
@@ -361,7 +380,6 @@ protected:
     }
 
     // Configure and run elution peak detection if enabled
-    std::vector<MassTrace> m_traces_final;
     bool use_epd = epd_param.getValue("enabled").toBool();
 
     if (use_epd)
@@ -375,72 +393,27 @@ protected:
       epdet.detectPeaks(m_traces, split_mtraces);
       if (epdet.getParameters().getValue("width_filtering") == "auto")
       {
-        m_traces_final.clear();
-        epdet.filterByPeakWidth(split_mtraces, m_traces_final);
+        traces_out.clear();
+        epdet.filterByPeakWidth(split_mtraces, traces_out);
       }
       else
       {
-        m_traces_final = split_mtraces;
+        traces_out = std::move(split_mtraces);
       }
     }
     else
     {
-      m_traces_final = m_traces;
+      traces_out = std::move(m_traces);
     }
 
-    // Convert mass traces to ConsensusMap
-    for (Size i = 0; i < m_traces_final.size(); ++i)
-    {
-      if (m_traces_final[i].getSize() == 0)
-      {
-        continue;
-      }
-      ConsensusFeature fcons;
-      int k = 0;
-      for (const Peak2D& mss : m_traces_final[i])
-      {
-        FeatureHandle fhandle;
-        fhandle.setRT(mss.getRT());
-        fhandle.setMZ(mss.getMZ());
-        fhandle.setIntensity(mss.getIntensity());
-        fhandle.setUniqueId(++k);
-        fcons.insert(fhandle);
-      }
-
-      fcons.setMetaValue(3, m_traces_final[i].getLabel());
-      fcons.setCharge(0);
-      fcons.setWidth(m_traces_final[i].estimateFWHM(use_epd));
-      fcons.setQuality(1 - (1.0 / m_traces_final[i].getSize()));
-
-      fcons.setRT(m_traces_final[i].getCentroidRT());
-      fcons.setMZ(m_traces_final[i].getCentroidMZ());
-      fcons.setIntensity(m_traces_final[i].getIntensity(false));
-
-      // Attach mz peak FWHM if available
-      if (m_traces_final[i].fwhm_mz_avg > 0)
-      {
-        fcons.setMetaValue(Constants::UserParam::FWHM_MZ_AVG, m_traces_final[i].fwhm_mz_avg);
-      }
-      // Annotate with ion mobility centroid if available
-      if (m_traces_final[i].getCentroidIM() > 0)
-      {
-        fcons.setMetaValue(Constants::UserParam::ION_MOBILITY_CENTROID, m_traces_final[i].getCentroidIM());
-      }
-      // Add ion mobility peak FWHM if available
-      if (m_traces_final[i].fwhm_im_avg > 0)
-      {
-        fcons.setMetaValue(Constants::UserParam::FWHM_IM_AVG, m_traces_final[i].fwhm_im_avg);
-      }
-
-      consensus_map.push_back(fcons);
-    }
-
-    consensus_map.applyMemberFunction(&UniqueIdInterface::setUniqueId);
-    consensus_map.setUniqueId();
+    // Remove empty traces
+    traces_out.erase(
+      std::remove_if(traces_out.begin(), traces_out.end(),
+                     [](const MassTrace& t) { return t.getSize() == 0; }),
+      traces_out.end());
 
     OPENMS_LOG_INFO << "MassTraceExtractor: " << m_traces.size() << " traces -> "
-                    << m_traces_final.size() << " final traces -> "
-                    << consensus_map.size() << " consensus features" << std::endl;
+                    << traces_out.size() << " final traces" << std::endl;
 
     return true;
   }
@@ -448,6 +421,7 @@ protected:
   /**
    * @brief Cluster MS1 features (precursors) with MS2 mass traces to create pseudo spectra
    * @param[in] ms1_features MS1 peptide features from FeatureFinderMetabo (monoisotopic)
+   * @param[in] ms1_traces MS1 mass traces (for raw intensity data)
    * @param[in] ms2_traces MS2 mass traces (fragments)
    * @param[in] swath_lower Lower m/z bound of the DIA window
    * @param[in] swath_upper Upper m/z bound of the DIA window
@@ -456,7 +430,8 @@ protected:
    * @return True on success
    */
   bool clusterMassTraces_(const FeatureMap& ms1_features,
-                          const ConsensusMap& ms2_traces,
+                          const std::vector<MassTrace>& ms1_traces,
+                          const std::vector<MassTrace>& ms2_traces,
                           double swath_lower,
                           double swath_upper,
                           const Param& cluster_param,
@@ -477,7 +452,14 @@ protected:
 
     MasstraceCorrelator mtcorr;
 
-    // Extract elution profiles from MS1 features (using convex hulls)
+    // Build lookup map from trace label to MassTrace for O(log N) access
+    std::map<String, const MassTrace*> trace_lookup;
+    for (const auto& tr : ms1_traces)
+    {
+      trace_lookup[tr.getLabel()] = &tr;
+    }
+
+    // Extract elution profiles from MS1 features using their underlying mass traces
     std::vector<MasstraceCorrelator::MasstracePointsType> feature_points_ms1;
     std::vector<double> rt_cache_ms1;
     std::vector<double> mz_cache_ms1;
@@ -493,14 +475,13 @@ protected:
       rt_cache_ms1.push_back(f.getRT());
       charge_cache_ms1.push_back(f.getCharge());
 
-      // Get ion mobility if available (check both possible meta value names)
+      // Get ion mobility if available
       if (f.metaValueExists(Constants::UserParam::ION_MOBILITY_CENTROID))
       {
         im_cache_ms1.push_back(f.getMetaValue(Constants::UserParam::ION_MOBILITY_CENTROID));
       }
       else if (f.metaValueExists("masstrace_centroid_im"))
       {
-        // Use first isotope's IM centroid
         std::vector<double> im_values = f.getMetaValue("masstrace_centroid_im");
         im_cache_ms1.push_back(im_values.empty() ? 0.0 : im_values[0]);
       }
@@ -509,86 +490,63 @@ protected:
         im_cache_ms1.push_back(0.0);
       }
 
-      // Extract elution profile from mass trace meta values (stored by FeatureFindingMetabo)
+      // Extract elution profile from the monoisotopic mass trace (real intensity values)
       MasstraceCorrelator::MasstracePointsType points;
-      if (f.metaValueExists("masstrace_centroid_rt") && f.metaValueExists("masstrace_intensity"))
-      {
-        // Get the RT and intensity arrays for the monoisotopic trace (first isotope)
-        std::vector<double> rt_values = f.getMetaValue("masstrace_centroid_rt");
-        std::vector<double> int_values = f.getMetaValue("masstrace_intensity");
 
-        // Use the monoisotopic trace (index 0) if available
-        // Note: These are centroid values per isotope, not the full elution profile
-        // For full profile, we need to look at convex hull + reconstruct from mass trace
-        if (!rt_values.empty() && !int_values.empty())
+      // Get the feature label and extract monoisotopic trace label (first part before '_')
+      if (f.metaValueExists("label"))
+      {
+        String feat_label = f.getMetaValue("label");
+        StringList label_tokens;
+        feat_label.split("_", label_tokens);
+
+        if (!label_tokens.empty())
         {
-          // FFM stores one centroid RT/intensity per isotope trace, not the full profile
-          // Use feature apex as single point for now
-          points.push_back(std::make_pair(f.getRT(), f.getIntensity()));
+          String mono_label = label_tokens[0];
+          auto it = trace_lookup.find(mono_label);
+          if (it != trace_lookup.end())
+          {
+            const MassTrace& mono_trace = *(it->second);
+            // Extract real RT/intensity pairs from the mass trace
+            for (const Peak2D& peak : mono_trace)
+            {
+              points.push_back(std::make_pair(peak.getRT(), peak.getIntensity()));
+            }
+          }
         }
       }
 
-      // Try to extract from convex hull if we have one (hull points are at actual RT positions)
-      if (points.empty() && !f.getConvexHulls().empty())
-      {
-        const ConvexHull2D& hull = f.getConvexHulls()[0]; // Monoisotopic trace hull
-        const auto& hull_points = hull.getHullPoints();
-
-        // Convex hull stores (RT, m/z) - we need intensity
-        // Get unique RT values from hull and use feature intensity as approximation
-        std::set<double> unique_rts;
-        for (const auto& pt : hull_points)
-        {
-          unique_rts.insert(pt[0]); // RT is first coordinate
-        }
-
-        // Create points at each RT with interpolated intensity (simplified: use feature intensity)
-        double peak_rt = f.getRT();
-        double peak_int = f.getIntensity();
-        double width = f.getWidth() > 0 ? f.getWidth() : 10.0; // FWHM or default
-
-        for (double rt : unique_rts)
-        {
-          // Gaussian approximation of elution profile
-          double rt_diff = rt - peak_rt;
-          double sigma = width / 2.355; // FWHM to sigma
-          double intensity = peak_int * std::exp(-0.5 * (rt_diff / sigma) * (rt_diff / sigma));
-          points.push_back(std::make_pair(rt, intensity));
-        }
-
-        // Sort by RT
-        std::sort(points.begin(), points.end(),
-                  [](const auto& a, const auto& b) { return a.first < b.first; });
-      }
-
-      // Fallback: create single point at feature apex
+      // Fallback: create single point at feature apex if no trace found
       if (points.empty())
       {
         points.push_back(std::make_pair(f.getRT(), f.getIntensity()));
+        OPENMS_LOG_DEBUG << "Warning: No mass trace found for feature at m/z " << f.getMZ()
+                         << ", using apex only" << std::endl;
       }
+
       feature_points_ms1.push_back(points);
     }
 
-    // Cache data structures for MS2 traces
+    // Build cache for MS2 traces (elution profiles, m/z, RT, IM)
     std::vector<MasstraceCorrelator::MasstracePointsType> feature_points_ms2;
-    std::vector<std::pair<double, double>> max_intensities_ms2;
     std::vector<double> rt_cache_ms2;
-    mtcorr.createConsensusMapCache(ms2_traces, feature_points_ms2, max_intensities_ms2, rt_cache_ms2);
-
-    // Cache MS2 m/z and IM values
     std::vector<double> mz_cache_ms2;
     std::vector<double> im_cache_ms2;
-    for (Size i = 0; i < ms2_traces.size(); ++i)
+
+    for (const auto& trace : ms2_traces)
     {
-      mz_cache_ms2.push_back(ms2_traces[i].getMZ());
-      if (ms2_traces[i].metaValueExists(Constants::UserParam::ION_MOBILITY_CENTROID))
+      // Extract elution profile (RT/intensity pairs)
+      MasstraceCorrelator::MasstracePointsType points;
+      for (const Peak2D& peak : trace)
       {
-        im_cache_ms2.push_back(ms2_traces[i].getMetaValue(Constants::UserParam::ION_MOBILITY_CENTROID));
+        points.push_back(std::make_pair(peak.getRT(), peak.getIntensity()));
       }
-      else
-      {
-        im_cache_ms2.push_back(0.0);
-      }
+      feature_points_ms2.push_back(points);
+
+      // Cache centroid values
+      rt_cache_ms2.push_back(trace.getCentroidRT());
+      mz_cache_ms2.push_back(trace.getCentroidMZ());
+      im_cache_ms2.push_back(trace.getCentroidIM());
     }
 
     // Assignment map: MS1 feature index -> list of MS2 trace indices
@@ -669,8 +627,8 @@ protected:
       for (int ms2_idx : ms1_assignment_map[i])
       {
         Peak1D peak;
-        peak.setMZ(ms2_traces[ms2_idx].getMZ());
-        peak.setIntensity(ms2_traces[ms2_idx].getIntensity());
+        peak.setMZ(ms2_traces[ms2_idx].getCentroidMZ());
+        peak.setIntensity(ms2_traces[ms2_idx].getIntensity(false));
         spectrum.push_back(peak);
       }
 
@@ -763,9 +721,7 @@ protected:
       OPENMS_LOG_INFO << "No ion mobility data detected. Using PeakPickerHiRes." << std::endl;
     }
 
-    OPENMS_LOG_INFO << "FeatureFinderMetabo will run on MS1 and precursor data." << std::endl;
-    OPENMS_LOG_INFO << "MassTraceExtractor will run on MS2 data." << std::endl;
-    OPENMS_LOG_INFO << "ClusterMassTraces will create pseudo spectra from MS1 features and MS2 traces." << std::endl;
+    OPENMS_LOG_INFO << "Output: pseudo spectra (mzML) per DIA window." << std::endl;
 
     // ------------------------------
     // Step 3: Process windows in parallel with nested parallelism
@@ -806,11 +762,10 @@ protected:
       const std::vector<Size>& indices = window_vec[idx].second;
 
       // Thread-local buffers
-      MzMLFile mzml;
       MSExperiment ms2_exp;
       MSExperiment ms1_exp;
       MSExperiment precursor_exp;
-      ConsensusMap ms2_traces;  // MS2 mass traces for clustering
+      std::vector<MassTrace> ms2_traces;  // MS2 mass traces for clustering
 
       // Build human-readable filename: mz<lower>-<upper>_im<lower>-<upper>.mzML
       String fname_base = "mz" + String(static_cast<int>(std::round(w.lower_mz))) +
@@ -880,23 +835,12 @@ protected:
       }
 #endif
 
+      // Run MassTraceExtractor on MS2 data to get fragment traces for clustering
       if (!ms2_exp.empty())
       {
-        mzml.store(out + "/ms2_" + fname_base, ms2_exp);
-
-        // Run MassTraceExtractor on MS2 data
-        // Create local copies of parameters since they get modified
         Param mte_mtd_copy = mte_mtd_param;
         Param mte_epd_copy = mte_epd_param;
-        if (runMassTraceExtractor_(ms2_exp, mte_common_param, mte_mtd_copy, mte_epd_copy, ms2_traces))
-        {
-          if (!ms2_traces.empty())
-          {
-            String traces_fname = fname_base;
-            traces_fname.substitute(".mzML", ".consensusXML");
-            FileHandler().storeConsensusFeatures(out + "/ms2_traces_" + traces_fname, ms2_traces, {FileTypes::CONSENSUSXML});
-          }
-        }
+        runMassTraceExtractor_(ms2_exp, mte_common_param, mte_mtd_copy, mte_epd_copy, ms2_traces);
       }
 
       // Apply peak picking to precursors (inner parallel loop)
@@ -950,24 +894,13 @@ protected:
           }
         }
 #endif
-        mzml.store(out + "/precursor_" + fname_base, precursor_exp);
-
-        // Run FeatureFinderMetabo on precursor data
+        // Run FeatureFinderMetabo on precursor data (results used internally, not saved)
         FeatureMap precursor_features;
-        // Create local copies of parameters since they get modified
+        std::vector<MassTrace> precursor_traces;
         Param mtd_copy = ffm_mtd_param;
         Param epd_copy = ffm_epd_param;
         Param ffm_copy = ffm_ffm_param;
-        if (runFeatureFinderMetabo_(precursor_exp, ffm_common_param, mtd_copy, epd_copy, ffm_copy, precursor_features))
-        {
-          if (!precursor_features.empty())
-          {
-            precursor_features.ensureUniqueId();
-            String feature_fname = fname_base;
-            feature_fname.substitute(".mzML", ".featureXML");
-            FileHandler().storeFeatures(out + "/precursor_features_" + feature_fname, precursor_features, {FileTypes::FEATUREXML});
-          }
-        }
+        runFeatureFinderMetabo_(precursor_exp, ffm_common_param, mtd_copy, epd_copy, ffm_copy, precursor_features, precursor_traces);
       }
 
       // Extract MS1 (on-demand from disk - each thread has its own file handle)
@@ -1023,39 +956,23 @@ protected:
       }
 #endif
 
-      if (!ms1_exp.empty())
+      // Run FeatureFinderMetabo on MS1 data and cluster with MS2 traces to create pseudo spectra
+      if (!ms1_exp.empty() && !ms2_traces.empty())
       {
-        mzml.store(out + "/ms1_" + fname_base, ms1_exp);
-
-        // Run FeatureFinderMetabo on MS1 data to detect peptide features (monoisotopic)
         FeatureMap ms1_features;
-        // Create local copies of parameters since they get modified
+        std::vector<MassTrace> ms1_traces;
         Param mtd_copy = ffm_mtd_param;
         Param epd_copy = ffm_epd_param;
         Param ffm_copy = ffm_ffm_param;
-        if (runFeatureFinderMetabo_(ms1_exp, ffm_common_param, mtd_copy, epd_copy, ffm_copy, ms1_features))
-        {
-          if (!ms1_features.empty())
-          {
-            ms1_features.ensureUniqueId();
-            String feature_fname = fname_base;
-            feature_fname.substitute(".mzML", ".featureXML");
-            FileHandler().storeFeatures(out + "/ms1_features_" + feature_fname, ms1_features, {FileTypes::FEATUREXML});
 
-            // Cluster MS1 features with MS2 traces to create pseudo spectra
-            if (!ms2_traces.empty())
-            {
-              MSExperiment pseudo_spectra;
-              if (clusterMassTraces_(ms1_features, ms2_traces, w.lower_mz, w.upper_mz, cluster_param, pseudo_spectra))
-              {
-                if (!pseudo_spectra.empty())
-                {
-                  String pseudo_fname = fname_base;
-                  pseudo_fname.substitute(".mzML", "_pseudo.mzML");
-                  MzMLFile().store(out + "/pseudo_spectra_" + pseudo_fname, pseudo_spectra);
-                }
-              }
-            }
+        if (runFeatureFinderMetabo_(ms1_exp, ffm_common_param, mtd_copy, epd_copy, ffm_copy, ms1_features, ms1_traces)
+            && !ms1_features.empty())
+        {
+          MSExperiment pseudo_spectra;
+          if (clusterMassTraces_(ms1_features, ms1_traces, ms2_traces, w.lower_mz, w.upper_mz, cluster_param, pseudo_spectra)
+              && !pseudo_spectra.empty())
+          {
+            MzMLFile().store(out + "/" + fname_base, pseudo_spectra);
           }
         }
       }
