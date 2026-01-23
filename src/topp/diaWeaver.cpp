@@ -20,6 +20,7 @@
 #include <OpenMS/FEATUREFINDER/FeatureFindingMetabo.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/MasstraceCorrelator.h>
 #include <OpenMS/FORMAT/DATAACCESS/MSDataWritingConsumer.h>
+#include <OpenMS/FORMAT/MSNumpressCoder.h>
 #include <OpenMS/METADATA/SourceFile.h>
 #include <OpenMS/CONCEPT/Constants.h>
 
@@ -994,9 +995,25 @@ protected:
       pseudo_exp[i].setNativeID("scan=" + String(i + 1));
     }
 
+    // Configure numpress compression to reduce file size
+    MSNumpressCoder::NumpressConfig npconfig_mz;
+    npconfig_mz.setCompression("linear");
+    npconfig_mz.numpressErrorTolerance = 0.0001;  // 0.01% error tolerance for m/z
+
+    MSNumpressCoder::NumpressConfig npconfig_int;
+    npconfig_int.setCompression("slof");  // Short logged float for intensities
+
+    MSNumpressCoder::NumpressConfig npconfig_fda;
+    npconfig_fda.setCompression("slof");  // For float data arrays (e.g., ion mobility)
+
+    mzml.getOptions().setNumpressConfigurationMassTime(npconfig_mz);
+    mzml.getOptions().setNumpressConfigurationIntensity(npconfig_int);
+    mzml.getOptions().setNumpressConfigurationFloatDataArray(npconfig_fda);
+    mzml.getOptions().setCompression(true);  // Also apply zlib compression
+
     mzml.store(output_filepath, pseudo_exp);
 
-    OPENMS_LOG_INFO << "Done. Output: " << output_filepath << std::endl;
+    OPENMS_LOG_INFO << "Done. Output (numpress compressed): " << output_filepath << std::endl;
 
     return EXECUTION_OK;
   }
