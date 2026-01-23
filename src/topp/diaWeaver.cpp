@@ -19,6 +19,8 @@
 #include <OpenMS/FEATUREFINDER/ElutionPeakDetection.h>
 #include <OpenMS/FEATUREFINDER/FeatureFindingMetabo.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/MasstraceCorrelator.h>
+#include <OpenMS/FORMAT/DATAACCESS/MSDataWritingConsumer.h>
+#include <OpenMS/METADATA/SourceFile.h>
 #include <OpenMS/CONCEPT/Constants.h>
 
 #include <cmath>
@@ -721,7 +723,25 @@ protected:
       OPENMS_LOG_INFO << "No ion mobility data detected. Using PeakPickerHiRes." << std::endl;
     }
 
-    OPENMS_LOG_INFO << "Output: pseudo spectra (mzML) per DIA window." << std::endl;
+    // Create output file path
+    String output_filepath = out + "/pseudo_spectra.mzML";
+    OPENMS_LOG_INFO << "Output: " << output_filepath << std::endl;
+
+    Size spectra_written = 0;
+    { // Scope for consumer - file is finalized when consumer is destroyed
+    PlainMSDataWritingConsumer consumer(output_filepath);
+    consumer.setExpectedSize(0, 0);  // Unknown count, will be determined during processing
+
+    // Set source file information
+    SourceFile source_file;
+    source_file.setNameOfFile(File::basename(in));
+    source_file.setPathToFile(File::path(in));
+    ExperimentalSettings exp_settings;
+    exp_settings.setSourceFiles({source_file});
+    consumer.setExperimentalSettings(exp_settings);
+
+    // Shared counter for unique spectrum native IDs (protected by critical section)
+    Size spectrum_index = 0;
 
     // ------------------------------
     // Step 3: Process windows in parallel with nested parallelism
@@ -766,19 +786,6 @@ protected:
       MSExperiment ms1_exp;
       MSExperiment precursor_exp;
       std::vector<MassTrace> ms2_traces;  // MS2 mass traces for clustering
-
-      // Build human-readable filename: mz<lower>-<upper>_im<lower>-<upper>.mzML
-      String fname_base = "mz" + String(static_cast<int>(std::round(w.lower_mz))) +
-                          "-" + String(static_cast<int>(std::round(w.upper_mz)));
-      if (w.hasIonMobility())
-      {
-        String im_lower = String::number(w.lower_im, 2);
-        String im_upper = String::number(w.upper_im, 2);
-        im_lower.substitute(".", "p");
-        im_upper.substitute(".", "p");
-        fname_base += "_im" + im_lower + "-" + im_upper;
-      }
-      fname_base += ".mzML";
 
       // Extract MS2 (on-demand from disk - each thread has its own file handle)
       DiaWeaver::extractSingleMS2Window(on_disc, w, indices, im_info, ms2_exp,
@@ -912,7 +919,15 @@ protected:
           if (clusterMassTraces_(ms1_features, ms1_traces, ms2_traces, w.lower_mz, w.upper_mz, cluster_param, pseudo_spectra)
               && !pseudo_spectra.empty())
           {
-            MzMLFile().store(out + "/" + fname_base, pseudo_spectra);
+            // Write pseudo spectra to output file (thread-safe via critical section)
+#pragma omp critical (write_spectra)
+            {
+              for (auto& spectrum : pseudo_spectra)
+              {
+                spectrum.setNativeID("scan=" + String(++spectrum_index));
+                consumer.consumeSpectrum(spectrum);
+              }
+            }
           }
         }
       }
@@ -936,94 +951,34 @@ protected:
     }
 #endif
 
-    OPENMS_LOG_INFO << "Finished processing all windows." << std::endl;
+    spectra_written = consumer.getNrSpectraWritten();
+    OPENMS_LOG_INFO << "Finished processing all windows. Wrote " << spectra_written << " pseudo spectra." << std::endl;
+    } // End of consumer scope - file is finalized here
 
-    // ------------------------------
-    // Combine all pseudo spectra files into one
-    // ------------------------------
-    OPENMS_LOG_INFO << "Combining pseudo spectra files..." << std::endl;
-
-    // Collect all mzML files from the output directory
-    std::vector<String> pseudo_files;
-    for (Size idx = 0; idx < total_windows; ++idx)
+    if (spectra_written == 0)
     {
-      const DiaWeaver::DIAWindow& w = window_vec[idx].first;
-
-      // Reconstruct the filename
-      String fname_base = "mz" + String(static_cast<int>(std::round(w.lower_mz))) +
-                          "-" + String(static_cast<int>(std::round(w.upper_mz)));
-      if (w.hasIonMobility())
-      {
-        String im_lower = String::number(w.lower_im, 2);
-        String im_upper = String::number(w.upper_im, 2);
-        im_lower.substitute(".", "p");
-        im_upper.substitute(".", "p");
-        fname_base += "_im" + im_lower + "-" + im_upper;
-      }
-      fname_base += ".mzML";
-
-      String filepath = out + "/" + fname_base;
-      if (File::exists(filepath))
-      {
-        pseudo_files.push_back(filepath);
-      }
-    }
-
-    if (pseudo_files.empty())
-    {
-      OPENMS_LOG_WARN << "No pseudo spectra files were generated." << std::endl;
+      OPENMS_LOG_WARN << "No pseudo spectra were generated." << std::endl;
       return EXECUTION_OK;
     }
 
-    // Combine all pseudo spectra into one MSExperiment
-    // Load files sequentially to minimize memory usage
-    MSExperiment combined_spectra;
-    MzMLFile mzml_handler;
-    Size spectrum_index = 0;
+    // Load the file, sort spectra by RT, and rewrite
+    OPENMS_LOG_INFO << "Sorting pseudo spectra by retention time..." << std::endl;
 
-    for (const String& filepath : pseudo_files)
+    MSExperiment pseudo_exp;
+    MzMLFile mzml;
+    mzml.load(output_filepath, pseudo_exp);
+
+    pseudo_exp.sortSpectra(false);  // Sort by RT
+
+    // Re-assign native IDs after sorting
+    for (Size i = 0; i < pseudo_exp.size(); ++i)
     {
-      MSExperiment temp_exp;
-      mzml_handler.load(filepath, temp_exp);
-
-      // Append spectra to combined experiment with unique native IDs
-      for (auto& spectrum : temp_exp)
-      {
-        // Assign unique native ID to avoid conflicts
-        spectrum.setNativeID("scan=" + String(++spectrum_index));
-        combined_spectra.addSpectrum(std::move(spectrum));
-      }
+      pseudo_exp[i].setNativeID("scan=" + String(i + 1));
     }
 
-    // Sort combined spectra by RT for better organization
-    combined_spectra.sortSpectra(false);  // Sort by RT
+    mzml.store(output_filepath, pseudo_exp);
 
-    // Re-assign native IDs after sorting to maintain sequential order
-    for (Size i = 0; i < combined_spectra.size(); ++i)
-    {
-      combined_spectra[i].setNativeID("scan=" + String(i + 1));
-    }
-
-    // Set source file information
-    combined_spectra.setPrimaryMSRunPath({in});
-
-    // Write the combined file
-    String combined_filepath = out + "/pseudo_spectra_combined.mzML";
-    OPENMS_LOG_INFO << "Writing combined pseudo spectra (" << combined_spectra.size()
-                    << " spectra) to: " << combined_filepath << std::endl;
-
-    mzml_handler.store(combined_filepath, combined_spectra);
-
-    // Clean up individual pseudo spectra files
-    for (const String& filepath : pseudo_files)
-    {
-      if (File::remove(filepath))
-      {
-        OPENMS_LOG_DEBUG << "Removed temporary file: " << filepath << std::endl;
-      }
-    }
-
-    OPENMS_LOG_INFO << "Done. Combined pseudo spectra saved to: " << combined_filepath << std::endl;
+    OPENMS_LOG_INFO << "Done. Output: " << output_filepath << std::endl;
 
     return EXECUTION_OK;
   }
