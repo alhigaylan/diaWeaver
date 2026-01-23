@@ -91,6 +91,10 @@ protected:
       "save_unfragmented_precursors",
       "If set, save peaks within precursor isolation window in MS2 and apply precursor detection algorithm");
 
+    registerFlag_(
+      "keep_ms1",
+      "If set, include peak-picked MS1 spectra in the output file alongside pseudo spectra");
+
     registerSubsection_("PeakPickerIM", "Parameters for ion mobility peak picking (used when input has IM data)");
 
     registerSubsection_("PeakPickerHiRes", "Parameters for high-resolution peak picking (used when input has no IM data)");
@@ -651,6 +655,7 @@ protected:
   {
     const String in = getStringOption_("in");
     const bool save_precursors = getFlag_("save_unfragmented_precursors");
+    const bool keep_ms1 = getFlag_("keep_ms1");
     const Param ppim_params = getParam_().copy("PeakPickerIM:", true);
     const Param pphr_params = getParam_().copy("PeakPickerHiRes:", true);
 
@@ -899,6 +904,19 @@ protected:
             MSSpectrum picked;
             picker_hr.pick(ms1_exp[s], picked);
             ms1_exp[s] = std::move(picked);
+          }
+        }
+      }
+
+      // Write peak-picked MS1 spectra to output file if requested
+      if (keep_ms1 && !ms1_exp.empty())
+      {
+#pragma omp critical (write_spectra)
+        {
+          for (auto& spectrum : ms1_exp)
+          {
+            spectrum.setNativeID("scan=" + String(++spectrum_index));
+            consumer.consumeSpectrum(spectrum);
           }
         }
       }
