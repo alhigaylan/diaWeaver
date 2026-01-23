@@ -786,7 +786,6 @@ protected:
 
       // Apply peak picking to MS2 spectra (inner parallel loop)
       // Use parallel region to create thread-private pickers (more efficient than per-iteration)
-#ifdef _OPENMP
 #pragma omp parallel num_threads(inner_threads)
       {
         PeakPickerIM picker_im;
@@ -815,25 +814,6 @@ protected:
           }
         }
       }
-#else
-      for (SignedSize s = 0; s < static_cast<SignedSize>(ms2_exp.size()); ++s)
-      {
-        PeakPickerIM picker_im;
-        PeakPickerHiRes picker_hr;
-        if (im_info.available)
-        {
-          picker_im.setParameters(ppim_params);
-          picker_im.pickIMTraces(ms2_exp[s]);
-        }
-        else
-        {
-          picker_hr.setParameters(pphr_params);
-          MSSpectrum picked;
-          picker_hr.pick(ms2_exp[s], picked);
-          ms2_exp[s] = std::move(picked);
-        }
-      }
-#endif
 
       // Run MassTraceExtractor on MS2 data to get fragment traces for clustering
       if (!ms2_exp.empty())
@@ -846,7 +826,6 @@ protected:
       // Apply peak picking to precursors (inner parallel loop)
       if (save_precursors && !precursor_exp.empty())
       {
-#ifdef _OPENMP
 #pragma omp parallel num_threads(inner_threads)
         {
           PeakPickerIM picker_im;
@@ -875,25 +854,6 @@ protected:
             }
           }
         }
-#else
-        for (SignedSize s = 0; s < static_cast<SignedSize>(precursor_exp.size()); ++s)
-        {
-          PeakPickerIM picker_im;
-          PeakPickerHiRes picker_hr;
-          if (im_info.available)
-          {
-            picker_im.setParameters(ppim_params);
-            picker_im.pickIMTraces(precursor_exp[s]);
-          }
-          else
-          {
-            picker_hr.setParameters(pphr_params);
-            MSSpectrum picked;
-            picker_hr.pick(precursor_exp[s], picked);
-            precursor_exp[s] = std::move(picked);
-          }
-        }
-#endif
         // Run FeatureFinderMetabo on precursor data (results used internally, not saved)
         FeatureMap precursor_features;
         std::vector<MassTrace> precursor_traces;
@@ -907,7 +867,6 @@ protected:
       DiaWeaver::extractSingleMS1Window(on_disc, w, im_info, ms1_exp);
 
       // Apply peak picking to MS1 spectra (inner parallel loop)
-#ifdef _OPENMP
 #pragma omp parallel num_threads(inner_threads)
       {
         PeakPickerIM picker_im;
@@ -936,25 +895,6 @@ protected:
           }
         }
       }
-#else
-      for (SignedSize s = 0; s < static_cast<SignedSize>(ms1_exp.size()); ++s)
-      {
-        PeakPickerIM picker_im;
-        PeakPickerHiRes picker_hr;
-        if (im_info.available)
-        {
-          picker_im.setParameters(ppim_params);
-          picker_im.pickIMTraces(ms1_exp[s]);
-        }
-        else
-        {
-          picker_hr.setParameters(pphr_params);
-          MSSpectrum picked;
-          picker_hr.pick(ms1_exp[s], picked);
-          ms1_exp[s] = std::move(picked);
-        }
-      }
-#endif
 
       // Run FeatureFinderMetabo on MS1 data and cluster with MS2 traces to create pseudo spectra
       if (!ms1_exp.empty() && !ms2_traces.empty())
@@ -1038,16 +978,19 @@ protected:
     // Combine all pseudo spectra into one MSExperiment
     // Load files sequentially to minimize memory usage
     MSExperiment combined_spectra;
-    MzMLFile mzml_reader;
+    MzMLFile mzml_handler;
+    Size spectrum_index = 0;
 
     for (const String& filepath : pseudo_files)
     {
       MSExperiment temp_exp;
-      mzml_reader.load(filepath, temp_exp);
+      mzml_handler.load(filepath, temp_exp);
 
-      // Append spectra to combined experiment
+      // Append spectra to combined experiment with unique native IDs
       for (auto& spectrum : temp_exp)
       {
+        // Assign unique native ID to avoid conflicts
+        spectrum.setNativeID("scan=" + String(++spectrum_index));
         combined_spectra.addSpectrum(std::move(spectrum));
       }
     }
@@ -1055,11 +998,21 @@ protected:
     // Sort combined spectra by RT for better organization
     combined_spectra.sortSpectra(false);  // Sort by RT
 
+    // Re-assign native IDs after sorting to maintain sequential order
+    for (Size i = 0; i < combined_spectra.size(); ++i)
+    {
+      combined_spectra[i].setNativeID("scan=" + String(i + 1));
+    }
+
+    // Set source file information
+    combined_spectra.setPrimaryMSRunPath({in});
+
     // Write the combined file
     String combined_filepath = out + "/pseudo_spectra_combined.mzML";
     OPENMS_LOG_INFO << "Writing combined pseudo spectra (" << combined_spectra.size()
                     << " spectra) to: " << combined_filepath << std::endl;
-    MzMLFile().store(combined_filepath, combined_spectra);
+
+    mzml_handler.store(combined_filepath, combined_spectra);
 
     // Clean up individual pseudo spectra files
     for (const String& filepath : pseudo_files)
