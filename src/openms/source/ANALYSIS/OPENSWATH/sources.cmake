@@ -5,6 +5,7 @@ set(directory source/ANALYSIS/OPENSWATH)
 set(sources_list
   ChromatogramExtractor.cpp
   ChromatogramExtractorAlgorithm.cpp
+  ClusterMassTracesByPrecursor.cpp
   ConfidenceScoring.cpp
   DIAHelper.cpp
   DIAPrescoring.cpp

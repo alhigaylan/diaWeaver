@@ -5,6 +5,7 @@ set(directory include/OpenMS/ANALYSIS/OPENSWATH)
 set(sources_list_h
   ChromatogramExtractor.h
   ChromatogramExtractorAlgorithm.h
+  ClusterMassTracesByPrecursor.h
   ConfidenceScoring.h
   DIAHelper.h
   DIAPrescoring.h

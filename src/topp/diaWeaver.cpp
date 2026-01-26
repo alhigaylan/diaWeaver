@@ -18,11 +18,10 @@
 #include <OpenMS/FEATUREFINDER/MassTraceDetection.h>
 #include <OpenMS/FEATUREFINDER/ElutionPeakDetection.h>
 #include <OpenMS/FEATUREFINDER/FeatureFindingMetabo.h>
-#include <OpenMS/ANALYSIS/OPENSWATH/MasstraceCorrelator.h>
+#include <OpenMS/ANALYSIS/OPENSWATH/ClusterMassTracesByPrecursor.h>
 #include <OpenMS/FORMAT/DATAACCESS/MSDataWritingConsumer.h>
 #include <OpenMS/FORMAT/MSNumpressCoder.h>
 #include <OpenMS/METADATA/SourceFile.h>
-#include <OpenMS/CONCEPT/Constants.h>
 
 #include <cmath>
 #include <set>
@@ -425,233 +424,6 @@ protected:
     return true;
   }
 
-  /**
-   * @brief Cluster MS1 features (precursors) with MS2 mass traces to create pseudo spectra
-   * @param[in] ms1_features MS1 peptide features from FeatureFinderMetabo (monoisotopic)
-   * @param[in] ms1_traces MS1 mass traces (for raw intensity data)
-   * @param[in] ms2_traces MS2 mass traces (fragments)
-   * @param[in] swath_lower Lower m/z bound of the DIA window
-   * @param[in] swath_upper Upper m/z bound of the DIA window
-   * @param[in] cluster_param Clustering parameters
-   * @param[out] pseudo_spectra Output pseudo spectra
-   * @return True on success
-   */
-  bool clusterMassTraces_(const FeatureMap& ms1_features,
-                          const std::vector<MassTrace>& ms1_traces,
-                          const std::vector<MassTrace>& ms2_traces,
-                          double swath_lower,
-                          double swath_upper,
-                          const Param& cluster_param,
-                          MSExperiment& pseudo_spectra)
-  {
-    if (ms1_features.empty() || ms2_traces.empty())
-    {
-      return true; // Nothing to cluster
-    }
-
-    // Get parameters
-    double min_pscore = cluster_param.getValue("min_pearson_correlation");
-    int max_lag = cluster_param.getValue("max_lag");
-    double rt_max_distance = cluster_param.getValue("max_rt_apex_difference");
-    Size min_nr_ions = (Size)((int)cluster_param.getValue("min_nr_ions"));
-    double im_tolerance = cluster_param.getValue("im_tolerance");
-    double mindiff = 2.0; // RT tolerance for correlation
-
-    MasstraceCorrelator mtcorr;
-
-    // Build lookup map from trace label to MassTrace for O(log N) access
-    std::map<String, const MassTrace*> trace_lookup;
-    for (const auto& tr : ms1_traces)
-    {
-      trace_lookup[tr.getLabel()] = &tr;
-    }
-
-    // Extract elution profiles from MS1 features using their underlying mass traces
-    std::vector<MasstraceCorrelator::MasstracePointsType> feature_points_ms1;
-    std::vector<double> rt_cache_ms1;
-    std::vector<double> mz_cache_ms1;
-    std::vector<double> im_cache_ms1;
-    std::vector<int> charge_cache_ms1;
-
-    for (Size i = 0; i < ms1_features.size(); ++i)
-    {
-      const Feature& f = ms1_features[i];
-
-      // Use monoisotopic m/z from the feature
-      mz_cache_ms1.push_back(f.getMZ());
-      rt_cache_ms1.push_back(f.getRT());
-      charge_cache_ms1.push_back(f.getCharge());
-
-      // Get ion mobility if available
-      if (f.metaValueExists(Constants::UserParam::ION_MOBILITY_CENTROID))
-      {
-        im_cache_ms1.push_back(f.getMetaValue(Constants::UserParam::ION_MOBILITY_CENTROID));
-      }
-      else if (f.metaValueExists("masstrace_centroid_im"))
-      {
-        std::vector<double> im_values = f.getMetaValue("masstrace_centroid_im");
-        im_cache_ms1.push_back(im_values.empty() ? 0.0 : im_values[0]);
-      }
-      else
-      {
-        im_cache_ms1.push_back(0.0);
-      }
-
-      // Extract elution profile from the monoisotopic mass trace (real intensity values)
-      MasstraceCorrelator::MasstracePointsType points;
-
-      // Get the feature label and extract monoisotopic trace label (first part before '_')
-      if (f.metaValueExists("label"))
-      {
-        String feat_label = f.getMetaValue("label");
-        StringList label_tokens;
-        feat_label.split("_", label_tokens);
-
-        if (!label_tokens.empty())
-        {
-          String mono_label = label_tokens[0];
-          auto it = trace_lookup.find(mono_label);
-          if (it != trace_lookup.end())
-          {
-            const MassTrace& mono_trace = *(it->second);
-            // Extract real RT/intensity pairs from the mass trace
-            for (const Peak2D& peak : mono_trace)
-            {
-              points.push_back(std::make_pair(peak.getRT(), peak.getIntensity()));
-            }
-          }
-        }
-      }
-
-      // Fallback: create single point at feature apex if no trace found
-      if (points.empty())
-      {
-        points.push_back(std::make_pair(f.getRT(), f.getIntensity()));
-        OPENMS_LOG_DEBUG << "Warning: No mass trace found for feature at m/z " << f.getMZ()
-                         << ", using apex only" << std::endl;
-      }
-
-      feature_points_ms1.push_back(points);
-    }
-
-    // Build cache for MS2 traces (elution profiles, m/z, RT, IM)
-    std::vector<MasstraceCorrelator::MasstracePointsType> feature_points_ms2;
-    std::vector<double> rt_cache_ms2;
-    std::vector<double> mz_cache_ms2;
-    std::vector<double> im_cache_ms2;
-
-    for (const auto& trace : ms2_traces)
-    {
-      // Extract elution profile (RT/intensity pairs)
-      MasstraceCorrelator::MasstracePointsType points;
-      for (const Peak2D& peak : trace)
-      {
-        points.push_back(std::make_pair(peak.getRT(), peak.getIntensity()));
-      }
-      feature_points_ms2.push_back(points);
-
-      // Cache centroid values
-      rt_cache_ms2.push_back(trace.getCentroidRT());
-      mz_cache_ms2.push_back(trace.getCentroidMZ());
-      im_cache_ms2.push_back(trace.getCentroidIM());
-    }
-
-    // Assignment map: MS1 feature index -> list of MS2 trace indices
-    std::map<int, std::vector<int>> ms1_assignment_map;
-
-    // Assign fragment mass traces to precursor features
-    for (Size i = 0; i < ms1_features.size(); ++i)
-    {
-      // Only consider MS1 features within the SWATH window as potential precursors
-      if (mz_cache_ms1[i] < swath_lower || mz_cache_ms1[i] > swath_upper) continue;
-
-      ms1_assignment_map[i].clear();
-      double current_rt = rt_cache_ms1[i];
-
-      for (Size j = 0; j < ms2_traces.size(); ++j)
-      {
-        // Check RT distance
-        if (fabs(current_rt - rt_cache_ms2[j]) > rt_max_distance) continue;
-
-        // Check ion mobility tolerance (if both have IM data)
-        if (im_tolerance > 0 && im_cache_ms1[i] > 0 && im_cache_ms2[j] > 0)
-        {
-          if (fabs(im_cache_ms1[i] - im_cache_ms2[j]) > im_tolerance) continue;
-        }
-
-        // Exclude fragments within precursor isolation window
-        if (mz_cache_ms2[j] >= swath_lower && mz_cache_ms2[j] <= swath_upper) continue;
-
-        // Score the MS1 feature elution profile against the MS2 mass trace
-        int lag;
-        double lag_intensity, pearson_score;
-        mtcorr.scoreHullpoints(feature_points_ms1[i], feature_points_ms2[j],
-                               lag, lag_intensity, pearson_score, min_pscore, max_lag, mindiff);
-
-        if (pearson_score > min_pscore && lag >= -max_lag && lag <= max_lag)
-        {
-          ms1_assignment_map[i].push_back(j);
-        }
-      }
-
-      // Only keep assignments with enough ions
-      if (ms1_assignment_map[i].size() < min_nr_ions)
-      {
-        ms1_assignment_map[i].clear();
-      }
-    }
-
-    // Create pseudo spectra from assignments
-    for (Size i = 0; i < ms1_features.size(); ++i)
-    {
-      if (mz_cache_ms1[i] < swath_lower || mz_cache_ms1[i] > swath_upper) continue;
-      if (ms1_assignment_map[i].size() < min_nr_ions) continue;
-
-      MSSpectrum spectrum;
-      spectrum.setRT(ms1_features[i].getRT());
-      spectrum.setMSLevel(2);
-      spectrum.setType(SpectrumSettings::SpectrumType::CENTROID);
-
-      // Set ion mobility if available
-      if (im_cache_ms1[i] > 0)
-      {
-        spectrum.setDriftTime(im_cache_ms1[i]);
-      }
-
-      // Set precursor with monoisotopic m/z
-      Precursor p;
-      p.setMZ(ms1_features[i].getMZ());  // Monoisotopic m/z from FFM
-      p.setCharge(charge_cache_ms1[i]);
-      p.setIntensity(ms1_features[i].getIntensity());
-      if (im_cache_ms1[i] > 0)
-      {
-        p.setDriftTime(im_cache_ms1[i]);
-        p.setDriftTimeUnit(DriftTimeUnit::VSSC);
-      }
-      spectrum.setPrecursors({p});
-
-      // Add fragment ions
-      for (int ms2_idx : ms1_assignment_map[i])
-      {
-        Peak1D peak;
-        peak.setMZ(ms2_traces[ms2_idx].getCentroidMZ());
-        peak.setIntensity(ms2_traces[ms2_idx].getIntensity(false));
-        spectrum.push_back(peak);
-      }
-
-      if (spectrum.size() >= min_nr_ions)
-      {
-        pseudo_spectra.addSpectrum(spectrum);
-      }
-    }
-
-    OPENMS_LOG_INFO << "ClusterMassTraces: Created " << pseudo_spectra.size()
-                    << " pseudo spectra from " << ms1_features.size() << " MS1 features and "
-                    << ms2_traces.size() << " MS2 traces" << std::endl;
-
-    return true;
-  }
-
   ExitCodes main_(int, const char**) override
   {
     const String in = getStringOption_("in");
@@ -935,8 +707,13 @@ protected:
             && !ms1_features.empty())
         {
           MSExperiment pseudo_spectra;
-          if (clusterMassTraces_(ms1_features, ms1_traces, ms2_traces, w.lower_mz, w.upper_mz, cluster_param, pseudo_spectra)
-              && !pseudo_spectra.empty())
+
+          // cluster MS2 fragments by precursors
+          ClusterMassTracesByPrecursor clusterFragments;
+          clusterFragments.setParameters(cluster_param);
+          clusterFragments.run(ms1_features, ms1_traces, ms2_traces, w.lower_mz, w.upper_mz, pseudo_spectra);
+
+          if (!pseudo_spectra.empty())
           {
             // Write pseudo spectra to output file (thread-safe via critical section)
 #pragma omp critical (write_spectra)
