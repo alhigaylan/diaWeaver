@@ -689,6 +689,7 @@ protected:
           for (auto& spectrum : ms1_exp)
           {
             spectrum.setNativeID("scan=" + String(++spectrum_index));
+            spectrum.setType(SpectrumSettings::SpectrumType::CENTROID);
             consumer.consumeSpectrum(spectrum);
           }
         }
