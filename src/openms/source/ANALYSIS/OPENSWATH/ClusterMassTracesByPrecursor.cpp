@@ -28,7 +28,8 @@ namespace OpenMS
     min_nr_ions_(3),
     im_tolerance_(0.02),
     assign_unassigned_to_all_(false),
-    rt_tolerance_(2.0)
+    rt_tolerance_(2.0),
+    nr_precursors_per_fragment_(10)
   {
     defaults_.setValue("min_pearson_correlation", 0.7,
       "Minimal Pearson correlation score to match elution profiles to each other.");
@@ -62,6 +63,11 @@ namespace OpenMS
       "Points within this tolerance are considered equal in RT.");
     defaults_.setMinFloat("rt_tolerance", 0.0);
 
+    defaults_.setValue("nr_precursors_per_fragment", 10,
+      "Maximum number of precursors a fragment can be assigned to. "
+      "If a fragment correlates with more precursors, only the top N with highest Pearson scores are kept.");
+    defaults_.setMinInt("nr_precursors_per_fragment", 1);
+
     defaultsToParam_();
   }
 
@@ -76,6 +82,7 @@ namespace OpenMS
     im_tolerance_ = param_.getValue("im_tolerance");
     assign_unassigned_to_all_ = param_.getValue("assign_unassigned_to_all").toBool();
     rt_tolerance_ = param_.getValue("rt_tolerance");
+    nr_precursors_per_fragment_ = static_cast<Size>(static_cast<int>(param_.getValue("nr_precursors_per_fragment")));
   }
 
   void ClusterMassTracesByPrecursor::run(
@@ -352,7 +359,6 @@ namespace OpenMS
 
     // Track fragment assignments: for each fragment, store list of (precursor_idx, pearson_score) pairs
     std::vector<std::vector<std::pair<int, double>>> fragment_assignments(fragment_profiles.size());
-    const Size max_precursors_per_fragment = 10;
 
     // Assignment map: precursor index -> list of (fragment index, pearson score) pairs
     std::map<int, std::vector<std::pair<int, double>>> assignment_map;
@@ -415,12 +421,12 @@ namespace OpenMS
     endProgress();
 
     // -----------------------------------
-    // Filter fragments assigned to >10 precursors - keep only top 10 by pearson score
+    // Filter fragments assigned to too many precursors - keep only top N by pearson score
     // -----------------------------------
     Size cnt_fragments_filtered = 0;
     for (Size j = 0; j < fragment_assignments.size(); ++j)
     {
-      if (fragment_assignments[j].size() > max_precursors_per_fragment)
+      if (fragment_assignments[j].size() > nr_precursors_per_fragment_)
       {
         cnt_fragments_filtered++;
 
@@ -431,13 +437,13 @@ namespace OpenMS
                     return a.second > b.second;
                   });
 
-        // Keep only top 10 precursors
+        // Keep only top N precursors
         std::set<int> precursors_to_keep;
-        for (Size k = 0; k < max_precursors_per_fragment; ++k)
+        for (Size k = 0; k < nr_precursors_per_fragment_; ++k)
         {
           precursors_to_keep.insert(fragment_assignments[j][k].first);
         }
-        fragment_assignments[j].resize(max_precursors_per_fragment);
+        fragment_assignments[j].resize(nr_precursors_per_fragment_);
 
         // Remove this fragment from precursors that didn't make the cut
         for (Size i = 0; i < precursor_profiles.size(); ++i)
@@ -458,7 +464,7 @@ namespace OpenMS
     if (cnt_fragments_filtered > 0)
     {
       OPENMS_LOG_INFO << "Filtered " << cnt_fragments_filtered << " fragments that were assigned to more than "
-                      << max_precursors_per_fragment << " precursors (kept top " << max_precursors_per_fragment
+                      << nr_precursors_per_fragment_ << " precursors (kept top " << nr_precursors_per_fragment_
                       << " by pearson score)" << std::endl;
     }
 

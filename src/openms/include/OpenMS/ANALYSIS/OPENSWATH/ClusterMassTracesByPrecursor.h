@@ -161,6 +161,9 @@ namespace OpenMS
 
     /// RT tolerance for matching up mass trace points in correlation
     double rt_tolerance_;
+
+    /// Maximum number of precursors a fragment can be assigned to
+    Size nr_precursors_per_fragment_;
   };
 
 } // namespace OpenMS
