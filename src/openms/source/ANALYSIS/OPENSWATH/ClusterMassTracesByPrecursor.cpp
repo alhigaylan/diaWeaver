@@ -438,26 +438,7 @@ namespace OpenMS
                   });
 
         // Keep only top N precursors
-        std::set<int> precursors_to_keep;
-        for (Size k = 0; k < nr_precursors_per_fragment_; ++k)
-        {
-          precursors_to_keep.insert(fragment_assignments[j][k].first);
-        }
         fragment_assignments[j].resize(nr_precursors_per_fragment_);
-
-        // Remove this fragment from precursors that didn't make the cut
-        for (Size i = 0; i < precursor_profiles.size(); ++i)
-        {
-          if (precursors_to_keep.find(static_cast<int>(i)) == precursors_to_keep.end())
-          {
-            // Remove fragment j from precursor i's assignment list
-            auto& assignments = assignment_map[i];
-            assignments.erase(
-              std::remove_if(assignments.begin(), assignments.end(),
-                            [j](const std::pair<int, double>& p) { return p.first == static_cast<int>(j); }),
-              assignments.end());
-          }
-        }
       }
     }
 
@@ -466,6 +447,18 @@ namespace OpenMS
       OPENMS_LOG_INFO << "Filtered " << cnt_fragments_filtered << " fragments that were assigned to more than "
                       << nr_precursors_per_fragment_ << " precursors (kept top " << nr_precursors_per_fragment_
                       << " by pearson score)" << std::endl;
+    }
+
+    // -----------------------------------
+    // Rebuild assignment_map from filtered fragment_assignments
+    // -----------------------------------
+    assignment_map.clear();
+    for (Size j = 0; j < fragment_assignments.size(); ++j)
+    {
+      for (const auto& [precursor_idx, score] : fragment_assignments[j])
+      {
+        assignment_map[precursor_idx].push_back(std::make_pair(static_cast<int>(j), score));
+      }
     }
 
     // Stats
