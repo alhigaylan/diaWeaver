@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <map>
+#include <set>
 #include <cmath>
 
 namespace OpenMS
@@ -129,6 +130,13 @@ namespace OpenMS
       }
     }
 
+    // Check if IM data exists in the input maps
+    bool has_im_data = false;
+    if (!ms1_traces.empty() && ms1_traces[0].metaValueExists("Ion Mobility Centroid"))
+    {
+      has_im_data = true;
+    }
+
     // Cache m/z values
     std::vector<double> precursor_mz;
     std::vector<double> precursor_im;
@@ -141,7 +149,7 @@ namespace OpenMS
       precursor_charge.push_back(ms1_traces[i].getCharge());
       precursor_intensity.push_back(ms1_traces[i].getIntensity());
 
-      if (ms1_traces[i].metaValueExists("Ion Mobility Centroid"))
+      if (has_im_data)
       {
         precursor_im.push_back(ms1_traces[i].getMetaValue("Ion Mobility Centroid"));
       }
@@ -161,7 +169,7 @@ namespace OpenMS
       fragment_mz.push_back(ms2_traces[i].getMZ());
       fragment_intensity.push_back(ms2_traces[i].getIntensity());
 
-      if (ms2_traces[i].metaValueExists("Ion Mobility Centroid"))
+      if (has_im_data)
       {
         fragment_im.push_back(ms2_traces[i].getMetaValue("Ion Mobility Centroid"));
       }
@@ -175,7 +183,7 @@ namespace OpenMS
     clusterAndCreateSpectra_(
         precursor_profiles, precursor_mz, precursor_rt, precursor_im, precursor_charge, precursor_intensity,
         fragment_profiles, fragment_mz, fragment_rt, fragment_im, fragment_intensity,
-        swath_lower, swath_upper, pseudo_spectra);
+        swath_lower, swath_upper, has_im_data, pseudo_spectra);
   }
 
   void ClusterMassTracesByPrecursor::run(
@@ -198,6 +206,23 @@ namespace OpenMS
       trace_lookup[tr.getLabel()] = &tr;
     }
 
+    // Check if IM data exists in the input maps
+    bool has_im_data = false;
+    if (!ms1_features.empty())
+    {
+      const Feature& first_feature = ms1_features[0];
+      if (first_feature.metaValueExists(Constants::UserParam::ION_MOBILITY_CENTROID) ||
+          first_feature.metaValueExists("masstrace_centroid_im"))
+      {
+        has_im_data = true;
+      }
+    }
+    if (!has_im_data && !ms2_traces.empty())
+    {
+      // Also check MS2 traces for IM data
+      has_im_data = (ms2_traces[0].getCentroidIM() != 0.0);
+    }
+
     // Extract elution profiles from MS1 features using their underlying mass traces
     std::vector<MasstraceCorrelator::MasstracePointsType> precursor_profiles;
     std::vector<double> precursor_rt;
@@ -217,14 +242,21 @@ namespace OpenMS
       precursor_intensity.push_back(f.getIntensity());
 
       // Get ion mobility if available
-      if (f.metaValueExists(Constants::UserParam::ION_MOBILITY_CENTROID))
+      if (has_im_data)
       {
-        precursor_im.push_back(f.getMetaValue(Constants::UserParam::ION_MOBILITY_CENTROID));
-      }
-      else if (f.metaValueExists("masstrace_centroid_im"))
-      {
-        std::vector<double> im_values = f.getMetaValue("masstrace_centroid_im");
-        precursor_im.push_back(im_values.empty() ? 0.0 : im_values[0]);
+        if (f.metaValueExists(Constants::UserParam::ION_MOBILITY_CENTROID))
+        {
+          precursor_im.push_back(f.getMetaValue(Constants::UserParam::ION_MOBILITY_CENTROID));
+        }
+        else if (f.metaValueExists("masstrace_centroid_im"))
+        {
+          std::vector<double> im_values = f.getMetaValue("masstrace_centroid_im");
+          precursor_im.push_back(im_values.empty() ? 0.0 : im_values[0]);
+        }
+        else
+        {
+          precursor_im.push_back(0.0);
+        }
       }
       else
       {
@@ -288,7 +320,7 @@ namespace OpenMS
       // Cache centroid values
       fragment_rt.push_back(trace.getCentroidRT());
       fragment_mz.push_back(trace.getCentroidMZ());
-      fragment_im.push_back(trace.getCentroidIM());
+      fragment_im.push_back(has_im_data ? trace.getCentroidIM() : 0.0);
       fragment_intensity.push_back(trace.getIntensity(false));
     }
 
@@ -296,7 +328,7 @@ namespace OpenMS
     clusterAndCreateSpectra_(
         precursor_profiles, precursor_mz, precursor_rt, precursor_im, precursor_charge, precursor_intensity,
         fragment_profiles, fragment_mz, fragment_rt, fragment_im, fragment_intensity,
-        swath_lower, swath_upper, pseudo_spectra);
+        swath_lower, swath_upper, has_im_data, pseudo_spectra);
   }
 
   void ClusterMassTracesByPrecursor::clusterAndCreateSpectra_(
@@ -313,12 +345,14 @@ namespace OpenMS
       const std::vector<double>& fragment_intensity,
       double swath_lower,
       double swath_upper,
+      bool has_im_data,
       MSExperiment& pseudo_spectra)
   {
     MasstraceCorrelator mtcorr;
 
-    // Track which MS2 fragments have been assigned
-    std::vector<bool> ms2feature_used(fragment_profiles.size(), false);
+    // Track fragment assignments: for each fragment, store list of (precursor_idx, pearson_score) pairs
+    std::vector<std::vector<std::pair<int, double>>> fragment_assignments(fragment_profiles.size());
+    const Size max_precursors_per_fragment = 10;
 
     // Assignment map: precursor index -> list of (fragment index, pearson score) pairs
     std::map<int, std::vector<std::pair<int, double>>> assignment_map;
@@ -348,8 +382,8 @@ namespace OpenMS
           continue;
         }
 
-        // Check ion mobility tolerance (if both have IM data)
-        if (im_tolerance_ > 0 && precursor_im[i] > 0 && fragment_im[j] > 0)
+        // Check ion mobility tolerance (if IM data is present)
+        if (has_im_data && im_tolerance_ > 0)
         {
           if (std::fabs(precursor_im[i] - fragment_im[j]) > im_tolerance_)
           {
@@ -372,18 +406,61 @@ namespace OpenMS
 
         if (pearson_score > min_pearson_correlation_ && lag >= -max_lag_ && lag <= max_lag_)
         {
-          ms2feature_used[j] = true;
+          // Collect all valid precursor-fragment assignments
+          fragment_assignments[j].push_back(std::make_pair(static_cast<int>(i), pearson_score));
           assignment_map[i].push_back(std::make_pair(static_cast<int>(j), pearson_score));
         }
       }
-
-      // Only keep assignments with enough ions
-      if (assignment_map[i].size() < min_nr_ions_)
-      {
-        assignment_map[i].clear();
-      }
     }
     endProgress();
+
+    // -----------------------------------
+    // Filter fragments assigned to >10 precursors - keep only top 10 by pearson score
+    // -----------------------------------
+    Size cnt_fragments_filtered = 0;
+    for (Size j = 0; j < fragment_assignments.size(); ++j)
+    {
+      if (fragment_assignments[j].size() > max_precursors_per_fragment)
+      {
+        cnt_fragments_filtered++;
+
+        // Sort by pearson score (descending)
+        std::sort(fragment_assignments[j].begin(), fragment_assignments[j].end(),
+                  [](const std::pair<int, double>& a, const std::pair<int, double>& b)
+                  {
+                    return a.second > b.second;
+                  });
+
+        // Keep only top 10 precursors
+        std::set<int> precursors_to_keep;
+        for (Size k = 0; k < max_precursors_per_fragment; ++k)
+        {
+          precursors_to_keep.insert(fragment_assignments[j][k].first);
+        }
+        fragment_assignments[j].resize(max_precursors_per_fragment);
+
+        // Remove this fragment from precursors that didn't make the cut
+        for (Size i = 0; i < precursor_profiles.size(); ++i)
+        {
+          if (precursors_to_keep.find(static_cast<int>(i)) == precursors_to_keep.end())
+          {
+            // Remove fragment j from precursor i's assignment list
+            auto& assignments = assignment_map[i];
+            assignments.erase(
+              std::remove_if(assignments.begin(), assignments.end(),
+                            [j](const std::pair<int, double>& p) { return p.first == static_cast<int>(j); }),
+              assignments.end());
+          }
+        }
+      }
+    }
+
+    if (cnt_fragments_filtered > 0)
+    {
+      OPENMS_LOG_INFO << "Filtered " << cnt_fragments_filtered << " fragments that were assigned to more than "
+                      << max_precursors_per_fragment << " precursors (kept top " << max_precursors_per_fragment
+                      << " by pearson score)" << std::endl;
+    }
 
     // Stats
     Size cnt_ms2_used = 0;
@@ -395,9 +472,9 @@ namespace OpenMS
         cnt_ms1_used++;
       }
     }
-    for (Size i = 0; i < ms2feature_used.size(); ++i)
+    for (Size i = 0; i < fragment_assignments.size(); ++i)
     {
-      if (ms2feature_used[i])
+      if (!fragment_assignments[i].empty())
       {
         cnt_ms2_used++;
       }
@@ -417,7 +494,7 @@ namespace OpenMS
       for (Size j = 0; j < fragment_profiles.size(); ++j)
       {
         setProgress(j);
-        if (ms2feature_used[j])
+        if (!fragment_assignments[j].empty())
         {
           continue;
         }
@@ -474,7 +551,7 @@ namespace OpenMS
       spectrum.setType(SpectrumSettings::SpectrumType::CENTROID);
 
       // Set ion mobility if available
-      if (precursor_im[i] > 0)
+      if (has_im_data)
       {
         spectrum.setDriftTime(precursor_im[i]);
       }
@@ -484,7 +561,7 @@ namespace OpenMS
       p.setMZ(precursor_mz[i]);
       p.setCharge(precursor_charge[i]);
       p.setIntensity(precursor_intensity[i]);
-      if (precursor_im[i] > 0)
+      if (has_im_data)
       {
         p.setDriftTime(precursor_im[i]);
         p.setDriftTimeUnit(DriftTimeUnit::VSSC);

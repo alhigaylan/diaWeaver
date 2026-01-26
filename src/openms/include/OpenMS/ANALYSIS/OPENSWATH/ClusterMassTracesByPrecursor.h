@@ -119,6 +119,7 @@ namespace OpenMS
      * @param[in] fragment_intensity Intensities for each fragment
      * @param[in] swath_lower Lower m/z bound of the DIA/SWATH isolation window
      * @param[in] swath_upper Upper m/z bound of the DIA/SWATH isolation window
+     * @param[in] has_im_data Flag indicating whether ion mobility data is present in the input
      * @param[out] pseudo_spectra Output pseudo MS/MS spectra
      */
     void clusterAndCreateSpectra_(
@@ -135,6 +136,7 @@ namespace OpenMS
         const std::vector<double>& fragment_intensity,
         double swath_lower,
         double swath_upper,
+        bool has_im_data,
         MSExperiment& pseudo_spectra);
 
   private:
