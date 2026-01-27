@@ -25,6 +25,7 @@
 
 #include <cmath>
 #include <set>
+#include <chrono>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -241,6 +242,7 @@ protected:
       p.setValue("min_nr_ions", 30, "Minimal number of ions to report a spectrum.");
       p.setValue("max_rt_apex_difference", 5.0, "Maximal difference of the apex in retention time (in seconds).");
       p.setValue("im_tolerance", 0.02, "Ion mobility tolerance for matching precursors to fragments.");
+      p.setValue("nr_precursors_per_fragment", 50, "Maximum number of precursors a fragment can be assigned to.");
       return p;
     }
     return Param();
@@ -464,6 +466,10 @@ protected:
     // This determines DIA windows and IM info without loading all peak data
     // ------------------------------
     OPENMS_LOG_INFO << "Opening file for metadata access..." << std::endl;
+
+    // Start timing
+    auto start_time = std::chrono::high_resolution_clock::now();
+
     OnDiscMSExperiment on_disc;
     if (!on_disc.openFile(in))
     {
@@ -791,7 +797,18 @@ protected:
 
     mzml.store(output_filepath, pseudo_exp);
 
+    // Calculate and print elapsed time
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time);
+    auto hours = std::chrono::duration_cast<std::chrono::hours>(duration);
+    auto minutes = std::chrono::duration_cast<std::chrono::minutes>(duration % std::chrono::hours(1));
+    auto seconds = duration % std::chrono::minutes(1);
+
     OPENMS_LOG_INFO << "Done. Output (numpress compressed): " << output_filepath << std::endl;
+    OPENMS_LOG_INFO << "Total processing time: "
+                    << hours.count() << "h "
+                    << minutes.count() << "m "
+                    << seconds.count() << "s" << std::endl;
 
     return EXECUTION_OK;
   }

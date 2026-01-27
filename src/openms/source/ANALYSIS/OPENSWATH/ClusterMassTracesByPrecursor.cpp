@@ -29,7 +29,7 @@ namespace OpenMS
     im_tolerance_(0.02),
     assign_unassigned_to_all_(false),
     rt_tolerance_(2.0),
-    nr_precursors_per_fragment_(10)
+    nr_precursors_per_fragment_(25)
   {
     defaults_.setValue("min_pearson_correlation", 0.7,
       "Minimal Pearson correlation score to match elution profiles to each other.");
@@ -63,7 +63,7 @@ namespace OpenMS
       "Points within this tolerance are considered equal in RT.");
     defaults_.setMinFloat("rt_tolerance", 0.0);
 
-    defaults_.setValue("nr_precursors_per_fragment", 10,
+    defaults_.setValue("nr_precursors_per_fragment", 25,
       "Maximum number of precursors a fragment can be assigned to. "
       "If a fragment correlates with more precursors, only the top N with highest Pearson scores are kept.");
     defaults_.setMinInt("nr_precursors_per_fragment", 1);
@@ -570,7 +570,8 @@ namespace OpenMS
       // Get assignments for this precursor
       auto& assignments = assignment_map[i];
 
-      // If more than 300 assignments, sort by pearson score and keep top 500
+      // If more than 500 assignments, sort by pearson score and keep top 500
+      /*
       if (assignments.size() > 500)
       {
         std::sort(assignments.begin(), assignments.end(),
@@ -580,6 +581,7 @@ namespace OpenMS
                   });
           assignments.resize(500);
       }
+      */
 
       // Add fragment ions
       for (const auto& [ms2_idx, pearson_score] : assignments)
