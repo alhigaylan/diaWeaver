@@ -101,6 +101,24 @@ namespace OpenMS
      */
     void pickIMElutionProfiles(MSSpectrum& input) const;
 
+    /**
+     * @brief Aggregates peaks across multiple adjacent scans to boost signal-to-noise.
+     *
+     * This function takes a vector of spectra (representing adjacent scans in raw data)
+     * and combines their peaks into a single spectrum. Peaks from all input spectra
+     * are collected together, maintaining their m/z, intensity, and ion mobility data.
+     * The combined spectrum can then be passed to pickIMTraces for centroiding.
+     *
+     * @param[in] spectra Vector of spectra to aggregate. Typically contains an odd number
+     *                    of adjacent scans centered around the scan of interest.
+     * @param[out] aggregated_spectrum Output spectrum containing all peaks from input spectra.
+     *                                 Ion mobility data is preserved in FloatDataArrays.
+     *
+     * @note All input spectra must contain ion mobility data in the same format.
+     * @note The retention time of the output spectrum is set to the RT of the middle spectrum.
+     */
+    void aggregateScans(const std::vector<MSSpectrum>& spectra, MSSpectrum& aggregated_spectrum) const;
+
   protected:
     void updateMembers_() override;
 

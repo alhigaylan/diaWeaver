@@ -1435,4 +1435,84 @@ namespace OpenMS
       removeAllFloatDataArraysExcept(input, Constants::UserParam::ION_MOBILITY_CENTROID);
     }
 
+    void PeakPickerIM::aggregateScans(const std::vector<MSSpectrum>& spectra, MSSpectrum& aggregated_spectrum) const
+    {
+      aggregated_spectrum.clear(true);
+
+      if (spectra.empty())
+      {
+        OPENMS_LOG_WARN << "aggregateScans: No spectra provided for aggregation.\n";
+        return;
+      }
+      // Estimate total number of peaks for reservation
+      Size total_peaks = 0;
+      for (const auto& spec : spectra)
+      {
+        total_peaks += spec.size();
+      }
+      // Reserve space for efficiency
+      aggregated_spectrum.reserve(total_peaks);
+
+      // Create ion mobility float data array for the aggregated spectrum
+      MSSpectrum::FloatDataArray aggregated_im_array;
+      aggregated_im_array.reserve(total_peaks);
+
+      for (const auto& spec : spectra)
+      {
+        if (spec.empty()) continue;
+
+        // Check for ion mobility data
+        if (!spec.containsIMData())
+        {
+#ifdef DEBUG_PICKER
+          OPENMS_LOG_DEBUG << "aggregateScans: Spectrum at RT " << spec.getRT()
+                           << " does not contain ion mobility data. Skipping.\n";
+#endif
+          continue;
+        }
+
+        Size im_data_index = spec.getIMData().first;
+        const auto& im_array = spec.getFloatDataArrays()[im_data_index];
+        aggregated_im_array.setName(im_array.getName());
+
+        // Verify IM array size matches spectrum size
+        if (im_array.size() != spec.size())
+        {
+          OPENMS_LOG_WARN << "aggregateScans: Ion mobility array size mismatch in spectrum at RT "
+                          << spec.getRT() << ". Skipping this spectrum.\n";
+          continue;
+        }
+
+        // Add all peaks and their IM values to the aggregated spectrum
+        for (Size i = 0; i < spec.size(); ++i)
+        {
+          aggregated_spectrum.push_back(spec[i]);
+          aggregated_im_array.push_back(im_array[i]);
+        }
+      }
+
+      // Attach the ion mobility array to the aggregated spectrum
+      aggregated_spectrum.getFloatDataArrays().push_back(std::move(aggregated_im_array));
+
+      // Sort by m/z position (keeping float arrays aligned)
+      aggregated_spectrum.sortByPosition();
+
+      // Set metadata from the middle spectrum
+      Size middle_idx = spectra.size() / 2;
+      const MSSpectrum& middle_spec = spectra[middle_idx];
+
+      // Copy spectrum settings from the middle spectrum
+      static_cast<SpectrumSettings&>(aggregated_spectrum) = static_cast<const SpectrumSettings&>(middle_spec);
+      aggregated_spectrum.setMSLevel(middle_spec.getMSLevel());
+      aggregated_spectrum.setName(middle_spec.getName());
+      aggregated_spectrum.setRT(middle_spec.getRT());
+      aggregated_spectrum.setIMFormat(middle_spec.getIMFormat());
+      aggregated_spectrum.setDriftTimeUnit(middle_spec.getDriftTimeUnit());
+
+#ifdef DEBUG_PICKER
+      OPENMS_LOG_DEBUG << "aggregateScans: Aggregated " << spectra.size() << " spectra into "
+                       << aggregated_spectrum.size() << " peaks.\n";
+#endif
+    }
+
 } // namespace OpenMS
