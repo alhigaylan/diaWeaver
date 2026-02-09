@@ -88,8 +88,12 @@ protected:
                           "Method to pick peaks in IM dimension", false, true);
     setValidStrings_("method", { "mobilogram", "cluster", "traces" } );
 
+    registerFlag_("aggregate_across_scans",
+                  "If set, aggregate signal across neighboring scans using Gaussian weighting before peak picking. "
+                  "This can improve signal-to-noise for low-intensity peaks.", false);
+
     addEmptyLine_();
-    registerSubsection_("algorithm", "Algorithm parameters for PeakPickerIM (organized into pickIMTraces, pickIMCluster, pickIMElutionProfiles).");
+    registerSubsection_("algorithm", "Algorithm parameters for PeakPickerIM (organized into pickIMTraces, pickIMCluster, pickIMElutionProfiles, aggregation).");
   }
 
   Param getSubsectionDefaults_(const String& section) const override
@@ -102,6 +106,7 @@ protected:
       combined.insert("pickIMTraces:",         p.copy("pickIMTraces:", true));
       combined.insert("pickIMCluster:",        p.copy("pickIMCluster:", true));
       combined.insert("pickIMElutionProfiles:",p.copy("pickIMElutionProfiles:", true));
+      combined.insert("aggregation:",          p.copy("aggregation:", true));
       return combined;
     }
     return Param();
@@ -234,6 +239,7 @@ protected:
     const String output_file = getStringOption_("out");
     const String process_opt = getStringOption_("processOption");
     const String method      = getStringOption_("method");
+    const bool aggregate_scans = getFlag_("aggregate_across_scans");
 
     // Collect algorithm parameters from 'algorithm:' We strip and pass the remaining keys directly to PeakPickerIM.
     Param algo = getParam_().copy("algorithm:",true);
@@ -243,6 +249,8 @@ protected:
 
     if (process_opt == "lowmemory")
     {
+      /// TODO: Handle low-memory option and scan aggregations. Currently, scan aggregation is only
+      ///   implemented for in-memory loop.
       return doLowMemAlgorithm(method, picker, input_file, output_file);
     }
     else
@@ -266,6 +274,13 @@ protected:
                         << "No peak picking will be performed." << std::endl;
         mzml.store(output_file, exp);
         return EXECUTION_OK;
+      }
+
+      // Aggregate signal across scans if requested (improves S/N before peak picking)
+      if (aggregate_scans)
+      {
+        OPENMS_LOG_INFO << "Aggregating signal across neighboring scans..." << std::endl;
+        picker.pickExperimentWithAggregation(exp);
       }
 
 #pragma omp parallel for

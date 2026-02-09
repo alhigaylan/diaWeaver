@@ -11,6 +11,7 @@
 #include <OpenMS/PROCESSING/SMOOTHING/GaussFilter.h>
 #include <OpenMS/PROCESSING/SMOOTHING/SavitzkyGolayFilter.h>
 #include <OpenMS/KERNEL/MSSpectrum.h>
+#include <OpenMS/KERNEL/MSExperiment.h>
 #include <OpenMS/CONCEPT/Constants.h>
 #include <OpenMS/CONCEPT/Exception.h>
 #include <OpenMS/DATASTRUCTURES/Param.h>
@@ -23,10 +24,12 @@
 #include <OpenMS/FEATUREFINDER/ElutionPeakDetection.h>
 #include <iostream>
 #include <deque>
+#include <cmath>
 #include <algorithm>
 #include <limits>
 #include <numeric>
 #include <unordered_map>
+#include <map>
 #include <utility>
 
 
@@ -790,6 +793,9 @@ namespace OpenMS
       defaults_.setValue("pickIMCluster:im_tolerance_cluster", 0.1, "Ion mobility tolerance in 1/k for clustering");
       // --- PickIMElutionProfiles parameters ---
       defaults_.setValue("pickIMElutionProfiles:ppm_tolerance_elution", 50.0, "Mass trace m/z tolerance in ppm");
+      // --- Aggregation parameters ---
+      defaults_.setValue("aggregation:rt_FWHM", 1.0, "Full width at half maximum for Gaussian weighting of scans (in seconds)");
+      defaults_.setValue("aggregation:cutoff", 0.01, "Weight cutoff below which spectra are not included in aggregation");
 
       defaultsToParam_();  // copies defaults_ into param_
       updateMembers_();    // caches into member variables
@@ -808,6 +814,8 @@ namespace OpenMS
 
       ppm_tolerance_elution_ = (double)param_.getValue("pickIMElutionProfiles:ppm_tolerance_elution");
 
+      aggregation_rt_fwhm_ = (double)param_.getValue("aggregation:rt_FWHM");
+      aggregation_cutoff_ = (double)param_.getValue("aggregation:cutoff");
     }
 
     namespace
@@ -1435,7 +1443,9 @@ namespace OpenMS
       removeAllFloatDataArraysExcept(input, Constants::UserParam::ION_MOBILITY_CENTROID);
     }
 
-    void PeakPickerIM::aggregateScans(const std::vector<MSSpectrum>& spectra, MSSpectrum& aggregated_spectrum) const
+    void PeakPickerIM::aggregateScans(const std::vector<MSSpectrum>& spectra,
+                                       const std::vector<double>& weights,
+                                       MSSpectrum& aggregated_spectrum) const
     {
       aggregated_spectrum.clear(true);
 
@@ -1444,32 +1454,33 @@ namespace OpenMS
         OPENMS_LOG_WARN << "aggregateScans: No spectra provided for aggregation.\n";
         return;
       }
+
+      if (spectra.size() != weights.size())
+      {
+        OPENMS_LOG_WARN << "aggregateScans: Spectra and weights size mismatch.\n";
+        return;
+      }
+
       // Estimate total number of peaks for reservation
       Size total_peaks = 0;
       for (const auto& spec : spectra)
       {
         total_peaks += spec.size();
       }
+
       // Reserve space for efficiency
       aggregated_spectrum.reserve(total_peaks);
 
-      // Create ion mobility float data array for the aggregated spectrum
+      // Create ion mobility float data array
       MSSpectrum::FloatDataArray aggregated_im_array;
       aggregated_im_array.reserve(total_peaks);
 
-      for (const auto& spec : spectra)
+      for (Size spec_idx = 0; spec_idx < spectra.size(); ++spec_idx)
       {
-        if (spec.empty()) continue;
+        const auto& spec = spectra[spec_idx];
+        double weight = weights[spec_idx];
 
-        // Check for ion mobility data
-        if (!spec.containsIMData())
-        {
-#ifdef DEBUG_PICKER
-          OPENMS_LOG_DEBUG << "aggregateScans: Spectrum at RT " << spec.getRT()
-                           << " does not contain ion mobility data. Skipping.\n";
-#endif
-          continue;
-        }
+        if (spec.empty()) continue;
 
         Size im_data_index = spec.getIMData().first;
         const auto& im_array = spec.getFloatDataArrays()[im_data_index];
@@ -1478,41 +1489,173 @@ namespace OpenMS
         // Verify IM array size matches spectrum size
         if (im_array.size() != spec.size())
         {
-          OPENMS_LOG_WARN << "aggregateScans: Ion mobility array size mismatch in spectrum at RT "
-                          << spec.getRT() << ". Skipping this spectrum.\n";
-          continue;
+          throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+              "Ion mobility array size (" + String(im_array.size()) + ") does not match spectrum size ("
+              + String(spec.size()) + ") at RT " + String(spec.getRT()),
+              String(im_array.size()) + " != " + String(spec.size()));
         }
 
-        // Add all peaks and their IM values to the aggregated spectrum
+        // Add all peaks with weighted intensities and their IM values
         for (Size i = 0; i < spec.size(); ++i)
         {
-          aggregated_spectrum.push_back(spec[i]);
+          Peak1D weighted_peak;
+          weighted_peak.setMZ(spec[i].getMZ());
+          weighted_peak.setIntensity(spec[i].getIntensity() * weight);
+          aggregated_spectrum.push_back(weighted_peak);
           aggregated_im_array.push_back(im_array[i]);
         }
       }
 
-      // Attach the ion mobility array to the aggregated spectrum
+      if (aggregated_spectrum.empty())
+      {
+        OPENMS_LOG_WARN << "aggregateScans: No peaks collected after aggregation.\n";
+        return;
+      }
+
+      // Attach the ion mobility array
       aggregated_spectrum.getFloatDataArrays().push_back(std::move(aggregated_im_array));
 
       // Sort by m/z position (keeping float arrays aligned)
       aggregated_spectrum.sortByPosition();
 
-      // Set metadata from the middle spectrum
-      Size middle_idx = spectra.size() / 2;
-      const MSSpectrum& middle_spec = spectra[middle_idx];
+      // Set metadata from the center spectrum (index 0)
+      const MSSpectrum& center_spec = spectra[0];
+      static_cast<SpectrumSettings&>(aggregated_spectrum) = static_cast<const SpectrumSettings&>(center_spec);
+      aggregated_spectrum.setMSLevel(center_spec.getMSLevel());
+      aggregated_spectrum.setName(center_spec.getName());
+      aggregated_spectrum.setRT(center_spec.getRT());
+      aggregated_spectrum.setIMFormat(center_spec.getIMFormat());
+      aggregated_spectrum.setDriftTimeUnit(center_spec.getDriftTimeUnit());
 
-      // Copy spectrum settings from the middle spectrum
-      static_cast<SpectrumSettings&>(aggregated_spectrum) = static_cast<const SpectrumSettings&>(middle_spec);
-      aggregated_spectrum.setMSLevel(middle_spec.getMSLevel());
-      aggregated_spectrum.setName(middle_spec.getName());
-      aggregated_spectrum.setRT(middle_spec.getRT());
-      aggregated_spectrum.setIMFormat(middle_spec.getIMFormat());
-      aggregated_spectrum.setDriftTimeUnit(middle_spec.getDriftTimeUnit());
+      // Verify all peaks were aggregated
+      if (aggregated_spectrum.size() != total_peaks)
+      {
+        throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+            "Aggregated spectrum size (" + String(aggregated_spectrum.size()) +
+            ") does not match expected total peaks (" + String(total_peaks) + ")",
+            String(aggregated_spectrum.size()) + " != " + String(total_peaks));
+      }
+    }
+
+    void PeakPickerIM::pickExperimentWithAggregation(MSExperiment& exp)
+    {
+      if (exp.empty())
+      {
+        OPENMS_LOG_WARN << "pickExperimentWithAggregation: Empty experiment provided.\n";
+        return;
+      }
+
+      // Gaussian weighting parameters
+      double fwhm = aggregation_rt_fwhm_;
+      double factor = -4.0 * std::log(2.0) / (fwhm * fwhm);
+      double cutoff = aggregation_cutoff_;
+
+      // Build list of MS1 spectrum indices
+      std::vector<Size> ms1_indices;
+      for (Size i = 0; i < exp.size(); ++i)
+      {
+        if (exp[i].getMSLevel() == 1)
+        {
+          ms1_indices.push_back(i);
+        }
+      }
+
+      if (ms1_indices.empty())
+      {
+        OPENMS_LOG_WARN << "pickExperimentWithAggregation: No MS1 spectra found.\n";
+        return;
+      }
+
+      // Check if first MS1 spectrum has IM data - required for PeakPickerIM
+      if (!exp[ms1_indices[0]].containsIMData())
+      {
+        throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+            "Ion mobility data is not detected. PeakPickerIM is designed to pick peaks from ion mobility containing data.",
+            "No IM data in first MS1 spectrum");
+      }
 
 #ifdef DEBUG_PICKER
-      OPENMS_LOG_DEBUG << "aggregateScans: Aggregated " << spectra.size() << " spectra into "
-                       << aggregated_spectrum.size() << " peaks.\n";
+      OPENMS_LOG_DEBUG << "pickExperimentWithAggregation: Processing " << ms1_indices.size()
+                       << " MS1 spectra with Gaussian FWHM=" << fwhm << "s, cutoff=" << cutoff << ".\n";
 #endif
+
+      // Build AggregationBlocks: for each spectrum, collect neighbors with Gaussian weights
+      AggregationBlocks aggregation_blocks;
+
+      for (Size idx = 0; idx < ms1_indices.size(); ++idx)
+      {
+        Size center_exp_idx = ms1_indices[idx];
+        double center_rt = exp[center_exp_idx].getRT();
+
+        std::vector<std::pair<Size, double>> neighbors_with_weights;
+
+        // Go forward from center
+        for (Size j = idx; j < ms1_indices.size(); ++j)
+        {
+          double rt_diff = exp[ms1_indices[j]].getRT() - center_rt;
+          double weight = std::exp(factor * rt_diff * rt_diff);
+
+          if (weight < cutoff && j != idx)
+          {
+            break;
+          }
+
+          neighbors_with_weights.emplace_back(ms1_indices[j], weight);
+        }
+
+        // Go backward from center
+        for (SignedSize j = static_cast<SignedSize>(idx) - 1; j >= 0; --j)
+        {
+          double rt_diff = exp[ms1_indices[j]].getRT() - center_rt;
+          double weight = std::exp(factor * rt_diff * rt_diff);
+
+          if (weight < cutoff)
+          {
+            break;
+          }
+
+          neighbors_with_weights.emplace_back(ms1_indices[j], weight);
+        }
+
+        // Normalize weights to sum to 1
+        double sum_weights = 0.0;
+        for (const auto& p : neighbors_with_weights)
+        {
+          sum_weights += p.second;
+        }
+        for (auto& p : neighbors_with_weights)
+        {
+          p.second /= sum_weights;
+        }
+
+        aggregation_blocks[center_exp_idx] = std::move(neighbors_with_weights);
+      }
+
+      // Process each spectrum with its aggregation block
+      for (const auto& [center_idx, neighbors] : aggregation_blocks)
+      {
+        // Collect spectra and weights
+        std::vector<MSSpectrum> spectra_to_aggregate;
+        std::vector<double> weights;
+        spectra_to_aggregate.reserve(neighbors.size());
+        weights.reserve(neighbors.size());
+
+        for (const auto& [spec_idx, weight] : neighbors)
+        {
+          spectra_to_aggregate.push_back(exp[spec_idx]);
+          weights.push_back(weight);
+        }
+
+        // Aggregate with weights
+        MSSpectrum aggregated;
+        aggregateScans(spectra_to_aggregate, weights, aggregated);
+
+        // Replace the center spectrum with the aggregated spectrum
+        if (!aggregated.empty())
+        {
+          exp[center_idx] = std::move(aggregated);
+        }
+      }
     }
 
 } // namespace OpenMS

@@ -12,8 +12,12 @@
 #include <OpenMS/DATASTRUCTURES/Param.h>
 #include <OpenMS/DATASTRUCTURES/DefaultParamHandler.h>
 
+#include <map>
+#include <vector>
+
 namespace OpenMS
 {
+  class MSExperiment;
   /**
     @brief Peak picking algorithm for ion mobility data
     
@@ -101,23 +105,49 @@ namespace OpenMS
      */
     void pickIMElutionProfiles(MSSpectrum& input) const;
 
+    /// Blocks of spectra to aggregate: maps master spectrum index to vector of (spectrum index, weight) pairs
+    typedef std::map<Size, std::vector<std::pair<Size, double>>> AggregationBlocks;
+
     /**
-     * @brief Aggregates peaks across multiple adjacent scans to boost signal-to-noise.
+     * @brief Aggregates peaks across multiple adjacent scans with Gaussian weighting.
      *
-     * This function takes a vector of spectra (representing adjacent scans in raw data)
-     * and combines their peaks into a single spectrum. Peaks from all input spectra
-     * are collected together, maintaining their m/z, intensity, and ion mobility data.
-     * The combined spectrum can then be passed to pickIMTraces for centroiding.
+     * This function takes a vector of spectra with corresponding weights and combines
+     * their peaks into a single spectrum. Peak intensities are multiplied by their
+     * respective weights before aggregation. This allows for Gaussian-weighted signal
+     * boosting where closer scans contribute more than distant ones.
      *
-     * @param[in] spectra Vector of spectra to aggregate. Typically contains an odd number
-     *                    of adjacent scans centered around the scan of interest.
-     * @param[out] aggregated_spectrum Output spectrum containing all peaks from input spectra.
+     * @param[in] spectra Vector of spectra to aggregate (must contain ion mobility data).
+     *                    The center spectrum must be at index 0.
+     * @param[in] weights Vector of weights corresponding to each spectrum (must sum to 1).
+     * @param[out] aggregated_spectrum Output spectrum containing weighted peaks from input spectra.
      *                                 Ion mobility data is preserved in FloatDataArrays.
      *
-     * @note All input spectra must contain ion mobility data in the same format.
-     * @note The retention time of the output spectrum is set to the RT of the middle spectrum.
+     * @note The center spectrum (index 0) is used for metadata (RT, MS level, name, etc.).
+     * @note Weights should be normalized to sum to 1 for proper intensity scaling.
+     * @note All input spectra must contain ion mobility data.
      */
-    void aggregateScans(const std::vector<MSSpectrum>& spectra, MSSpectrum& aggregated_spectrum) const;
+    void aggregateScans(const std::vector<MSSpectrum>& spectra,
+                        const std::vector<double>& weights,
+                        MSSpectrum& aggregated_spectrum) const;
+
+    /**
+     * @brief Aggregates adjacent scans in an experiment using Gaussian-weighted signal boosting.
+     *
+     * For each MS1 spectrum in the experiment, this method aggregates adjacent scans using
+     * Gaussian weights based on RT distance. This approach boosts signal-to-noise by combining
+     * peaks from multiple scans with weights that decrease with distance from the center scan.
+     * The aggregated spectra can then be passed to peak picking methods (e.g., pickIMTraces).
+     *
+     * Uses parameters:
+     * - aggregation:rt_FWHM: Full width at half maximum for Gaussian weighting (in seconds)
+     * - aggregation:cutoff: Weight threshold below which spectra are not included
+     *
+     * @param[in,out] exp The experiment to process. Each MS1 spectrum will be replaced with
+     *                    an aggregated version combining signal from neighboring scans.
+     *
+     * @throws Exception::InvalidValue if no ion mobility data is detected in the experiment.
+     */
+    void pickExperimentWithAggregation(MSExperiment& exp);
 
   protected:
     void updateMembers_() override;
@@ -170,5 +200,8 @@ namespace OpenMS
     double im_tolerance_cluster_{0.1};
 
     double ppm_tolerance_elution_{50.0};
+
+    double aggregation_rt_fwhm_{1.0};   ///< Gaussian FWHM for RT-based weighting (in seconds)
+    double aggregation_cutoff_{0.01};   ///< Weight cutoff for including spectra in aggregation
   };
 } // namespace OpenMS
