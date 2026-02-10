@@ -857,6 +857,12 @@ namespace OpenMS
 
     void PeakPickerIM::pickIMTraces(MSSpectrum& spectrum)
     {
+      // Only process MS1 spectra; non-MS1 spectra are passed through unchanged
+      if (spectrum.getMSLevel() != 1)
+      {
+        return;
+      }
+
       // Validate IM format - returns false if we should skip processing
       if (!validateIMFormatForPicking(spectrum))
       {
