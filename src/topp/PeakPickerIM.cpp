@@ -170,11 +170,14 @@ protected:
     // Override consumeSpectrum to control buffering and writing directly
     void consumeSpectrum(MapType::SpectrumType& spectrum) override
     {
+      ++spectra_consumed_;
+
       if (spectrum.getMSLevel() != 1)
       {
         // Non-MS1 spectra: process and write immediately via parent
         applyPeakPicking(spectrum);
         MSDataWritingConsumer::consumeSpectrum(spectrum);
+        ++non_ms1_written_;
         return;
       }
 
@@ -182,6 +185,8 @@ protected:
       if (!checked_im_data_)
       {
         checked_im_data_ = true;
+        OPENMS_LOG_INFO << "AggregatingConsumer: First MS1 spectrum received at RT="
+                        << spectrum.getRT() << "\n";
         if (!spectrum.containsIMData())
         {
           OPENMS_LOG_WARN << "AggregatingConsumer: First MS1 spectrum has no IM data. "
@@ -191,6 +196,7 @@ protected:
         else
         {
           has_im_data_ = true;
+          OPENMS_LOG_INFO << "AggregatingConsumer: IM data detected, aggregation enabled.\n";
         }
       }
 
@@ -199,6 +205,7 @@ protected:
       {
         applyPeakPicking(spectrum);
         MSDataWritingConsumer::consumeSpectrum(spectrum);
+        ++spectra_written_;
         return;
       }
 
@@ -220,9 +227,13 @@ protected:
     ~AggregatingConsumer() override
     {
       // Flush all remaining buffered spectra
+      OPENMS_LOG_INFO << "AggregatingConsumer: Flushing " << ms1_buffer_.size()
+                      << " remaining buffered spectra.\n";
       flushAll();
-      OPENMS_LOG_INFO << "AggregatingConsumer: Finished. Wrote " << spectra_written_
-                      << " aggregated MS1 spectra.\n";
+      OPENMS_LOG_INFO << "AggregatingConsumer: Finished.\n"
+                      << "  Total spectra consumed: " << spectra_consumed_ << "\n"
+                      << "  Non-MS1 spectra written: " << non_ms1_written_ << "\n"
+                      << "  Aggregated MS1 spectra written: " << spectra_written_ << "\n";
     }
 
   private:
@@ -370,7 +381,9 @@ protected:
     std::deque<MSSpectrum> ms1_buffer_;
     bool checked_im_data_ = false;
     bool has_im_data_ = true;
+    Size spectra_consumed_ = 0;
     Size spectra_written_ = 0;
+    Size non_ms1_written_ = 0;
   };
 
   // -------------------- Format detection consumer (reads first spectrum only) --------------------
@@ -452,25 +465,32 @@ protected:
     {
       OPENMS_LOG_WARN << "Warning: Input file does not contain ion mobility data. "
                       << "No peak picking will be performed." << std::endl;
-      // Pass through unchanged
+      // Pass through unchanged - create fresh MzMLFile to avoid StopWatch state issues
+      MzMLFile mzml_passthrough;
+      mzml_passthrough.setLogType(log_type_);
       PassthroughConsumer passthrough(output_file);
-      mzml.transform(input_file, &passthrough);
+      mzml_passthrough.transform(input_file, &passthrough);
       return EXECUTION_OK;
     }
 
     // Step 3: Proceed with streaming processing
+    // Create a fresh MzMLFile object since the previous transform (for format detection)
+    // may have left internal state (StopWatch) in an invalid state due to the exception
+    MzMLFile mzml_writer;
+    mzml_writer.setLogType(log_type_);
+
     if (aggregate_scans)
     {
       OPENMS_LOG_INFO << "Low-memory mode with aggregation: using sliding window buffer." << std::endl;
       AggregatingConsumer agg_consumer(output_file, method, pp, rt_fwhm, cutoff);
       agg_consumer.addDataProcessing(getProcessingInfo_(DataProcessing::PEAK_PICKING));
-      mzml.transform(input_file, &agg_consumer);
+      mzml_writer.transform(input_file, &agg_consumer);
     }
     else
     {
       Consumer pp_consumer(output_file, method, pp);
       pp_consumer.addDataProcessing(getProcessingInfo_(DataProcessing::PEAK_PICKING));
-      mzml.transform(input_file, &pp_consumer);
+      mzml_writer.transform(input_file, &pp_consumer);
     }
     return EXECUTION_OK;
   }
