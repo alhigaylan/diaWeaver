@@ -970,7 +970,7 @@ namespace OpenMS
       auto [mobilogram_traces, claimed] = PeakPickerIM::extractIonMobilityTraces(picked_spectrum, spectrum);
 
       // Compute optimal sampling rate from the native spacing of mobilogram data points
-      double sampling_rate = computeOptimalSamplingRate(mobilogram_traces);
+      double sampling_rate = computeOptimalSamplingRate(mobilogram_traces) * 5;
       Param resampler_param;
       resampler_param.setValue("spacing", sampling_rate);
       resampler_param.setValue("ppm", "false");
@@ -1014,7 +1014,7 @@ namespace OpenMS
         MSSpectrum summed_trace;
         summed_trace.reserve(trace.size() + 1);
         summed_trace.emplace_back(-1.0, -1.0);
-        sumFrame_(trace, summed_trace, sum_tolerance_im_, false);
+        sumFrame_(trace, summed_trace, sampling_rate, false);
 #ifdef DEBUG_PICKER
         OPENMS_LOG_DEBUG << "Trace after sumFrame_ has " << summed_trace.size() << " peaks.\n";
 #endif
