@@ -244,40 +244,80 @@ protected:
 
     void flushReady()
     {
-      // We can output spectrum at index i when we've seen all spectra that could
-      // contribute to its aggregation (i.e., spectra within max_rt_diff_)
-      while (ms1_buffer_.size() >= 2)
-      {
-        double first_rt = ms1_buffer_.front().getRT();
-        double last_rt = ms1_buffer_.back().getRT();
+      if (ms1_buffer_.size() < 2) return;
 
-        // If the last spectrum is far enough past the first,
-        // we have all neighbors for the first spectrum
-        if (last_rt - first_rt > max_rt_diff_)
+      double last_rt = ms1_buffer_.back().getRT();
+
+      // Count how many spectra from the front are ready
+      // A spectrum is ready when all its potential neighbors have been seen
+      // (i.e., last_rt - spectrum_rt > max_rt_diff_)
+      Size ready_count = 0;
+      for (Size i = 0; i < ms1_buffer_.size(); ++i)
+      {
+        double spectrum_rt = ms1_buffer_[i].getRT();
+        if (last_rt - spectrum_rt > max_rt_diff_)
         {
-          outputAggregatedSpectrum(0);
-          ms1_buffer_.pop_front();
+          ++ready_count;
         }
         else
         {
-          break; // Need more spectra before we can output
+          break; // Spectra are ordered by RT, so no more will be ready
         }
       }
+
+      if (ready_count == 0) return;
+
+      // Process ready spectra in batch with parallel peak picking
+      processBatch(ready_count);
     }
 
     void flushAll()
     {
       // Output all remaining buffered spectra
-      while (!ms1_buffer_.empty())
-      {
-        outputAggregatedSpectrum(0);
-        ms1_buffer_.pop_front();
-      }
+      if (ms1_buffer_.empty()) return;
+      processBatch(ms1_buffer_.size());
     }
 
-    void outputAggregatedSpectrum(Size center_idx)
+    // Batch process: aggregate, parallel peak pick, sequential write
+    void processBatch(Size count)
     {
-      if (center_idx >= ms1_buffer_.size()) return;
+      if (count == 0 || count > ms1_buffer_.size()) return;
+
+      // Step 1: Aggregate all ready spectra
+      std::vector<MSSpectrum> aggregated_spectra(count);
+
+      for (Size idx = 0; idx < count; ++idx)
+      {
+        aggregated_spectra[idx] = createAggregatedSpectrum(idx);
+      }
+
+      // Step 2: Parallel peak picking
+      #pragma omp parallel for schedule(dynamic)
+      for (SignedSize i = 0; i < static_cast<SignedSize>(aggregated_spectra.size()); ++i)
+      {
+        applyPeakPicking(aggregated_spectra[i]);
+      }
+
+      // Step 3: Sequential write (maintains order)
+      for (Size i = 0; i < aggregated_spectra.size(); ++i)
+      {
+        doWriteSpectrum_(aggregated_spectra[i]);
+        ++spectra_written_;
+      }
+
+      // Step 4: Remove processed spectra from buffer
+      for (Size i = 0; i < count; ++i)
+      {
+        ms1_buffer_.pop_front();
+      }
+
+      OPENMS_LOG_DEBUG << "AggregatingConsumer: Batch processed " << count << " spectra.\n";
+    }
+
+    // Create aggregated spectrum for buffer index (without peak picking)
+    MSSpectrum createAggregatedSpectrum(Size center_idx)
+    {
+      if (center_idx >= ms1_buffer_.size()) return MSSpectrum();
 
       MSSpectrum& center_spectrum = ms1_buffer_[center_idx];
       double center_rt = center_spectrum.getRT();
@@ -303,19 +343,14 @@ protected:
       for (double w : weights) sum_weights += w;
       for (double& w : weights) w /= sum_weights;
 
-      OPENMS_LOG_DEBUG << "AggregatingConsumer: Outputting spectrum at RT=" << center_rt
-                       << " with " << spectra_to_aggregate.size() << " neighbors aggregated.\n";
+      OPENMS_LOG_DEBUG << "AggregatingConsumer: Creating aggregated spectrum at RT=" << center_rt
+                       << " with " << spectra_to_aggregate.size() << " neighbors.\n";
 
       // Aggregate
       MSSpectrum aggregated;
       pp_.aggregateScans(spectra_to_aggregate, weights, aggregated);
 
-      // Apply peak picking to the aggregated spectrum
-      applyPeakPicking(aggregated);
-
-      // Write the aggregated spectrum directly (bypass processSpectrum_)
-      doWriteSpectrum_(aggregated);
-      ++spectra_written_;
+      return aggregated;
     }
 
     // Direct write without going through processSpectrum_
