@@ -244,6 +244,14 @@ namespace OpenMS
       // we will pass them over to the output centroid spectrum
       std::vector<bool> claimed(raw_spectrum.size(), false);
 
+#ifdef DEBUG_PICKER
+      OPENMS_LOG_DEBUG << "extractIonMobilityTraces: raw_spectrum has " << raw_spectrum.size() << " peaks, "
+                       << "picked_spectrum has " << picked_spectrum.size() << " peaks.\n";
+      OPENMS_LOG_DEBUG << "extractIonMobilityTraces: raw_spectrum m/z range: ["
+                       << (raw_spectrum.empty() ? 0.0 : raw_spectrum.front().getMZ()) << ", "
+                       << (raw_spectrum.empty() ? 0.0 : raw_spectrum.back().getMZ()) << "]\n";
+#endif
+
       for (size_t i = 0; i < picked_spectrum.size(); ++i)
       {
         double picked_mz = picked_spectrum[i].getMZ();
@@ -794,7 +802,7 @@ namespace OpenMS
       // --- PickIMElutionProfiles parameters ---
       defaults_.setValue("pickIMElutionProfiles:ppm_tolerance_elution", 50.0, "Mass trace m/z tolerance in ppm");
       // --- Aggregation parameters ---
-      defaults_.setValue("aggregation:rt_FWHM", 1.0, "Full width at half maximum for Gaussian weighting of scans (in seconds)");
+      defaults_.setValue("aggregation:rt_FWHM", 5.0, "Full width at half maximum for Gaussian weighting of scans (in seconds)");
       defaults_.setValue("aggregation:cutoff", 0.01, "Weight cutoff below which spectra are not included in aggregation");
 
       defaultsToParam_();  // copies defaults_ into param_
@@ -1039,6 +1047,7 @@ namespace OpenMS
         LinearResamplerAlign lin_resampler;
         lin_resampler.setParameters(resampler_param);
         lin_resampler.raster(summed_trace);
+        /*
 #ifdef DEBUG_PICKER
         OPENMS_LOG_DEBUG << "Size of resampled trace: " << summed_trace.size() << " peaks.\n";
         for (const auto& peak : summed_trace)
@@ -1046,6 +1055,7 @@ namespace OpenMS
           OPENMS_LOG_DEBUG << "m/z: " << peak.getMZ() << ", intensity: " << peak.getIntensity() << '\n';
         }
 #endif
+*/
         // SGolay smooth prior to peak picking
         SavitzkyGolayFilter sgolay_filter;
         Param sgolay_params;
@@ -1061,7 +1071,6 @@ namespace OpenMS
           OPENMS_LOG_DEBUG << "m/z: " << peak.getMZ() << ", intensity: " << peak.getIntensity() << '\n';
         }
 #endif
-
         // ------------------------------------------ part 3b: im peak picking --------------------------------
         // apply PeakPickerHiRes to pick ion mobility peaks.
         // PeakPickerHiRes can be applied to chromatograms. We reasoned the same set of parameters ideal for
@@ -1082,7 +1091,6 @@ namespace OpenMS
         MSSpectrum picked_trace;
         picker_im.pick(summed_trace, picked_trace);
         picked_traces.push_back(std::move(picked_trace));
-
 #ifdef DEBUG_PICKER
         OPENMS_LOG_DEBUG << "--- Finished Processing Trace " << i << " ---\n\n";
 #endif
@@ -1114,11 +1122,14 @@ namespace OpenMS
 #ifdef DEBUG_PICKER
       // Print peaks for debugging
       OPENMS_LOG_DEBUG << "--- Spectrum final output object has ..  " << spectrum.size() << " --- peaks.\n";
+#endif
+      /*
       for (const auto& peak : spectrum)
       {
         OPENMS_LOG_DEBUG << "m/z: " << peak.getMZ() << ", intensity: " << peak.getIntensity() << '\n';
       }
 #endif
+      */
     }
 
     void PeakPickerIM::pickIMCluster(OpenMS::MSSpectrum& spectrum) const
@@ -1524,6 +1535,23 @@ namespace OpenMS
       // Sort by m/z position (keeping float arrays aligned)
       aggregated_spectrum.sortByPosition();
 
+      // Verify sorting was successful
+      if (!aggregated_spectrum.isSorted())
+      {
+        throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+            "Aggregated spectrum is not sorted by m/z after sortByPosition()",
+            "isSorted() returned false");
+      }
+
+      // Verify IM array size matches spectrum size after sorting
+      if (aggregated_spectrum.getFloatDataArrays()[0].size() != aggregated_spectrum.size())
+      {
+        throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+            "IM array size (" + String(aggregated_spectrum.getFloatDataArrays()[0].size()) +
+            ") does not match spectrum size (" + String(aggregated_spectrum.size()) + ") after sorting",
+            String(aggregated_spectrum.getFloatDataArrays()[0].size()) + " != " + String(aggregated_spectrum.size()));
+      }
+
       // Set metadata from the center spectrum (index 0)
       const MSSpectrum& center_spec = spectra[0];
       static_cast<SpectrumSettings&>(aggregated_spectrum) = static_cast<const SpectrumSettings&>(center_spec);
@@ -1556,6 +1584,9 @@ namespace OpenMS
       double factor = -4.0 * std::log(2.0) / (fwhm * fwhm);
       double cutoff = aggregation_cutoff_;
 
+      OPENMS_LOG_INFO << "pickExperimentWithAggregation: Using rt_FWHM=" << fwhm
+                      << "s, cutoff=" << cutoff << "\n";
+
       // Build list of MS1 spectrum indices
       std::vector<Size> ms1_indices;
       for (Size i = 0; i < exp.size(); ++i)
@@ -1566,11 +1597,19 @@ namespace OpenMS
         }
       }
 
+      OPENMS_LOG_INFO << "pickExperimentWithAggregation: Found " << ms1_indices.size()
+                      << " MS1 spectra out of " << exp.size() << " total spectra.\n";
+
       if (ms1_indices.empty())
       {
         OPENMS_LOG_WARN << "pickExperimentWithAggregation: No MS1 spectra found.\n";
         return;
       }
+
+      // Log RT range of MS1 spectra
+      double rt_min = exp[ms1_indices.front()].getRT();
+      double rt_max = exp[ms1_indices.back()].getRT();
+      OPENMS_LOG_INFO << "pickExperimentWithAggregation: MS1 RT range: [" << rt_min << ", " << rt_max << "] seconds.\n";
 
       // Check if first MS1 spectrum has IM data - required for PeakPickerIM
       if (!exp[ms1_indices[0]].containsIMData())
@@ -1635,6 +1674,27 @@ namespace OpenMS
         }
 
         aggregation_blocks[center_exp_idx] = std::move(neighbors_with_weights);
+      }
+
+      // Log aggregation statistics
+      Size total_neighbors = 0;
+      Size max_neighbors = 0;
+      Size min_neighbors = std::numeric_limits<Size>::max();
+      for (const auto& [center_idx, neighbors] : aggregation_blocks)
+      {
+        total_neighbors += neighbors.size();
+        max_neighbors = std::max(max_neighbors, neighbors.size());
+        min_neighbors = std::min(min_neighbors, neighbors.size());
+      }
+      double avg_neighbors = aggregation_blocks.empty() ? 0.0 : static_cast<double>(total_neighbors) / aggregation_blocks.size();
+      OPENMS_LOG_INFO << "pickExperimentWithAggregation: Aggregation blocks built. "
+                      << "Avg neighbors per spectrum: " << avg_neighbors
+                      << ", min: " << min_neighbors << ", max: " << max_neighbors << "\n";
+
+      if (max_neighbors == 1)
+      {
+        OPENMS_LOG_WARN << "pickExperimentWithAggregation: Each spectrum only has 1 neighbor (itself). "
+                        << "No actual aggregation will occur. Consider increasing rt_FWHM parameter.\n";
       }
 
       // Process each spectrum with its aggregation block
