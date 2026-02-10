@@ -43,18 +43,18 @@ namespace OpenMS
 {
     double PeakPickerIM::computeOptimalSamplingRate(const vector<MSSpectrum>& spectra)
     {
-      vector<double> mz_diffs;
+      vector<double> im_diffs;
       Size upper_peak_limit = 0;
       for (size_t s = 0; s < spectra.size(); ++s)
       {
         upper_peak_limit += spectra[s].size();
       }
-      mz_diffs.reserve(upper_peak_limit);
+      im_diffs.reserve(upper_peak_limit);
 
       for (size_t s = 0; s < spectra.size(); ++s)
       {
         const MSSpectrum& spectrum = spectra[s];
-        // The spectrum could have multiple ion mobility peaks at the same x position.
+        // The mobilogram could have multiple ion mobility peaks at the same x position.
         // Sum the peak intensity
         MSSpectrum summed_trace;
         sumFrame_(spectrum, summed_trace, sum_tolerance_im_, false);
@@ -65,22 +65,22 @@ namespace OpenMS
           OPENMS_LOG_DEBUG << "Skipping trace " << s << " because it has too few points ("
                     << summed_trace.size() << ").\n";
 #endif
-          continue; // skip this spectrum
+          continue; // skip this mobilogram
         }
 
         for (size_t i = 1; i < summed_trace.size(); ++i)
         {
           double diff = summed_trace[i].getMZ() - summed_trace[i - 1].getMZ();
-          mz_diffs.push_back(diff);
+          im_diffs.push_back(diff);
         }
-        if (mz_diffs.size() > 1000) break; // 1000 diffs should be enough to estimate sampling
+        if (im_diffs.size() > 1000) break;
       }
 
-      // If we found no valid m/z differences (traces too short)
-      if (mz_diffs.empty())
+      // If we found no valid im differences (traces too short)
+      if (im_diffs.empty())
       {
 #ifdef DEBUG_PICKER
-        OPENMS_LOG_DEBUG << "Warning: No valid m/z differences found in any spectra. Using default sampling rate of 0.01\n";
+        OPENMS_LOG_DEBUG << "Warning: No valid im differences found in any spectra. Using default sampling rate of 0.01\n";
 #endif
         return 0.01; // Fallback value
       }
@@ -88,39 +88,39 @@ namespace OpenMS
       // Sort the differences to compute the 75th percentile threshold
       // This is needed in case there is a gap in the mobilogram. i+1 peak will skew the computed
       // sampling rate.
-      std::sort(mz_diffs.begin(), mz_diffs.end());
+      std::sort(im_diffs.begin(), im_diffs.end());
 
-      size_t percentile_index = static_cast<size_t>(mz_diffs.size() * 0.75);
-      double threshold = mz_diffs[percentile_index];
+      size_t percentile_index = static_cast<size_t>(im_diffs.size() * 0.75);
+      double threshold = im_diffs[percentile_index];
 
 #ifdef DEBUG_PICKER
       OPENMS_LOG_DEBUG << "75th percentile of position differences is: " << threshold << '\n';
 #endif
 
       // Filter out large differences (keep diffs <= threshold)
-      vector<double> small_mz_diffs;
-      for (double diff : mz_diffs)
+      vector<double> small_im_diffs;
+      for (double diff : im_diffs)
       {
         if (diff <= threshold)
         {
-          small_mz_diffs.push_back(diff);
+          small_im_diffs.push_back(diff);
         }
       }
 
-      if (small_mz_diffs.empty())
+      if (small_im_diffs.empty())
       {
-        OPENMS_LOG_WARN << "Warning: No valid small m/z differences found after filtering. Using default sampling rate of 0.01\n";
+        OPENMS_LOG_WARN << "Warning: No valid small im differences found after filtering. Using default sampling rate of 0.01\n";
         return 0.01;
       }
 
       // Compute the mode
       std::unordered_map<double, int> freq_map;
-      for (double diff : small_mz_diffs)
+      for (double diff : small_im_diffs)
       {
         freq_map[diff]++;
       }
 
-      double mode_sampling_rate = small_mz_diffs.front();
+      double mode_sampling_rate = small_im_diffs.front();
       int max_count = 0;
 
       for (const auto& [diff, count] : freq_map)
