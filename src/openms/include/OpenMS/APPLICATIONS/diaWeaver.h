@@ -11,6 +11,7 @@
 #include <OpenMS/KERNEL/MSExperiment.h>
 #include <OpenMS/KERNEL/OnDiscMSExperiment.h>
 #include <OpenMS/FORMAT/CachedMzML.h>
+#include <OpenMS/PROCESSING/CENTROIDING/PeakPickerIM.h>
 #include <OpenMS/IONMOBILITY/IMTypes.h>
 #include <OpenMS/OpenMSConfig.h>
 #include <cmath>
@@ -306,5 +307,24 @@ namespace OpenMS
       const DIAWindow& window,
       const IMInfo& im_info,
       MSExperiment& out_ms1);
+
+    /**
+      @brief Aggregate a single spectrum with its RT neighbors using Gaussian weighting
+
+      Gathers neighboring spectra within the RT window defined by the picker's
+      aggregation parameters, and combines them via PeakPickerIM::aggregateScans.
+      Reads from the original (unmodified) experiment so it is safe to call from
+      a parallel loop that also writes back into the same experiment.
+
+      @param exp        The experiment containing the spectra (read-only access to neighbors)
+      @param center_idx Index of the spectrum to aggregate
+      @param picker     Configured PeakPickerIM (provides aggregation parameters and aggregateScans)
+      @param out        Output aggregated spectrum
+    */
+    static void aggregateSpectrum(
+      const MSExperiment& exp,
+      Size center_idx,
+      const PeakPickerIM& picker,
+      MSSpectrum& out);
   };
 } // namespace OpenMS

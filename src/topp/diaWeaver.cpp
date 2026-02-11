@@ -96,6 +96,11 @@ protected:
       "keep_ms1",
       "If set, include peak-picked MS1 spectra in the output file alongside pseudo spectra");
 
+    registerFlag_(
+      "aggregate_across_scans",
+      "If set, aggregate signal across neighboring scans using Gaussian weighting before peak picking. "
+      "This can improve signal-to-noise for low-intensity peaks (requires IM data).", false);
+
     registerSubsection_("PeakPickerIM", "Parameters for ion mobility peak picking (used when input has IM data)");
 
     registerSubsection_("PeakPickerHiRes", "Parameters for high-resolution peak picking (used when input has no IM data)");
@@ -431,6 +436,7 @@ protected:
     const String in = getStringOption_("in");
     const bool save_precursors = getFlag_("save_unfragmented_precursors");
     const bool keep_ms1 = getFlag_("keep_ms1");
+    const bool aggregate_scans = getFlag_("aggregate_across_scans");
     const Param ppim_params = getParam_().copy("PeakPickerIM:", true);
     const Param pphr_params = getParam_().copy("PeakPickerHiRes:", true);
 
@@ -501,10 +507,18 @@ protected:
     if (im_info.available)
     {
       OPENMS_LOG_INFO << "Ion mobility data detected. Using PeakPickerIM (mobilogram method)." << std::endl;
+      if (aggregate_scans)
+      {
+        OPENMS_LOG_INFO << "Aggregation across scans enabled. Signal will be boosted before peak picking." << std::endl;
+      }
     }
     else
     {
       OPENMS_LOG_INFO << "No ion mobility data detected. Using PeakPickerHiRes." << std::endl;
+      if (aggregate_scans)
+      {
+        OPENMS_LOG_WARN << "aggregate_across_scans is set but no IM data detected. Aggregation will be skipped." << std::endl;
+      }
     }
 
     // Create output file path
@@ -575,48 +589,28 @@ protected:
       DiaWeaver::extractSingleMS2Window(on_disc, w, indices, im_info, ms2_exp,
                                          save_precursors ? &precursor_exp : nullptr);
 
-      // Apply peak picking to MS2 spectra (inner parallel loop)
-      // Use parallel region to create thread-private pickers (more efficient than per-iteration)
-#pragma omp parallel num_threads(inner_threads)
+      // Apply peak picking to MS2 spectra
+      if (aggregate_scans && im_info.available)
       {
+        // Fused aggregation + peak picking, processed sequentially to avoid data races.
+        // Each spectrum is aggregated from neighbors, immediately peak-picked, then written back.
+        // Only one bloated intermediate exists at a time, keeping memory bounded.
+        Param ms2_picker_params = ppim_params;
+        ms2_picker_params.setValue("aggregation:rt_FWHM", 5.0);
         PeakPickerIM picker_im;
-        PeakPickerHiRes picker_hr;
-        if (im_info.available)
-        {
-          picker_im.setParameters(ppim_params);
-        }
-        else
-        {
-          picker_hr.setParameters(pphr_params);
-        }
+        picker_im.setParameters(ms2_picker_params);
 
-#pragma omp for schedule(dynamic, 1)
-        for (SignedSize s = 0; s < static_cast<SignedSize>(ms2_exp.size()); ++s)
+        for (Size s = 0; s < ms2_exp.size(); ++s)
         {
-          if (im_info.available)
-          {
-            picker_im.pickIMTraces(ms2_exp[s]);
-          }
-          else
-          {
-            MSSpectrum picked;
-            picker_hr.pick(ms2_exp[s], picked);
-            ms2_exp[s] = std::move(picked);
-          }
+          MSSpectrum aggregated;
+          DiaWeaver::aggregateSpectrum(ms2_exp, s, picker_im, aggregated);
+          picker_im.pickIMTraces(aggregated);
+          ms2_exp[s] = std::move(aggregated);
         }
       }
-
-      // Run MassTraceExtractor on MS2 data to get fragment traces for clustering
-      if (!ms2_exp.empty())
+      else
       {
-        Param mte_mtd_copy = mte_mtd_param;
-        Param mte_epd_copy = mte_epd_param;
-        runMassTraceExtractor_(ms2_exp, mte_common_param, mte_mtd_copy, mte_epd_copy, ms2_traces);
-      }
-
-      // Apply peak picking to precursors (inner parallel loop)
-      if (save_precursors && !precursor_exp.empty())
-      {
+        // Standard parallel peak picking (no aggregation)
 #pragma omp parallel num_threads(inner_threads)
         {
           PeakPickerIM picker_im;
@@ -631,17 +625,78 @@ protected:
           }
 
 #pragma omp for schedule(dynamic, 1)
-          for (SignedSize s = 0; s < static_cast<SignedSize>(precursor_exp.size()); ++s)
+          for (SignedSize s = 0; s < static_cast<SignedSize>(ms2_exp.size()); ++s)
           {
             if (im_info.available)
             {
-              picker_im.pickIMTraces(precursor_exp[s]);
+              picker_im.pickIMTraces(ms2_exp[s]);
             }
             else
             {
               MSSpectrum picked;
-              picker_hr.pick(precursor_exp[s], picked);
-              precursor_exp[s] = std::move(picked);
+              picker_hr.pick(ms2_exp[s], picked);
+              ms2_exp[s] = std::move(picked);
+            }
+          }
+        }
+      }
+
+      // Run MassTraceExtractor on MS2 data to get fragment traces for clustering
+      if (!ms2_exp.empty())
+      {
+        Param mte_mtd_copy = mte_mtd_param;
+        Param mte_epd_copy = mte_epd_param;
+        runMassTraceExtractor_(ms2_exp, mte_common_param, mte_mtd_copy, mte_epd_copy, ms2_traces);
+      }
+
+      // Apply peak picking to precursors
+      if (save_precursors && !precursor_exp.empty())
+      {
+        if (aggregate_scans && im_info.available)
+        {
+          // Fused aggregation + peak picking (sequential, memory-efficient)
+          Param prec_picker_params = ppim_params;
+          prec_picker_params.setValue("aggregation:rt_FWHM", 5.0);
+          PeakPickerIM picker_im;
+          picker_im.setParameters(prec_picker_params);
+
+          for (Size s = 0; s < precursor_exp.size(); ++s)
+          {
+            MSSpectrum aggregated;
+            DiaWeaver::aggregateSpectrum(precursor_exp, s, picker_im, aggregated);
+            picker_im.pickIMTraces(aggregated);
+            precursor_exp[s] = std::move(aggregated);
+          }
+        }
+        else
+        {
+          // Standard parallel peak picking (no aggregation)
+#pragma omp parallel num_threads(inner_threads)
+          {
+            PeakPickerIM picker_im;
+            PeakPickerHiRes picker_hr;
+            if (im_info.available)
+            {
+              picker_im.setParameters(ppim_params);
+            }
+            else
+            {
+              picker_hr.setParameters(pphr_params);
+            }
+
+#pragma omp for schedule(dynamic, 1)
+            for (SignedSize s = 0; s < static_cast<SignedSize>(precursor_exp.size()); ++s)
+            {
+              if (im_info.available)
+              {
+                picker_im.pickIMTraces(precursor_exp[s]);
+              }
+              else
+              {
+                MSSpectrum picked;
+                picker_hr.pick(precursor_exp[s], picked);
+                precursor_exp[s] = std::move(picked);
+              }
             }
           }
         }

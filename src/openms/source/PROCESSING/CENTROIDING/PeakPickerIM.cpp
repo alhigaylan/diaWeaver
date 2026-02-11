@@ -1697,10 +1697,17 @@ namespace OpenMS
                         << "No actual aggregation will occur. Consider increasing rt_FWHM parameter.\n";
       }
 
-      // Process each spectrum with its aggregation block
+      // Process each spectrum with its aggregation block.
+      // Important: collect ALL results before writing any back to exp.
+      // Writing back immediately would cause cascading: later iterations would
+      // read already-aggregated (bloated) neighbors instead of original spectra,
+      // leading to progressive memory growth.
+      std::vector<std::pair<Size, MSSpectrum>> aggregated_results;
+      aggregated_results.reserve(aggregation_blocks.size());
+
       for (const auto& [center_idx, neighbors] : aggregation_blocks)
       {
-        // Collect spectra and weights
+        // Collect spectra and weights (all reads from unmodified exp)
         std::vector<MSSpectrum> spectra_to_aggregate;
         std::vector<double> weights;
         spectra_to_aggregate.reserve(neighbors.size());
@@ -1716,11 +1723,16 @@ namespace OpenMS
         MSSpectrum aggregated;
         aggregateScans(spectra_to_aggregate, weights, aggregated);
 
-        // Replace the center spectrum with the aggregated spectrum
         if (!aggregated.empty())
         {
-          exp[center_idx] = std::move(aggregated);
+          aggregated_results.emplace_back(center_idx, std::move(aggregated));
         }
+      }
+
+      // Write all results back at once (no cascading possible)
+      for (auto& [idx, spec] : aggregated_results)
+      {
+        exp[idx] = std::move(spec);
       }
     }
 
