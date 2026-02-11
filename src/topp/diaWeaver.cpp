@@ -592,21 +592,31 @@ protected:
       // Apply peak picking to MS2 spectra
       if (aggregate_scans && im_info.available)
       {
-        // Fused aggregation + peak picking, processed sequentially to avoid data races.
-        // Each spectrum is aggregated from neighbors, immediately peak-picked, then written back.
-        // Only one bloated intermediate exists at a time, keeping memory bounded.
+        // Parallel aggregation + peak picking into a separate output experiment.
+        // ms2_exp stays immutable (raw data) so aggregateSpectrum always reads
+        // original neighbors. Each thread writes to a unique index in ms2_picked.
         Param ms2_picker_params = ppim_params;
         ms2_picker_params.setValue("aggregation:rt_FWHM", 5.0);
-        PeakPickerIM picker_im;
-        picker_im.setParameters(ms2_picker_params);
 
-        for (Size s = 0; s < ms2_exp.size(); ++s)
+        MSExperiment ms2_picked;
+        ms2_picked.resize(ms2_exp.size());
+
+#pragma omp parallel num_threads(inner_threads)
         {
-          MSSpectrum aggregated;
-          DiaWeaver::aggregateSpectrum(ms2_exp, s, picker_im, aggregated);
-          picker_im.pickIMTraces(aggregated);
-          ms2_exp[s] = std::move(aggregated);
+          PeakPickerIM picker_im;
+          picker_im.setParameters(ms2_picker_params);
+
+#pragma omp for schedule(dynamic, 1)
+          for (SignedSize s = 0; s < static_cast<SignedSize>(ms2_exp.size()); ++s)
+          {
+            MSSpectrum aggregated;
+            DiaWeaver::aggregateSpectrum(ms2_exp, static_cast<Size>(s), picker_im, aggregated);
+            picker_im.pickIMTraces(aggregated);
+            ms2_picked[s] = std::move(aggregated);
+          }
         }
+
+        ms2_exp = std::move(ms2_picked);
       }
       else
       {
@@ -654,19 +664,29 @@ protected:
       {
         if (aggregate_scans && im_info.available)
         {
-          // Fused aggregation + peak picking (sequential, memory-efficient)
+          // Parallel aggregation + peak picking (same pattern as MS2)
           Param prec_picker_params = ppim_params;
           prec_picker_params.setValue("aggregation:rt_FWHM", 5.0);
-          PeakPickerIM picker_im;
-          picker_im.setParameters(prec_picker_params);
 
-          for (Size s = 0; s < precursor_exp.size(); ++s)
+          MSExperiment prec_picked;
+          prec_picked.resize(precursor_exp.size());
+
+#pragma omp parallel num_threads(inner_threads)
           {
-            MSSpectrum aggregated;
-            DiaWeaver::aggregateSpectrum(precursor_exp, s, picker_im, aggregated);
-            picker_im.pickIMTraces(aggregated);
-            precursor_exp[s] = std::move(aggregated);
+            PeakPickerIM picker_im;
+            picker_im.setParameters(prec_picker_params);
+
+#pragma omp for schedule(dynamic, 1)
+            for (SignedSize s = 0; s < static_cast<SignedSize>(precursor_exp.size()); ++s)
+            {
+              MSSpectrum aggregated;
+              DiaWeaver::aggregateSpectrum(precursor_exp, static_cast<Size>(s), picker_im, aggregated);
+              picker_im.pickIMTraces(aggregated);
+              prec_picked[s] = std::move(aggregated);
+            }
           }
+
+          precursor_exp = std::move(prec_picked);
         }
         else
         {
