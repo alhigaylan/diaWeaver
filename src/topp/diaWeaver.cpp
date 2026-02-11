@@ -595,16 +595,13 @@ protected:
         // Parallel aggregation + peak picking into a separate output experiment.
         // ms2_exp stays immutable (raw data) so aggregateSpectrum always reads
         // original neighbors. Each thread writes to a unique index in ms2_picked.
-        Param ms2_picker_params = ppim_params;
-        ms2_picker_params.setValue("aggregation:rt_FWHM", 5.0);
-
         MSExperiment ms2_picked;
         ms2_picked.resize(ms2_exp.size());
 
 #pragma omp parallel num_threads(inner_threads)
         {
           PeakPickerIM picker_im;
-          picker_im.setParameters(ms2_picker_params);
+          picker_im.setParameters(ppim_params);
 
 #pragma omp for schedule(dynamic, 1)
           for (SignedSize s = 0; s < static_cast<SignedSize>(ms2_exp.size()); ++s)
@@ -665,16 +662,13 @@ protected:
         if (aggregate_scans && im_info.available)
         {
           // Parallel aggregation + peak picking (same pattern as MS2)
-          Param prec_picker_params = ppim_params;
-          prec_picker_params.setValue("aggregation:rt_FWHM", 5.0);
-
           MSExperiment prec_picked;
           prec_picked.resize(precursor_exp.size());
 
 #pragma omp parallel num_threads(inner_threads)
           {
             PeakPickerIM picker_im;
-            picker_im.setParameters(prec_picker_params);
+            picker_im.setParameters(ppim_params);
 
 #pragma omp for schedule(dynamic, 1)
             for (SignedSize s = 0; s < static_cast<SignedSize>(precursor_exp.size()); ++s)
@@ -732,32 +726,59 @@ protected:
       // Extract MS1 (on-demand from disk - each thread has its own file handle)
       DiaWeaver::extractSingleMS1Window(on_disc, w, im_info, ms1_exp);
 
-      // Apply peak picking to MS1 spectra (inner parallel loop)
-#pragma omp parallel num_threads(inner_threads)
+      // Apply peak picking to MS1 spectra
+      if (aggregate_scans && im_info.available)
       {
-        PeakPickerIM picker_im;
-        PeakPickerHiRes picker_hr;
-        if (im_info.available)
+        // Parallel aggregation + peak picking (same pattern as MS2)
+        MSExperiment ms1_picked;
+        ms1_picked.resize(ms1_exp.size());
+
+#pragma omp parallel num_threads(inner_threads)
         {
+          PeakPickerIM picker_im;
           picker_im.setParameters(ppim_params);
-        }
-        else
-        {
-          picker_hr.setParameters(pphr_params);
-        }
 
 #pragma omp for schedule(dynamic, 1)
-        for (SignedSize s = 0; s < static_cast<SignedSize>(ms1_exp.size()); ++s)
+          for (SignedSize s = 0; s < static_cast<SignedSize>(ms1_exp.size()); ++s)
+          {
+            MSSpectrum aggregated;
+            DiaWeaver::aggregateSpectrum(ms1_exp, static_cast<Size>(s), picker_im, aggregated);
+            picker_im.pickIMTraces(aggregated);
+            ms1_picked[s] = std::move(aggregated);
+          }
+        }
+
+        ms1_exp = std::move(ms1_picked);
+      }
+      else
+      {
+        // Standard parallel peak picking (no aggregation)
+#pragma omp parallel num_threads(inner_threads)
         {
+          PeakPickerIM picker_im;
+          PeakPickerHiRes picker_hr;
           if (im_info.available)
           {
-            picker_im.pickIMTraces(ms1_exp[s]);
+            picker_im.setParameters(ppim_params);
           }
           else
           {
-            MSSpectrum picked;
-            picker_hr.pick(ms1_exp[s], picked);
-            ms1_exp[s] = std::move(picked);
+            picker_hr.setParameters(pphr_params);
+          }
+
+#pragma omp for schedule(dynamic, 1)
+          for (SignedSize s = 0; s < static_cast<SignedSize>(ms1_exp.size()); ++s)
+          {
+            if (im_info.available)
+            {
+              picker_im.pickIMTraces(ms1_exp[s]);
+            }
+            else
+            {
+              MSSpectrum picked;
+              picker_hr.pick(ms1_exp[s], picked);
+              ms1_exp[s] = std::move(picked);
+            }
           }
         }
       }
