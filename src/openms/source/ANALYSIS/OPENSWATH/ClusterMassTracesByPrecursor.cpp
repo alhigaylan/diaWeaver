@@ -412,9 +412,9 @@ namespace OpenMS
 
         if (pearson_score > min_pearson_correlation_ && lag >= -max_lag_ && lag <= max_lag_)
         {
-          // Collect all valid precursor-fragment assignments
-          fragment_assignments[j].push_back(std::make_pair(static_cast<int>(i), pearson_score));
-          assignment_map[i].push_back(std::make_pair(static_cast<int>(j), pearson_score));
+          // Collect all valid precursor-fragment assignments (ranked by cross-correlation lag intensity)
+          fragment_assignments[j].push_back(std::make_pair(static_cast<int>(i), lag_intensity));
+          assignment_map[i].push_back(std::make_pair(static_cast<int>(j), lag_intensity));
         }
       }
     }
