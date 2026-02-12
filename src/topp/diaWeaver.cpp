@@ -72,6 +72,56 @@ public:
   }
 
 protected:
+
+  /// Aggregate a single spectrum with its RT neighbors using Gaussian weighting.
+  /// Reads from the immutable source experiment; safe to call from a parallel loop
+  /// that writes picked results into a separate output experiment.
+  static void aggregateSpectrum_(
+    const MSExperiment& exp,
+    Size center_idx,
+    const PeakPickerIM& picker,
+    MSSpectrum& out)
+  {
+    if (center_idx >= exp.size()) return;
+
+    Param params = picker.getParameters();
+    double fwhm = (double)params.getValue("aggregation:rt_FWHM");
+    double cutoff = (double)params.getValue("aggregation:cutoff");
+    double factor = -4.0 * std::log(2.0) / (fwhm * fwhm);
+
+    double center_rt = exp[center_idx].getRT();
+
+    std::vector<MSSpectrum> spectra_to_aggregate;
+    std::vector<double> weights;
+
+    // Search forward (including center)
+    for (Size j = center_idx; j < exp.size(); ++j)
+    {
+      double rt_diff = exp[j].getRT() - center_rt;
+      double weight = std::exp(factor * rt_diff * rt_diff);
+      if (weight < cutoff && j != center_idx) break;
+      spectra_to_aggregate.push_back(exp[j]);
+      weights.push_back(weight);
+    }
+
+    // Search backward
+    for (SignedSize j = static_cast<SignedSize>(center_idx) - 1; j >= 0; --j)
+    {
+      double rt_diff = exp[j].getRT() - center_rt;
+      double weight = std::exp(factor * rt_diff * rt_diff);
+      if (weight < cutoff) break;
+      spectra_to_aggregate.push_back(exp[j]);
+      weights.push_back(weight);
+    }
+
+    // Normalize weights
+    double sum_w = 0.0;
+    for (double w : weights) sum_w += w;
+    for (double& w : weights) w /= sum_w;
+
+    picker.aggregateScans(spectra_to_aggregate, weights, out);
+  }
+
   void registerOptionsAndFlags_() override
   {
     registerInputFile_(
@@ -607,7 +657,7 @@ protected:
           for (SignedSize s = 0; s < static_cast<SignedSize>(ms2_exp.size()); ++s)
           {
             MSSpectrum aggregated;
-            DiaWeaver::aggregateSpectrum(ms2_exp, static_cast<Size>(s), picker_im, aggregated);
+            aggregateSpectrum_(ms2_exp, static_cast<Size>(s), picker_im, aggregated);
             picker_im.pickIMTraces(aggregated);
             ms2_picked[s] = std::move(aggregated);
           }
@@ -674,7 +724,7 @@ protected:
             for (SignedSize s = 0; s < static_cast<SignedSize>(precursor_exp.size()); ++s)
             {
               MSSpectrum aggregated;
-              DiaWeaver::aggregateSpectrum(precursor_exp, static_cast<Size>(s), picker_im, aggregated);
+              aggregateSpectrum_(precursor_exp, static_cast<Size>(s), picker_im, aggregated);
               picker_im.pickIMTraces(aggregated);
               prec_picked[s] = std::move(aggregated);
             }
@@ -742,7 +792,7 @@ protected:
           for (SignedSize s = 0; s < static_cast<SignedSize>(ms1_exp.size()); ++s)
           {
             MSSpectrum aggregated;
-            DiaWeaver::aggregateSpectrum(ms1_exp, static_cast<Size>(s), picker_im, aggregated);
+            aggregateSpectrum_(ms1_exp, static_cast<Size>(s), picker_im, aggregated);
             picker_im.pickIMTraces(aggregated);
             ms1_picked[s] = std::move(aggregated);
           }
