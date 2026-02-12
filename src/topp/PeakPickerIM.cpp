@@ -74,6 +74,59 @@ public:
   {}
 
 protected:
+
+  /// Aggregate a single spectrum with its RT neighbors using Gaussian weighting.
+  /// Reads from the immutable source experiment; safe to call from a parallel loop
+  /// that writes picked results into a separate output experiment.
+  static void aggregateSpectrum_(
+    const MSExperiment& exp,
+    Size center_idx,
+    const PeakPickerIM& picker,
+    MSSpectrum& out)
+  {
+    if (center_idx >= exp.size()) return;
+
+    Param params = picker.getParameters();
+    double fwhm = (double)params.getValue("aggregation:rt_FWHM");
+    double cutoff = (double)params.getValue("aggregation:cutoff");
+    double factor = -4.0 * std::log(2.0) / (fwhm * fwhm);
+
+    double center_rt = exp[center_idx].getRT();
+    int center_ms_level = exp[center_idx].getMSLevel();
+
+    std::vector<MSSpectrum> spectra_to_aggregate;
+    std::vector<double> weights;
+
+    // Search forward (including center), same MS level only
+    for (Size j = center_idx; j < exp.size(); ++j)
+    {
+      if (exp[j].getMSLevel() != center_ms_level) continue;
+      double rt_diff = exp[j].getRT() - center_rt;
+      double weight = std::exp(factor * rt_diff * rt_diff);
+      if (weight < cutoff && j != center_idx) break;
+      spectra_to_aggregate.push_back(exp[j]);
+      weights.push_back(weight);
+    }
+
+    // Search backward, same MS level only
+    for (SignedSize j = static_cast<SignedSize>(center_idx) - 1; j >= 0; --j)
+    {
+      if (exp[j].getMSLevel() != center_ms_level) continue;
+      double rt_diff = exp[j].getRT() - center_rt;
+      double weight = std::exp(factor * rt_diff * rt_diff);
+      if (weight < cutoff) break;
+      spectra_to_aggregate.push_back(exp[j]);
+      weights.push_back(weight);
+    }
+
+    // Normalize weights
+    double sum_w = 0.0;
+    for (double w : weights) sum_w += w;
+    for (double& w : weights) w /= sum_w;
+
+    picker.aggregateScans(spectra_to_aggregate, weights, out);
+  }
+
   void registerOptionsAndFlags_() override
   {
     registerInputFile_("in", "<file>", "", "Input mzML file");
@@ -540,29 +593,66 @@ protected:
         return EXECUTION_OK;
       }
 
-      // Aggregate signal across scans if requested (improves S/N before peak picking)
-      if (aggregate_scans)
+      if (aggregate_scans && method == "mobilogram")
       {
+        // Parallel aggregation + peak picking into a separate output experiment.
+        // exp stays immutable (raw data) so aggregateSpectrum_ always reads
+        // original neighbors. Each thread writes to a unique index in picked_exp.
         OPENMS_LOG_INFO << "Aggregating signal across neighboring scans..." << std::endl;
-        picker.pickExperimentWithAggregation(exp);
+
+        PeakMap picked_exp;
+        picked_exp.resize(exp.size());
+
+#pragma omp parallel
+        {
+          PeakPickerIM thread_picker;
+          thread_picker.setParameters(algo);
+
+#pragma omp for schedule(dynamic, 1)
+          for (SignedSize i = 0; i < static_cast<SignedSize>(exp.size()); ++i)
+          {
+            Size idx = static_cast<Size>(i);
+
+            if (exp[idx].getMSLevel() == 1 && exp[idx].containsIMData())
+            {
+              // Aggregate neighbors from immutable exp, pick, store in picked_exp
+              MSSpectrum aggregated;
+              aggregateSpectrum_(exp, idx, thread_picker, aggregated);
+              thread_picker.pickIMTraces(aggregated);
+              picked_exp[idx] = std::move(aggregated);
+            }
+            else
+            {
+              // Non-MS1: pass through as raw
+              picked_exp[idx] = exp[idx];
+            }
+          }
+        }
+
+        exp = std::move(picked_exp);
       }
-
-#pragma omp parallel for
-      for (SignedSize i = 0; i < static_cast<SignedSize>(exp.size()); ++i)
+      else
       {
-        MSSpectrum& spectrum = exp[static_cast<Size>(i)];
+#pragma omp parallel for
+        for (SignedSize i = 0; i < static_cast<SignedSize>(exp.size()); ++i)
+        {
+          MSSpectrum& spectrum = exp[static_cast<Size>(i)];
 
-        if (method == "mobilogram")
-        {
-          picker.pickIMTraces(spectrum);
-        }
-        else if (method == "cluster")
-        {
-          picker.pickIMCluster(spectrum);
-        }
-        else if (method == "traces")
-        {
-          picker.pickIMElutionProfiles(spectrum);
+          // Only pick MS1 spectra; pass MS2 through as raw
+          if (spectrum.getMSLevel() != 1) continue;
+
+          if (method == "mobilogram")
+          {
+            picker.pickIMTraces(spectrum);
+          }
+          else if (method == "cluster")
+          {
+            picker.pickIMCluster(spectrum);
+          }
+          else if (method == "traces")
+          {
+            picker.pickIMElutionProfiles(spectrum);
+          }
         }
       }
 
