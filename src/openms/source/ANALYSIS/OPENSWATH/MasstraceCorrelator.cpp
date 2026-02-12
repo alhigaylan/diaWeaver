@@ -120,7 +120,7 @@ namespace OpenMS
 
   void MasstraceCorrelator::scoreHullpoints(const MasstracePointsType& hull_points1, const MasstracePointsType& hull_points2,
         int& lag, double& lag_intensity, double& pearson_score, 
-        const double min_corr, const int /* max_lag */, const double mindiff)
+        const double min_corr, const int max_lag, const double mindiff)
   {
     std::vector<double> vec1;
     std::vector<double> vec2;
@@ -129,7 +129,7 @@ namespace OpenMS
     pearson_score = Math::pearsonCorrelationCoefficient(vec1.begin(), vec1.end(), vec2.begin(), vec2.end() );
 
     // If the correlation is below the minimum level, we can already return at this point
-    if (pearson_score <= min_corr) 
+    if (pearson_score <= min_corr)
     {
       return;
     }

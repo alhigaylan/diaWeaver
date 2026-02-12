@@ -298,6 +298,7 @@ protected:
       p.setValue("max_rt_apex_difference", 5.0, "Maximal difference of the apex in retention time (in seconds).");
       p.setValue("im_tolerance", 0.02, "Ion mobility tolerance for matching precursors to fragments.");
       p.setValue("nr_precursors_per_fragment", 50, "Maximum number of precursors a fragment can be assigned to.");
+      p.setValue("rt_tolerance", 5.0, "RT tolerance (in seconds) for matching up mass trace points during correlation.");
       return p;
     }
     return Param();
