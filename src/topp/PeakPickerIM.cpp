@@ -17,7 +17,6 @@
 #include <OpenMS/IONMOBILITY/IMTypes.h>
 
 #include <cmath>
-#include <deque>
 
 using namespace OpenMS;
 using namespace std;
@@ -169,6 +168,7 @@ protected:
   }
 
   // -------------------- Low-memory consumer --------------------
+  // Picks only MS1 spectra; MS2 spectra pass through as raw.
   class Consumer : public MSDataWritingConsumer
   {
   public:
@@ -177,6 +177,9 @@ protected:
 
     void processSpectrum_(MapType::SpectrumType& spectrum) override
     {
+      // Only pick MS1 spectra; pass MS2 through as raw
+      if (spectrum.getMSLevel() != 1) return;
+
       if (method_ == "mobilogram")
       {
         pp_.pickIMTraces(spectrum);
@@ -196,247 +199,6 @@ protected:
   private:
     PeakPickerIM pp_;
     String method_;
-  };
-
-  // -------------------- Aggregating low-memory consumer --------------------
-  // Buffers MS1 spectra in a sliding window to enable cross-scan aggregation
-  // before peak picking. MS2 spectra are passed through immediately.
-  class AggregatingConsumer : public MSDataWritingConsumer
-  {
-  public:
-    AggregatingConsumer(String filename, const String& method, PeakPickerIM& pp,
-                        double rt_fwhm, double cutoff) :
-        MSDataWritingConsumer(std::move(filename)), pp_(pp), method_(method),
-        rt_fwhm_(rt_fwhm), cutoff_(cutoff)
-    {
-      factor_ = -4.0 * std::log(2.0) / (rt_fwhm_ * rt_fwhm_);
-      // Compute max RT difference where weight >= cutoff
-      // weight = exp(factor * rt_diff^2) >= cutoff
-      // factor * rt_diff^2 >= ln(cutoff)
-      // rt_diff^2 <= ln(cutoff) / factor  (factor is negative)
-      // rt_diff <= sqrt(ln(cutoff) / factor)
-      max_rt_diff_ = std::sqrt(std::log(cutoff_) / factor_);
-      OPENMS_LOG_INFO << "AggregatingConsumer: max RT difference for aggregation: "
-                      << max_rt_diff_ << " seconds\n";
-    }
-
-    // Override consumeSpectrum to control buffering and writing directly
-    void consumeSpectrum(MapType::SpectrumType& spectrum) override
-    {
-      ++spectra_consumed_;
-
-      if (spectrum.getMSLevel() != 1)
-      {
-        // Non-MS1 spectra: process and write immediately via parent
-        applyPeakPicking(spectrum);
-        MSDataWritingConsumer::consumeSpectrum(spectrum);
-        ++non_ms1_written_;
-        return;
-      }
-
-      // Check for IM data on first MS1 spectrum
-      if (!checked_im_data_)
-      {
-        checked_im_data_ = true;
-        OPENMS_LOG_INFO << "AggregatingConsumer: First MS1 spectrum received at RT="
-                        << spectrum.getRT() << "\n";
-        if (!spectrum.containsIMData())
-        {
-          OPENMS_LOG_WARN << "AggregatingConsumer: First MS1 spectrum has no IM data. "
-                          << "Aggregation will be skipped.\n";
-          has_im_data_ = false;
-        }
-        else
-        {
-          has_im_data_ = true;
-          OPENMS_LOG_INFO << "AggregatingConsumer: IM data detected, aggregation enabled.\n";
-        }
-      }
-
-      // If no IM data, just process and write immediately
-      if (!has_im_data_)
-      {
-        applyPeakPicking(spectrum);
-        MSDataWritingConsumer::consumeSpectrum(spectrum);
-        ++spectra_written_;
-        return;
-      }
-
-      // Add MS1 spectrum to buffer (do NOT write yet)
-      ms1_buffer_.push_back(spectrum);
-
-      // Try to flush ready spectra
-      flushReady();
-    }
-
-    void processSpectrum_(MapType::SpectrumType&) override
-    {
-      // Not used - we handle everything in consumeSpectrum
-    }
-
-    void processChromatogram_(MapType::ChromatogramType&) override {}
-
-    // Override the consumer to flush at the end
-    ~AggregatingConsumer() override
-    {
-      // Flush all remaining buffered spectra
-      OPENMS_LOG_INFO << "AggregatingConsumer: Flushing " << ms1_buffer_.size()
-                      << " remaining buffered spectra.\n";
-      flushAll();
-      OPENMS_LOG_INFO << "AggregatingConsumer: Finished.\n"
-                      << "  Total spectra consumed: " << spectra_consumed_ << "\n"
-                      << "  Non-MS1 spectra written: " << non_ms1_written_ << "\n"
-                      << "  Aggregated MS1 spectra written: " << spectra_written_ << "\n";
-    }
-
-  private:
-    void applyPeakPicking(MapType::SpectrumType& spectrum)
-    {
-      if (method_ == "mobilogram")
-      {
-        pp_.pickIMTraces(spectrum);
-      }
-      else if (method_ == "cluster")
-      {
-        pp_.pickIMCluster(spectrum);
-      }
-      else if (method_ == "traces")
-      {
-        pp_.pickIMElutionProfiles(spectrum);
-      }
-    }
-
-    void flushReady()
-    {
-      if (ms1_buffer_.size() < 2) return;
-
-      double last_rt = ms1_buffer_.back().getRT();
-
-      // Count how many spectra from the front are ready
-      // A spectrum is ready when all its potential neighbors have been seen
-      // (i.e., last_rt - spectrum_rt > max_rt_diff_)
-      Size ready_count = 0;
-      for (Size i = 0; i < ms1_buffer_.size(); ++i)
-      {
-        double spectrum_rt = ms1_buffer_[i].getRT();
-        if (last_rt - spectrum_rt > max_rt_diff_)
-        {
-          ++ready_count;
-        }
-        else
-        {
-          break; // Spectra are ordered by RT, so no more will be ready
-        }
-      }
-
-      if (ready_count == 0) return;
-
-      // Process ready spectra in batch with parallel peak picking
-      processBatch(ready_count);
-    }
-
-    void flushAll()
-    {
-      // Output all remaining buffered spectra
-      if (ms1_buffer_.empty()) return;
-      processBatch(ms1_buffer_.size());
-    }
-
-    // Batch process: aggregate, parallel peak pick, sequential write
-    void processBatch(Size count)
-    {
-      if (count == 0 || count > ms1_buffer_.size()) return;
-
-      // Step 1: Aggregate all ready spectra
-      std::vector<MSSpectrum> aggregated_spectra(count);
-
-      for (Size idx = 0; idx < count; ++idx)
-      {
-        aggregated_spectra[idx] = createAggregatedSpectrum(idx);
-      }
-
-      // Step 2: Parallel peak picking
-      #pragma omp parallel for schedule(dynamic)
-      for (SignedSize i = 0; i < static_cast<SignedSize>(aggregated_spectra.size()); ++i)
-      {
-        applyPeakPicking(aggregated_spectra[i]);
-      }
-
-      // Step 3: Sequential write (maintains order)
-      for (Size i = 0; i < aggregated_spectra.size(); ++i)
-      {
-        doWriteSpectrum_(aggregated_spectra[i]);
-        ++spectra_written_;
-      }
-
-      // Step 4: Remove processed spectra from buffer
-      for (Size i = 0; i < count; ++i)
-      {
-        ms1_buffer_.pop_front();
-      }
-
-      OPENMS_LOG_DEBUG << "AggregatingConsumer: Batch processed " << count << " spectra.\n";
-    }
-
-    // Create aggregated spectrum for buffer index (without peak picking)
-    MSSpectrum createAggregatedSpectrum(Size center_idx)
-    {
-      if (center_idx >= ms1_buffer_.size()) return MSSpectrum();
-
-      MSSpectrum& center_spectrum = ms1_buffer_[center_idx];
-      double center_rt = center_spectrum.getRT();
-
-      // Collect neighbors and their weights
-      std::vector<MSSpectrum> spectra_to_aggregate;
-      std::vector<double> weights;
-
-      for (Size i = 0; i < ms1_buffer_.size(); ++i)
-      {
-        double rt_diff = ms1_buffer_[i].getRT() - center_rt;
-        double weight = std::exp(factor_ * rt_diff * rt_diff);
-
-        if (weight >= cutoff_ || i == center_idx)
-        {
-          spectra_to_aggregate.push_back(ms1_buffer_[i]);
-          weights.push_back(weight);
-        }
-      }
-
-      // Normalize weights
-      double sum_weights = 0.0;
-      for (double w : weights) sum_weights += w;
-      for (double& w : weights) w /= sum_weights;
-
-      OPENMS_LOG_DEBUG << "AggregatingConsumer: Creating aggregated spectrum at RT=" << center_rt
-                       << " with " << spectra_to_aggregate.size() << " neighbors.\n";
-
-      // Aggregate
-      MSSpectrum aggregated;
-      pp_.aggregateScans(spectra_to_aggregate, weights, aggregated);
-
-      return aggregated;
-    }
-
-    // Direct write without going through processSpectrum_
-    void doWriteSpectrum_(MapType::SpectrumType& spectrum)
-    {
-      // Call the parent's consumeSpectrum but since processSpectrum_ is empty,
-      // it will just write the spectrum
-      MSDataWritingConsumer::consumeSpectrum(spectrum);
-    }
-
-    PeakPickerIM& pp_;
-    String method_;
-    double rt_fwhm_;
-    double cutoff_;
-    double factor_;
-    double max_rt_diff_;
-    std::deque<MSSpectrum> ms1_buffer_;
-    bool checked_im_data_ = false;
-    bool has_im_data_ = true;
-    Size spectra_consumed_ = 0;
-    Size spectra_written_ = 0;
-    Size non_ms1_written_ = 0;
   };
 
   // -------------------- Format detection consumer (reads first spectrum only) --------------------
@@ -470,8 +232,15 @@ protected:
   // -------------------- Helper for low-memory path --------------------
   ExitCodes doLowMemAlgorithm(const String& method, PeakPickerIM& pp,
                               const String& input_file, const String& output_file,
-                              bool aggregate_scans, double rt_fwhm, double cutoff)
+                              bool aggregate_scans)
   {
+    if (aggregate_scans)
+    {
+      OPENMS_LOG_WARN << "Warning: 'aggregate_across_scans' is not supported in low-memory mode "
+                      << "(requires random access to neighboring spectra). "
+                      << "Proceeding without aggregation." << std::endl;
+    }
+
     MzMLFile mzml;
     mzml.setLogType(log_type_);
 
@@ -532,19 +301,10 @@ protected:
     MzMLFile mzml_writer;
     mzml_writer.setLogType(log_type_);
 
-    if (aggregate_scans)
-    {
-      OPENMS_LOG_INFO << "Low-memory mode with aggregation: using sliding window buffer." << std::endl;
-      AggregatingConsumer agg_consumer(output_file, method, pp, rt_fwhm, cutoff);
-      agg_consumer.addDataProcessing(getProcessingInfo_(DataProcessing::PEAK_PICKING));
-      mzml_writer.transform(input_file, &agg_consumer);
-    }
-    else
-    {
-      Consumer pp_consumer(output_file, method, pp);
-      pp_consumer.addDataProcessing(getProcessingInfo_(DataProcessing::PEAK_PICKING));
-      mzml_writer.transform(input_file, &pp_consumer);
-    }
+    Consumer pp_consumer(output_file, method, pp);
+    pp_consumer.addDataProcessing(getProcessingInfo_(DataProcessing::PEAK_PICKING));
+    mzml_writer.transform(input_file, &pp_consumer);
+
     return EXECUTION_OK;
   }
 
@@ -564,11 +324,8 @@ protected:
 
     if (process_opt == "lowmemory")
     {
-      // Get aggregation parameters for low-memory mode
-      double rt_fwhm = algo.getValue("aggregation:rt_FWHM");
-      double cutoff = algo.getValue("aggregation:cutoff");
       return doLowMemAlgorithm(method, picker, input_file, output_file,
-                               aggregate_scans, rt_fwhm, cutoff);
+                               aggregate_scans);
     }
     else
     {
