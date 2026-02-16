@@ -357,11 +357,20 @@ namespace OpenMS
   {
     MasstraceCorrelator mtcorr;
 
-    // Track fragment assignments: for each fragment, store list of (precursor_idx, pearson_score) pairs
-    std::vector<std::vector<std::pair<int, double>>> fragment_assignments(fragment_profiles.size());
+    // Stores all scores produced by scoreHullpoints for a precursor-fragment pair
+    struct HullScore
+    {
+      int index;           // precursor or fragment index
+      double pearson;      // Pearson correlation at zero lag
+      int lag;             // lag at max cross-correlation
+      double lag_intensity; // normalized cross-correlation at optimal lag
+    };
 
-    // Assignment map: precursor index -> list of (fragment index, pearson score) pairs
-    std::map<int, std::vector<std::pair<int, double>>> assignment_map;
+    // Track fragment assignments: for each fragment, store list of scored precursor matches
+    std::vector<std::vector<HullScore>> fragment_assignments(fragment_profiles.size());
+
+    // Assignment map: precursor index -> list of scored fragment matches
+    std::map<int, std::vector<HullScore>> assignment_map;
 
     // -----------------------------------
     // Step 1 - assign fragment mass traces to precursors
@@ -412,9 +421,9 @@ namespace OpenMS
 
         if (pearson_score > min_pearson_correlation_ && lag >= -max_lag_ && lag <= max_lag_)
         {
-          // Collect all valid precursor-fragment assignments (ranked by Pearson correlation)
-          fragment_assignments[j].push_back(std::make_pair(static_cast<int>(i), pearson_score));
-          assignment_map[i].push_back(std::make_pair(static_cast<int>(j), pearson_score));
+          // Collect all valid precursor-fragment assignments
+          fragment_assignments[j].push_back({static_cast<int>(i), pearson_score, lag, lag_intensity});
+          assignment_map[i].push_back({static_cast<int>(j), pearson_score, lag, lag_intensity});
         }
       }
     }
@@ -432,9 +441,9 @@ namespace OpenMS
 
         // Sort by pearson score (descending)
         std::sort(fragment_assignments[j].begin(), fragment_assignments[j].end(),
-                  [](const std::pair<int, double>& a, const std::pair<int, double>& b)
+                  [](const HullScore& a, const HullScore& b)
                   {
-                    return a.second > b.second;
+                    return a.pearson > b.pearson;
                   });
 
         // Keep only top N precursors
@@ -455,9 +464,9 @@ namespace OpenMS
     assignment_map.clear();
     for (Size j = 0; j < fragment_assignments.size(); ++j)
     {
-      for (const auto& [precursor_idx, score] : fragment_assignments[j])
+      for (const auto& hs : fragment_assignments[j])
       {
-        assignment_map[precursor_idx].push_back(std::make_pair(static_cast<int>(j), score));
+        assignment_map[hs.index].push_back({static_cast<int>(j), hs.pearson, hs.lag, hs.lag_intensity});
       }
     }
 
@@ -516,7 +525,7 @@ namespace OpenMS
           }
 
           // Assign to all matching precursors with score 0 (will be filtered first if too many)
-          assignment_map[i].push_back(std::make_pair(static_cast<int>(j), 0.0));
+          assignment_map[i].push_back({static_cast<int>(j), 0.0, 0, 0.0});
         }
       }
       endProgress();
@@ -575,21 +584,34 @@ namespace OpenMS
       if (assignments.size() > 500)
       {
         std::sort(assignments.begin(), assignments.end(),
-                  [](const std::pair<int, double>& a, const std::pair<int, double>& b)
+                  [](const HullScore& a, const HullScore& b)
                   {
-                    return a.second > b.second;  // Sort by pearson score descending
+                    return a.pearson > b.pearson;
                   });
           assignments.resize(500);
       }
       */
 
-      // Add fragment ions
-      for (const auto& [ms2_idx, pearson_score] : assignments)
+      // Prepare FloatDataArrays for correlation scores, fragment RT and ion mobility
+      spectrum.getFloatDataArrays().resize(5);
+      spectrum.getFloatDataArrays()[0].setName("pearson_score");
+      spectrum.getFloatDataArrays()[1].setName("xcorr_lag");
+      spectrum.getFloatDataArrays()[2].setName("xcorr_lag_intensity");
+      spectrum.getFloatDataArrays()[3].setName("fragment_rt");
+      spectrum.getFloatDataArrays()[4].setName("fragment_ion_mobility");
+
+      // Add fragment ions with their scores, RT, and ion mobility
+      for (const auto& hs : assignments)
       {
         Peak1D peak;
-        peak.setMZ(fragment_mz[ms2_idx]);
-        peak.setIntensity(fragment_intensity[ms2_idx]);
+        peak.setMZ(fragment_mz[hs.index]);
+        peak.setIntensity(fragment_intensity[hs.index]);
         spectrum.push_back(peak);
+        spectrum.getFloatDataArrays()[0].push_back(hs.pearson);
+        spectrum.getFloatDataArrays()[1].push_back(static_cast<float>(hs.lag));
+        spectrum.getFloatDataArrays()[2].push_back(hs.lag_intensity);
+        spectrum.getFloatDataArrays()[3].push_back(fragment_rt[hs.index]);
+        spectrum.getFloatDataArrays()[4].push_back(fragment_im[hs.index]);
       }
 
       if (spectrum.size() >= min_nr_ions_)
