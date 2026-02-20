@@ -164,6 +164,15 @@ namespace OpenMS
 
     /// Maximum number of precursors a fragment can be assigned to
     Size nr_precursors_per_fragment_;
+
+    /// Weight for Pearson correlation in combined ranking score
+    double pearson_weight_;
+
+    /// Weight for delta RT in combined ranking score
+    double delta_rt_weight_;
+
+    /// Weight for delta ion mobility in combined ranking score
+    double delta_im_weight_;
   };
 
 } // namespace OpenMS

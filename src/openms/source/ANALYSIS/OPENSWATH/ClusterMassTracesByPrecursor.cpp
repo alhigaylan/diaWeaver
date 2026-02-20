@@ -29,7 +29,10 @@ namespace OpenMS
     im_tolerance_(0.02),
     assign_unassigned_to_all_(false),
     rt_tolerance_(2.0),
-    nr_precursors_per_fragment_(25)
+    nr_precursors_per_fragment_(25),
+    pearson_weight_(1.0),
+    delta_rt_weight_(1.0),
+    delta_im_weight_(1.0)
   {
     defaults_.setValue("min_pearson_correlation", 0.7,
       "Minimal Pearson correlation score to match elution profiles to each other.");
@@ -65,8 +68,20 @@ namespace OpenMS
 
     defaults_.setValue("nr_precursors_per_fragment", 25,
       "Maximum number of precursors a fragment can be assigned to. "
-      "If a fragment correlates with more precursors, only the top N with highest Pearson scores are kept.");
+      "If a fragment correlates with more precursors, only the top N with highest combined scores are kept.");
     defaults_.setMinInt("nr_precursors_per_fragment", 1);
+
+    defaults_.setValue("pearson_weight", 1.0,
+      "Weight for the Pearson correlation component in the combined score used to rank precursor-fragment assignments.");
+    defaults_.setMinFloat("pearson_weight", 0.0);
+
+    defaults_.setValue("delta_rt_weight", 1.0,
+      "Weight for the delta RT component in the combined score used to rank precursor-fragment assignments.");
+    defaults_.setMinFloat("delta_rt_weight", 0.0);
+
+    defaults_.setValue("delta_im_weight", 1.0,
+      "Weight for the delta ion mobility component in the combined score used to rank precursor-fragment assignments.");
+    defaults_.setMinFloat("delta_im_weight", 0.0);
 
     defaultsToParam_();
   }
@@ -83,6 +98,9 @@ namespace OpenMS
     assign_unassigned_to_all_ = param_.getValue("assign_unassigned_to_all").toBool();
     rt_tolerance_ = param_.getValue("rt_tolerance");
     nr_precursors_per_fragment_ = static_cast<Size>(static_cast<int>(param_.getValue("nr_precursors_per_fragment")));
+    pearson_weight_ = param_.getValue("pearson_weight");
+    delta_rt_weight_ = param_.getValue("delta_rt_weight");
+    delta_im_weight_ = param_.getValue("delta_im_weight");
   }
 
   void ClusterMassTracesByPrecursor::run(
@@ -425,7 +443,7 @@ namespace OpenMS
         {
           // Collect all valid precursor-fragment assignments
           double delta_rt = std::fabs(precursor_rt[i] - fragment_rt[j]);
-          double delta_im = std::fabs(precursor_im[i] - fragment_im[j]);
+          double delta_im = has_im_data ? std::fabs(precursor_im[i] - fragment_im[j]) : 0.0;
           fragment_assignments[j].push_back({static_cast<int>(i), pearson_score, lag, lag_intensity, delta_rt, delta_im});
           assignment_map[i].push_back({static_cast<int>(j), pearson_score, lag, lag_intensity, delta_rt, delta_im});
         }
@@ -436,7 +454,7 @@ namespace OpenMS
     // -----------------------------------
     // Filter fragments assigned to too many precursors - keep only top N precursor per fragment using a combined score
     // -----------------------------------
-    // Combined score = normalized_pearson + normalized_rt + normalized_im
+    // Combined score = w_pearson * normalized_pearson + w_rt * normalized_rt + w_im * normalized_im
     // normalized_pearson: (pearson - min_pearson_correlation_) / (1 - min_pearson_correlation_)  -> [0, 1]
     // normalized_rt:      1 - (delta_rt / max_rt_apex_difference_)                               -> [0, 1]
     // normalized_im:      1 - (delta_im / im_tolerance_)                                         -> [0, 1]
@@ -457,7 +475,7 @@ namespace OpenMS
                       double norm_pearson = (pearson_range > 0) ? (hs.pearson - min_pearson_correlation_) / pearson_range : 1.0;
                       double norm_rt = 1.0 - (hs.delta_rt / max_rt_apex_difference_);
                       double norm_im = (has_im_data && im_tolerance_ > 0) ? 1.0 - (hs.delta_im / im_tolerance_) : 1.0;
-                      return norm_pearson + norm_rt + norm_im;
+                      return (pearson_weight_ * norm_pearson) + (delta_rt_weight_ * norm_rt) + (delta_im_weight_ * norm_im);
                     };
                     return combined(a) > combined(b);
                   });
@@ -609,12 +627,13 @@ namespace OpenMS
       */
 
       // Prepare FloatDataArrays for correlation scores, fragment RT and ion mobility
-      spectrum.getFloatDataArrays().resize(5);
+      spectrum.getFloatDataArrays().resize(6);
       spectrum.getFloatDataArrays()[0].setName("pearson_score");
       spectrum.getFloatDataArrays()[1].setName("xcorr_lag");
       spectrum.getFloatDataArrays()[2].setName("xcorr_lag_intensity");
       spectrum.getFloatDataArrays()[3].setName("fragment_rt");
       spectrum.getFloatDataArrays()[4].setName("fragment_ion_mobility");
+      spectrum.getFloatDataArrays()[5].setName("combined_score");
 
       // Add fragment ions with their scores, RT, and ion mobility
       for (const auto& hs : assignments)
@@ -628,6 +647,12 @@ namespace OpenMS
         spectrum.getFloatDataArrays()[2].push_back(hs.lag_intensity);
         spectrum.getFloatDataArrays()[3].push_back(fragment_rt[hs.index]);
         spectrum.getFloatDataArrays()[4].push_back(fragment_im[hs.index]);
+
+        double norm_pearson = (pearson_range > 0) ? (hs.pearson - min_pearson_correlation_) / pearson_range : 1.0;
+        double norm_rt = 1.0 - (hs.delta_rt / max_rt_apex_difference_);
+        double norm_im = (has_im_data && im_tolerance_ > 0) ? 1.0 - (hs.delta_im / im_tolerance_) : 1.0;
+        double combined = (pearson_weight_ * norm_pearson) + (delta_rt_weight_ * norm_rt) + (delta_im_weight_ * norm_im);
+        spectrum.getFloatDataArrays()[5].push_back(combined);
       }
 
       if (spectrum.size() >= min_nr_ions_)

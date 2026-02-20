@@ -299,6 +299,9 @@ protected:
       p.setValue("im_tolerance", 0.02, "Ion mobility tolerance for matching precursors to fragments.");
       p.setValue("nr_precursors_per_fragment", 50, "Maximum number of precursors a fragment can be assigned to.");
       p.setValue("rt_tolerance", 2.0, "RT tolerance (in seconds) for matching up mass trace points during correlation.");
+      p.setValue("pearson_weight", 1.0, "Weight for the Pearson correlation component in the combined score used to rank precursor-fragment assignments.");
+      p.setValue("delta_rt_weight", 1.0, "Weight for the delta RT component in the combined score used to rank precursor-fragment assignments.");
+      p.setValue("delta_im_weight", 1.0, "Weight for the delta ion mobility component in the combined score used to rank precursor-fragment assignments.");
       return p;
     }
     return Param();
