@@ -559,7 +559,9 @@ namespace OpenMS
           }
 
           // Assign to all matching precursors with score 0 (will be filtered first if too many)
-          assignment_map[i].push_back({static_cast<int>(j), 0.0, 0, 0.0});
+          double delta_rt = std::fabs(precursor_rt[i] - fragment_rt[j]);
+          double delta_im = has_im_data ? std::fabs(precursor_im[i] - fragment_im[j]) : 0.0;
+          assignment_map[i].push_back({static_cast<int>(j), 0.0, 0, 0.0, delta_rt, delta_im});
         }
       }
       endProgress();
