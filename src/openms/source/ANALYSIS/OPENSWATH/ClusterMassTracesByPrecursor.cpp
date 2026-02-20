@@ -500,7 +500,7 @@ namespace OpenMS
     {
       for (const auto& hs : fragment_assignments[j])
       {
-        assignment_map[hs.index].push_back({static_cast<int>(j), hs.pearson, hs.lag, hs.lag_intensity});
+        assignment_map[hs.index].push_back({static_cast<int>(j), hs.pearson, hs.lag, hs.lag_intensity, hs.delta_rt, hs.delta_im});
       }
     }
 
