@@ -364,6 +364,8 @@ namespace OpenMS
       double pearson;      // Pearson correlation at zero lag
       int lag;             // lag at max cross-correlation
       double lag_intensity; // normalized cross-correlation at optimal lag
+      double delta_rt;     // absolute RT difference between precursor and fragment
+      double delta_im;     // absolute IM difference between precursor and fragment
     };
 
     // Track fragment assignments: for each fragment, store list of scored precursor matches
@@ -422,16 +424,23 @@ namespace OpenMS
         if (pearson_score > min_pearson_correlation_ && lag >= -max_lag_ && lag <= max_lag_)
         {
           // Collect all valid precursor-fragment assignments
-          fragment_assignments[j].push_back({static_cast<int>(i), pearson_score, lag, lag_intensity});
-          assignment_map[i].push_back({static_cast<int>(j), pearson_score, lag, lag_intensity});
+          double delta_rt = std::fabs(precursor_rt[i] - fragment_rt[j]);
+          double delta_im = std::fabs(precursor_im[i] - fragment_im[j]);
+          fragment_assignments[j].push_back({static_cast<int>(i), pearson_score, lag, lag_intensity, delta_rt, delta_im});
+          assignment_map[i].push_back({static_cast<int>(j), pearson_score, lag, lag_intensity, delta_rt, delta_im});
         }
       }
     }
     endProgress();
 
     // -----------------------------------
-    // Filter fragments assigned to too many precursors - keep only top N by pearson score
+    // Filter fragments assigned to too many precursors - keep only top N precursor per fragment using a combined score
     // -----------------------------------
+    // Combined score = normalized_pearson + normalized_rt + normalized_im
+    // normalized_pearson: (pearson - min_pearson_correlation_) / (1 - min_pearson_correlation_)  -> [0, 1]
+    // normalized_rt:      1 - (delta_rt / max_rt_apex_difference_)                               -> [0, 1]
+    // normalized_im:      1 - (delta_im / im_tolerance_)                                         -> [0, 1]
+    double pearson_range = 1.0 - min_pearson_correlation_;
     Size cnt_fragments_filtered = 0;
     for (Size j = 0; j < fragment_assignments.size(); ++j)
     {
@@ -439,11 +448,18 @@ namespace OpenMS
       {
         cnt_fragments_filtered++;
 
-        // Sort by pearson score (descending)
+        // Sort by combined score (descending)
         std::sort(fragment_assignments[j].begin(), fragment_assignments[j].end(),
-                  [](const HullScore& a, const HullScore& b)
+                  [&](const HullScore& a, const HullScore& b)
                   {
-                    return a.pearson > b.pearson;
+                    auto combined = [&](const HullScore& hs)
+                    {
+                      double norm_pearson = (pearson_range > 0) ? (hs.pearson - min_pearson_correlation_) / pearson_range : 1.0;
+                      double norm_rt = 1.0 - (hs.delta_rt / max_rt_apex_difference_);
+                      double norm_im = (has_im_data && im_tolerance_ > 0) ? 1.0 - (hs.delta_im / im_tolerance_) : 1.0;
+                      return norm_pearson + norm_rt + norm_im;
+                    };
+                    return combined(a) > combined(b);
                   });
 
         // Keep only top N precursors
@@ -455,7 +471,7 @@ namespace OpenMS
     {
       OPENMS_LOG_INFO << "Filtered " << cnt_fragments_filtered << " fragments that were assigned to more than "
                       << nr_precursors_per_fragment_ << " precursors (kept top " << nr_precursors_per_fragment_
-                      << " by pearson score)" << std::endl;
+                      << " by combined score)" << std::endl;
     }
 
     // -----------------------------------
