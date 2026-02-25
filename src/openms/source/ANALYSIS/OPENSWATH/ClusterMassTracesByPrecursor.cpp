@@ -615,18 +615,23 @@ namespace OpenMS
       // Get assignments for this precursor
       auto& assignments = assignment_map[i];
 
-      // If more than 500 assignments, sort by pearson score and keep top 500
-      /*
+      // If more than 500 assignments to one precursor, sort by combined score and keep top 500
       if (assignments.size() > 500)
       {
         std::sort(assignments.begin(), assignments.end(),
-                  [](const HullScore& a, const HullScore& b)
+                  [&](const HullScore& a, const HullScore& b)
                   {
-                    return a.pearson > b.pearson;
+                    auto combined = [&](const HullScore& hs)
+                    {
+                      double norm_pearson = (hs.pearson - min_pearson_correlation_) / pearson_range;
+                      double norm_rt = 1.0 - (hs.delta_rt / max_rt_apex_difference_);
+                      double norm_im = (has_im_data && im_tolerance_ > 0) ? 1.0 - (hs.delta_im / im_tolerance_) : 1.0;
+                      return (pearson_weight_ * norm_pearson) + (delta_rt_weight_ * norm_rt) + (delta_im_weight_ * norm_im);
+                    };
+                    return combined(a) > combined(b);
                   });
-          assignments.resize(500);
+        assignments.resize(500);
       }
-      */
 
       // Prepare FloatDataArrays for correlation scores, fragment RT and ion mobility
       spectrum.getFloatDataArrays().resize(6);
