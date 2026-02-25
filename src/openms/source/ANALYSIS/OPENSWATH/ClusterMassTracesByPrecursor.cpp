@@ -472,7 +472,7 @@ namespace OpenMS
                   {
                     auto combined = [&](const HullScore& hs)
                     {
-                      double norm_pearson = (pearson_range > 0) ? (hs.pearson - min_pearson_correlation_) / pearson_range : 1.0;
+                      double norm_pearson = (hs.pearson - min_pearson_correlation_) / pearson_range;
                       double norm_rt = 1.0 - (hs.delta_rt / max_rt_apex_difference_);
                       double norm_im = (has_im_data && im_tolerance_ > 0) ? 1.0 - (hs.delta_im / im_tolerance_) : 1.0;
                       return (pearson_weight_ * norm_pearson) + (delta_rt_weight_ * norm_rt) + (delta_im_weight_ * norm_im);
