@@ -21,6 +21,7 @@ Biosaur2Algorithm.cpp
 FeatureFinderAlgorithmMetaboIdent.cpp
 FeatureFinderMultiplexAlgorithm.cpp
 FeatureFindingMetabo.cpp
+FeatureFindingPeptide.cpp
 FFIDAlgoExternalIDHandler.cpp
 Fitter1D.cpp
 GaussFitter1D.cpp

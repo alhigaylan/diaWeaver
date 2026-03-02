@@ -1,0 +1,563 @@
+// Copyright (c) 2002-present, OpenMS Inc. -- EKU Tuebingen, ETH Zurich, and FU Berlin
+// SPDX-License-Identifier: BSD-3-Clause
+//
+// --------------------------------------------------------------------------
+// $Maintainer: Timo Sachsenberg $
+// $Authors: Mohammed Alhigaylan $
+// --------------------------------------------------------------------------
+#include <OpenMS/FORMAT/FileHandler.h>
+#include <OpenMS/IONMOBILITY/FAIMSHelper.h>
+#include <OpenMS/IONMOBILITY/IMDataConverter.h>
+#include <OpenMS/IONMOBILITY/IMTypes.h>
+#include <OpenMS/KERNEL/MSExperiment.h>
+#include <OpenMS/KERNEL/FeatureMap.h>
+#include <OpenMS/KERNEL/MassTrace.h>
+#include <OpenMS/FEATUREFINDER/MassTraceDetection.h>
+#include <OpenMS/FEATUREFINDER/ElutionPeakDetection.h>
+#include <OpenMS/FEATUREFINDER/FeatureFindingPeptide.h>
+#include <OpenMS/CONCEPT/Constants.h>
+#include <OpenMS/APPLICATIONS/TOPPBase.h>
+#include <OpenMS/SYSTEM/File.h>
+#include <OpenMS/PROCESSING/FEATURE/FeatureOverlapFilter.h>
+
+#include <limits>
+#include <set>
+
+
+using namespace OpenMS;
+using namespace std;
+
+//-------------------------------------------------------------
+//Doxygen docu
+//-------------------------------------------------------------
+
+/**
+@page TOPP_FeatureFinderPeptide FeatureFinderPeptide
+
+@brief FeatureFinderPeptide assembles peptide features from singleton mass traces.
+
+<CENTER>
+<table>
+<tr>
+<th ALIGN = "center"> pot. predecessor tools </td>
+<td VALIGN="middle" ROWSPAN=3> &rarr; FeatureFinderPeptide &rarr;</td>
+<th ALIGN = "center"> pot. successor tools </td>
+</tr>
+<tr>
+<td VALIGN="middle" ALIGN = "center" ROWSPAN=1> @ref TOPP_PeakPickerHiRes </td>
+<td VALIGN="middle" ALIGN = "center" ROWSPAN=2> @ref TOPP_TextExporter</td>
+</tr>
+<tr>
+<td VALIGN="middle" ALIGN = "center" ROWSPAN=1> @ref TOPP_PeakPickerHiRes </td>
+</tr>
+</table>
+</CENTER>
+
+Mass traces alone would allow for further analysis such as peptide ID or
+statistical evaluation. However, in general, monoisotopic mass traces are
+accompanied by satellite C13 peaks and thus may render the analysis more
+difficult. FeatureFinderPeptide fulfills a further data reduction step by
+assembling compatible mass traces to peptide features (that is, all mass
+traces originating from one peptide). To this end, multiple peptide
+hypotheses are formulated and scored according to how well differences in RT (optional),
+m/z or intensity ratios match to those of theoretical isotope patterns.
+
+If the raw data scans contain the scan polarity information, it is stored as
+meta value "scan_polarity" in the output file.
+
+<B>The command line parameters of this tool are:</B>
+@verbinclude TOPP_FeatureFinderPeptide.cli
+<B>INI file documentation of this tool:</B>
+@htmlinclude TOPP_FeatureFinderPeptide.html
+*/
+
+// We do not want this class to show up in the docu:
+/// @cond TOPPCLASSES
+
+class TOPPFeatureFinderPeptide :
+  public TOPPBase
+{
+public:
+  TOPPFeatureFinderPeptide() :
+    TOPPBase("FeatureFinderPeptide", "Assembles peptide features from centroided (LC-)MS data using the mass trace approach.")
+  {
+  }
+
+protected:
+
+  /**
+   * @brief Process a single PeakMap (or FAIMS CV group) through the full FFPeptide pipeline
+   * @param[in,out] ms_peakmap Input peak map (will be modified - sorted)
+   * @param[in] common_param Common parameters
+   * @param[in] mtd_param MassTraceDetection parameters
+   * @param[in] epd_param ElutionPeakDetection parameters
+   * @param[in] ffp_param FeatureFindingPeptide parameters
+   * @param[out] feat_map Output feature map as featureXML or ConsensusXML
+   * @param[out] feat_chromatograms Output chromatograms (if enabled)
+   * @return True on success, false on error
+   */
+  bool processOneGroup_(PeakMap& ms_peakmap,
+                        const Param& common_param,
+                        Param mtd_param,
+                        Param epd_param,
+                        Param ffp_param,
+                        FeatureMap& feat_map,
+                        std::vector<std::vector<OpenMS::MSChromatogram>>& feat_chromatograms,
+                        std::vector<MassTrace>& traces_final_out)
+  {
+    // make sure the spectra are sorted by m/z
+    ms_peakmap.sortSpectra(true);
+
+    vector<MassTrace> m_traces;
+
+    //-------------------------------------------------------------
+    // configure and run mass trace detection
+    //-------------------------------------------------------------
+    MassTraceDetection mtdet;
+    mtd_param.insert("", common_param);
+    mtd_param.remove("chrom_fwhm");
+    mtdet.setParameters(mtd_param);
+    mtdet.run(ms_peakmap, m_traces);
+
+    //-------------------------------------------------------------
+    // configure and run elution peak detection
+    //-------------------------------------------------------------
+    std::vector<MassTrace> m_traces_final;
+    if (epd_param.getValue("enabled").toBool())
+    {
+      std::vector<MassTrace> splitted_mtraces;
+      epd_param.remove("enabled");
+      epd_param.insert("", common_param);
+      epd_param.remove("noise_threshold_int");
+      ElutionPeakDetection epdet;
+      epdet.setParameters(epd_param);
+      epdet.detectPeaks(m_traces, splitted_mtraces);
+      if (epdet.getParameters().getValue("width_filtering") == "auto")
+      {
+        m_traces_final.clear();
+        epdet.filterByPeakWidth(splitted_mtraces, m_traces_final);
+      }
+      else
+      {
+        m_traces_final = splitted_mtraces;
+      }
+    }
+    else
+    {
+      m_traces_final = m_traces;
+      for (Size i = 0; i < m_traces_final.size(); ++i)
+      {
+        m_traces_final[i].estimateFWHM(false);
+      }
+      if (ffp_param.getValue("use_smoothed_intensities").toBool())
+      {
+        OPENMS_LOG_WARN << "Without EPD, smoothing is not supported. Setting 'use_smoothed_intensities' to false!" << std::endl;
+        ffp_param.setValue("use_smoothed_intensities", "false");
+      }
+    }
+    traces_final_out = m_traces_final;
+
+    //-------------------------------------------------------------
+    // configure and run feature finding
+    //-------------------------------------------------------------
+    ffp_param.insert("", common_param);
+    ffp_param.remove("noise_threshold_int");
+    ffp_param.remove("chrom_peak_snr");
+
+    FeatureFindingPeptide ffpep;
+    ffpep.setParameters(ffp_param);
+    ffpep.run(m_traces_final, feat_map, feat_chromatograms);
+
+    Size trace_count(0);
+    for (Size i = 0; i < feat_map.size(); ++i)
+    {
+      OPENMS_PRECONDITION(feat_map[i].metaValueExists(Constants::UserParam::NUM_OF_MASSTRACES),
+          "MetaValue 'num_of_masstraces' missing from FFPeptide output!");
+      trace_count += (Size) feat_map[i].getMetaValue(Constants::UserParam::NUM_OF_MASSTRACES);
+    }
+
+    if (trace_count != m_traces_final.size())
+    {
+      if (!ffp_param.getValue("remove_single_traces").toBool())
+      {
+        OPENMS_LOG_ERROR << "FF-Peptide: Internal error. Not all mass traces have been assembled to features!" << std::endl;
+        return false;
+      }
+      else
+      {
+        OPENMS_LOG_INFO << "FF-Peptide: " << (m_traces_final.size() - trace_count) << " unassembled traces have been removed." << std::endl;
+      }
+    }
+
+    OPENMS_LOG_INFO << "-- FF-Peptide stats --\n"
+             << "Input traces:    " << m_traces_final.size() << "\n"
+             << "Output features: " << feat_map.size() << " (total trace count: " << trace_count << ")" << std::endl;
+
+    return true;
+  }
+
+  void registerOptionsAndFlags_() override
+  {
+    registerInputFile_("in", "<file>", "", "Centroided mzML file");
+    setValidFormats_("in", ListUtils::create<String>("mzML"));
+    registerOutputFile_("out", "<file>", "", "Output file, either FeatureXML with concise features or ConsensusXML with raw trace info");
+    setValidFormats_("out", ListUtils::create<String>("featureXML,consensusXML"));
+
+    registerOutputFile_("out_chrom", "<file>", "", "Optional mzML file with chromatograms", false);
+    setValidFormats_("out_chrom", ListUtils::create<String>("mzML"));
+
+    addEmptyLine_();
+    registerStringOption_("faims_merge_features", "<true/false>", "true",
+      "For FAIMS data with multiple compensation voltages: Merge features representing the same analyte "
+      "detected at different CV values into a single feature. Only features with DIFFERENT FAIMS CV values "
+      "are merged (same CV = different analytes). Has no effect on non-FAIMS data.", false);
+    setValidStrings_("faims_merge_features", {"true", "false"});
+
+    addEmptyLine_();
+    registerSubsection_("algorithm", "Algorithm parameters section");
+  }
+
+  Param getSubsectionDefaults_(const String& /*section*/) const override
+  {
+    Param combined;
+    Param p_com;
+    p_com.setValue("noise_threshold_int", 10.0, "Intensity threshold below which peaks are regarded as noise.");
+    p_com.setValue("chrom_peak_snr", 3.0, "Minimum signal-to-noise a mass trace should have.");
+    p_com.setValue("chrom_fwhm", 5.0, "Expected chromatographic peak width (in seconds).");
+    combined.insert("common:", p_com);
+    combined.setSectionDescription("common", "Common parameters for all other subsections");
+
+    Param p_mtd = MassTraceDetection().getDefaults();
+    p_mtd.remove("noise_threshold_int");
+    p_mtd.remove("chrom_peak_snr");
+    combined.insert("mtd:", p_mtd);
+    combined.setSectionDescription("mtd", "Mass Trace Detection parameters");
+
+    Param p_epd;
+    p_epd.setValue("enabled", "true", "Enable splitting of isobaric mass traces by chromatographic peak detection. Disable for direct injection.");
+    p_epd.setValidStrings("enabled", {"true","false"});
+    p_epd.insert("", ElutionPeakDetection().getDefaults());
+    p_epd.remove("chrom_peak_snr");
+    p_epd.remove("chrom_fwhm");
+
+    combined.insert("epd:", p_epd);
+    combined.insert("epd:", p_epd);
+    combined.setSectionDescription("epd", "Elution Profile Detection (to separate isobaric Mass Traces by elution time).");
+
+    Param p_ffp = FeatureFindingPeptide().getDefaults();
+    p_ffp.remove("chrom_fwhm");
+    p_ffp.remove("report_chromatograms");
+    combined.insert("ffp:", p_ffp);
+    combined.setSectionDescription("ffp", "FeatureFinder parameters (assembling mass traces to charged features)");
+
+    return combined;
+  }
+
+  ExitCodes main_(int, const char**) override
+  {
+
+    //-------------------------------------------------------------
+    // parameter handling
+    //-------------------------------------------------------------
+
+    String in = getStringOption_("in");
+    String out = getStringOption_("out");
+    String out_chrom = getStringOption_("out_chrom");
+
+    //-------------------------------------------------------------
+    // loading input
+    //-------------------------------------------------------------
+    FileHandler mz_data_file;
+    PeakMap ms_peakmap;
+    std::vector<Int> ms_level(1, 1);
+    mz_data_file.getOptions().setMSLevels(ms_level);
+    mz_data_file.loadExperiment(in, ms_peakmap, {FileTypes::MZML}, log_type_);
+
+    if (ms_peakmap.empty())
+    {
+      OPENMS_LOG_WARN << "The given file does not contain any conventional peak data, but might"
+                  " contain chromatograms. This tool currently cannot handle them, sorry.";
+      return INCOMPATIBLE_INPUT_DATA;
+    }
+
+    // determine type of spectral data (profile or centroided)
+    SpectrumSettings::SpectrumType spectrum_type = ms_peakmap[0].getType();
+
+    if (spectrum_type == SpectrumSettings::SpectrumType::PROFILE)
+    {
+      if (!getFlag_("force"))
+      {
+        throw OpenMS::Exception::FileEmpty(__FILE__, __LINE__, __FUNCTION__,
+            "Error: Profile data provided but centroided spectra expected. To enforce processing of the data set the -force flag.");
+      }
+    }
+
+    //-------------------------------------------------------------
+    // set parameters
+    //-------------------------------------------------------------
+
+    Param common_param = getParam_().copy("algorithm:common:", true);
+    writeDebug_("Common parameters passed to sub-algorithms (mtd and ffp)", common_param, 3);
+
+    Param mtd_param = getParam_().copy("algorithm:mtd:", true);
+    writeDebug_("Parameters passed to MassTraceDetection", mtd_param, 3);
+
+    Param epd_param = getParam_().copy("algorithm:epd:", true);
+    writeDebug_("Parameters passed to ElutionPeakDetection", epd_param, 3);
+
+    Param ffp_param = getParam_().copy("algorithm:ffp:", true);
+    writeDebug_("Parameters passed to FeatureFindingPeptide", ffp_param, 3);
+
+    String report_chromatograms = out_chrom.empty() ? "false" : "true";
+    ffp_param.setValue("report_chromatograms", report_chromatograms);
+
+    // Store polarities before potentially moving ms_peakmap (needed later for output annotation)
+    set<IonSource::Polarity> polarities;
+    for (const auto& spec : ms_peakmap)
+    {
+      polarities.insert(spec.getInstrumentSettings().getPolarity());
+    }
+
+    //-------------------------------------------------------------
+    // Split by FAIMS CV (returns single NaN-keyed element for non-FAIMS data)
+    //-------------------------------------------------------------
+    auto faims_groups = IMDataConverter::splitByFAIMSCV(std::move(ms_peakmap));
+
+    const bool has_faims = faims_groups.size() > 1 || !std::isnan(faims_groups[0].first);
+    if (has_faims)
+    {
+      OPENMS_LOG_INFO << "FAIMS data detected with " << faims_groups.size() << " compensation voltage(s)." << endl;
+    }
+
+    FeatureMap feat_map;
+    std::vector<std::vector<OpenMS::MSChromatogram>> feat_chromatograms;
+    // output mass traces for consensusXML file output
+    std::vector<MassTrace> all_traces_final;
+
+    // Process each FAIMS CV group (or single group for non-FAIMS data)
+    for (auto& [group_cv, faims_group] : faims_groups)
+    {
+      if (has_faims)
+      {
+        OPENMS_LOG_INFO << "Processing FAIMS CV group: " << group_cv << " V (" << faims_group.size() << " spectra)" << endl;
+      }
+
+      // Process this group
+      FeatureMap feat_map_cv;
+      std::vector<std::vector<OpenMS::MSChromatogram>> feat_chromatograms_cv;
+      std::vector<MassTrace> traces_final_cv;
+
+      if (!processOneGroup_(faims_group, common_param, mtd_param, epd_param, ffp_param,
+                            feat_map_cv, feat_chromatograms_cv, traces_final_cv))
+      {
+        if (has_faims)
+        {
+          OPENMS_LOG_ERROR << "Processing failed for FAIMS CV " << group_cv << " V. Aborting." << endl;
+        }
+        return UNEXPECTED_RESULT;
+      }
+
+      // Annotate features with FAIMS CV (if FAIMS data) and add to combined results
+      for (auto& feat : feat_map_cv)
+      {
+        if (has_faims)
+        {
+          feat.setMetaValue(Constants::UserParam::FAIMS_CV, group_cv);
+        }
+        feat_map.push_back(feat);
+      }
+
+      // Combine chromatograms
+      for (auto& chrom_group : feat_chromatograms_cv)
+      {
+        feat_chromatograms.push_back(std::move(chrom_group));
+      }
+      // combine mass traces
+      all_traces_final.insert(all_traces_final.end(), traces_final_cv.begin(), traces_final_cv.end());
+    }
+
+    if (has_faims)
+    {
+      OPENMS_LOG_INFO << "Combined " << feat_map.size() << " features from all FAIMS CV groups." << endl;
+
+      // Optionally merge features representing the same analyte at different CV values
+      if (getStringOption_("faims_merge_features") == "true")
+      {
+        Size before_merge = feat_map.size();
+        FeatureOverlapFilter::mergeFAIMSFeatures(feat_map, 5.0, 0.05);
+        OPENMS_LOG_INFO << "FAIMS feature merge: " << before_merge << " -> " << feat_map.size()
+                        << " features (merged " << (before_merge - feat_map.size()) << ")" << endl;
+      }
+    }
+
+    // filter features with zero intensity (this can happen if the FWHM is zero (bc of overly skewed shape) and no peaks end up being summed up)
+    auto intensity_zero = [&](Feature& f) { return f.getIntensity() == 0; };
+    feat_map.erase(remove_if(feat_map.begin(),feat_map.end(),intensity_zero),feat_map.end());
+
+    // store chromatograms
+    if (!out_chrom.empty())
+    {
+      if (feat_chromatograms.size() == feat_map.size())
+        {
+          MSExperiment out_exp;
+            for (Size i = 0; i < feat_chromatograms.size(); ++i)
+            {
+                for (Size j = 0; j < feat_chromatograms[i].size(); ++j)
+                {
+                  out_exp.addChromatogram(feat_chromatograms[i][j]);
+                }
+            }
+          FileHandler().storeExperiment(out_chrom, out_exp, {FileTypes::MZML});
+        }
+        else
+        {
+            OPENMS_LOG_ERROR << "FF-Peptide: Internal error. The number of features (" << feat_chromatograms.size() << ") and chromatograms (" << feat_map.size() << ") are different! Aborting." << std::endl;
+            return UNEXPECTED_RESULT;
+        }
+    }
+
+    // store ionization mode of spectra (useful for post-processing by AccurateMassSearch tool)
+    // Note: polarities were collected before ms_peakmap was potentially moved
+    if (!feat_map.empty() && !polarities.empty())
+    {
+      StringList sl_pols;
+      for (const auto& pol : polarities)
+      {
+        sl_pols.push_back(IonSource::polarityToString(pol));
+      }
+      feat_map[0].setMetaValue("scan_polarity", ListUtils::concatenate(sl_pols, ";"));
+    }
+
+    //-------------------------------------------------------------
+    // writing output
+    //-------------------------------------------------------------
+
+    // detect requested output format
+    FileTypes::Type out_type = FileHandler::getTypeByFileName(out);
+    if (out_type == FileTypes::FEATUREXML)
+    {
+      // ensure unique IDs for the combined feature map
+      feat_map.ensureUniqueId();
+      // annotate output with data processing info
+      addDataProcessing_(feat_map, getProcessingInfo_(DataProcessing::QUANTITATION));
+      // annotate "spectra_data" metavalue
+      // Note: use simple form since ms_peakmap may have been moved for FAIMS processing
+      if (getFlag_("test"))
+      {
+        // if test mode set, add file without path so we can compare it
+        feat_map.setPrimaryMSRunPath({"file://" + File::basename(in)});
+      }
+      else
+      {
+        feat_map.setPrimaryMSRunPath({in});
+      }
+
+      FileHandler().storeFeatures(out, feat_map, {FileTypes::FEATUREXML});
+    }
+
+    // ------- new code: write featuresXML as consensusXML (needed for ClusterMassTrace)
+    // The output should be similar to MassTraceExtractor except we have charge and isotope labels
+    else if (out_type == FileTypes::CONSENSUSXML)
+    {
+      // build ConsensusMap for monoisotopic traces
+      ConsensusMap consensus_map;
+      if (getFlag_("test"))
+      {
+        consensus_map.setPrimaryMSRunPath({"file://" + File::basename(in)});
+      }
+      else
+      {
+        consensus_map.setPrimaryMSRunPath({in}, ms_peakmap);
+      }
+
+      // 1. Pre-build label → MassTrace map for log(N) lookup
+      std::map<String, const MassTrace*> trace_lookup;
+      for (const auto& tr : all_traces_final)
+      {
+        trace_lookup[tr.getLabel()] = &tr;
+      }
+
+      // 2. Iterate features
+      for (Size i = 0; i < feat_map.size(); ++i)
+      {
+        // Retrieve full feature label
+        String feat_label = feat_map[i].getMetaValue("label");
+        StringList label_tokens;
+        feat_label.split("_", label_tokens);
+        if (label_tokens.empty()) continue;
+
+        // First token is the monoisotopic trace label
+        String mono_label = label_tokens[0];
+
+        // Fast lookup from map (O(log N))
+        auto it = trace_lookup.find(mono_label);
+        if (it == trace_lookup.end()) continue; // no matching trace found
+        const MassTrace& mono_trace = *(it->second);
+
+        // Build ConsensusFeature
+        ConsensusFeature fcons;
+        int peak_idx = 0;
+        for (const Peak2D& peak : mono_trace)
+        {
+          FeatureHandle fh;
+          fh.setRT(peak.getRT());
+          fh.setMZ(peak.getMZ());
+          fh.setIntensity(peak.getIntensity());
+          fh.setUniqueId(++peak_idx);
+          fcons.insert(fh);
+        }
+        // Annotate centroid info
+        fcons.setRT(mono_trace.getCentroidRT());
+        fcons.setMZ(mono_trace.getCentroidMZ());
+        fcons.setIntensity(mono_trace.getIntensity(false));
+
+        // Add charge and full hypothesis label
+        fcons.setCharge(feat_map[i].getCharge());
+        fcons.setMetaValue("isotope_labels", feat_label);
+
+        // Estimate quality; optional width if needed
+        fcons.setQuality(1 - (1.0 / mono_trace.getSize()));
+        // fcons.setWidth(mono_trace.estimateFWHM(true)); // enable if desired
+
+        // Optional meta values for mz/IM FWHM
+        if (mono_trace.fwhm_mz_avg > 0)
+        {
+          fcons.setMetaValue(Constants::UserParam::FWHM_MZ_AVG, mono_trace.fwhm_mz_avg);
+        }
+        if (mono_trace.getCentroidIM() > 0)
+        {
+          fcons.setMetaValue(Constants::UserParam::ION_MOBILITY_CENTROID, mono_trace.getCentroidIM());
+        }
+        if (mono_trace.fwhm_im_avg > 0)
+        {
+          fcons.setMetaValue(Constants::UserParam::FWHM_IM_AVG, mono_trace.fwhm_im_avg);
+        }
+
+        consensus_map.push_back(fcons);
+      }
+
+      // Finalize and save ConsensusXML
+      consensus_map.applyMemberFunction(&UniqueIdInterface::setUniqueId);
+      addDataProcessing_(consensus_map, getProcessingInfo_(DataProcessing::QUANTITATION));
+      consensus_map.setUniqueId();
+
+      FileHandler().storeConsensusFeatures(out, consensus_map, {FileTypes::CONSENSUSXML});
+    }
+    else
+    {
+      OPENMS_LOG_ERROR << "Output format not recognized. Please specify either .featureXML or .consensusXML for -out." << std::endl;
+      return ILLEGAL_PARAMETERS;
+    }
+    return EXECUTION_OK;
+  }
+
+};
+
+
+int main(int argc, const char** argv)
+{
+  TOPPFeatureFinderPeptide tool;
+  return tool.main(argc, argv);
+}
+
+/// @endcond

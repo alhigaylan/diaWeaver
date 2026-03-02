@@ -30,6 +30,7 @@ FeatureFinderCentroided
 FeatureFinderIdentification
 FeatureFinderMetabo
 FeatureFinderMetaboIdent
+FeatureFinderPeptide
 FeatureFinderMultiplex
 FeatureLinkerLabeled
 FeatureLinkerUnlabeled
