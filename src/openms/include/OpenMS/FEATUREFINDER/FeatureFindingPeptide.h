@@ -219,6 +219,9 @@ private:
     bool remove_single_traces_;
     bool overlapping_features_;
     std::vector<const Element*> elements_;
+
+    double rt_min_pearson_correlation_;
+    int rt_max_lag_;
   };
 
 }

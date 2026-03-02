@@ -13,6 +13,8 @@
 #include <OpenMS/CONCEPT/Constants.h>
 #include <OpenMS/CONCEPT/LogStream.h>
 #include <OpenMS/CONCEPT/UniqueIdGenerator.h>
+#include <OpenMS/MATH/StatisticFunctions.h>
+#include <OpenMS/OPENSWATHALGO/ALGO/Scoring.h>
 #include <OpenMS/SYSTEM/File.h>
 
 #include <fstream>
@@ -28,12 +30,12 @@ namespace OpenMS
   FeatureFindingPeptide::FeatureFindingPeptide() :
     DefaultParamHandler("FeatureFindingPeptide"), ProgressLogger()
   {
-    defaults_.setValue("local_rt_range", 10.0, "RT range where to look for coeluting mass traces", {"advanced"}); // 5.0
+    defaults_.setValue("local_rt_range", 5.0, "RT range where to look for coeluting mass traces", {"advanced"});
     defaults_.setValue("local_im_range", 0.02, "IM range where to look for coeluting mass traces", {"advanced"});
-    defaults_.setValue("local_mz_range", 6.5, "MZ range where to look for isotopic mass traces", {"advanced"}); // 6.5
-    defaults_.setValue("charge_lower_bound", 1, "Lowest charge state to consider"); // 1
-    defaults_.setValue("charge_upper_bound", 3, "Highest charge state to consider"); // 3
-    defaults_.setValue("chrom_fwhm", 5.0, "Expected chromatographic peak width (in seconds)."); // 5.0
+    defaults_.setValue("local_mz_range", 3.0, "MZ range where to look for isotopic mass traces", {"advanced"});
+    defaults_.setValue("charge_lower_bound", 1, "Lowest charge state to consider");
+    defaults_.setValue("charge_upper_bound", 4, "Highest charge state to consider");
+    defaults_.setValue("chrom_fwhm", 5.0, "Expected chromatographic peak width (in seconds).");
     defaults_.setValue("report_summed_ints", "false", "Set to true for a feature intensity summed up over all traces rather than using monoisotopic trace intensity alone.", {"advanced"});
     defaults_.setValidStrings("report_summed_ints", {"false","true"});
     defaults_.setValue("enable_RT_filtering", "true", "Require sufficient overlap in RT while assembling mass traces. Disable for direct injection data..");
@@ -66,6 +68,13 @@ namespace OpenMS
 
     defaults_.setValue("overlapping_features", "false", "Allow mass traces to be reused to explain lower scoring features. Recommended for peptides.");
     defaults_.setValidStrings("overlapping_features", {"false","true"});
+
+    defaults_.setValue("rt_min_pearson_correlation", 0.7, "Minimum Pearson correlation required between two mass trace elution profiles before cross-correlation is computed. Pairs below this threshold are rejected without the more expensive XCorr calculation.");
+    defaults_.setMinFloat("rt_min_pearson_correlation", 0.0);
+    defaults_.setMaxFloat("rt_min_pearson_correlation", 1.0);
+
+    defaults_.setValue("rt_max_lag", 5, "Maximum lag (in number of scans) allowed when computing the normalized cross-correlation between two isotopic elution profiles. A value of 5 permits isotope traces shifted by up to 5 scans relative to the monoisotopic trace. Usually should match local_rt_range");
+    defaults_.setMinInt("rt_max_lag", 0);
 
     defaultsToParam_();
 
@@ -113,6 +122,10 @@ namespace OpenMS
     use_mz_scoring_by_element_range_ = param_.getValue("mz_scoring_by_elements").toBool();
     std::string elements_list_ = param_.getValue("elements");
     elements_ = elementsFromString_(elements_list_);
+
+    rt_min_pearson_correlation_ = (double)param_.getValue("rt_min_pearson_correlation");
+    rt_max_lag_ = (int)param_.getValue("rt_max_lag");
+    rt_max_lag_ = (int)param_.getValue("rt_max_lag");
     overlapping_features_ = param_.getValue("overlapping_features").toBool();
   }
 
@@ -394,74 +407,61 @@ namespace OpenMS
     // return success if this filter is disabled
     if (!enable_RT_filtering_) return 1.0;
 
-    // continue to check overlap and cosine similarity
-    // ...
-    std::map<double, std::vector<double> > coinciding_rts;
+    // Build RT-aligned intensity vectors using a tolerance-based merge
+    // (handles missing data points by filling in with zeros).
+    // Non-overlapping ends are zero-padded
+    // mindiff is hard-coded as 0.1 RT. in FFMetabo, we used to search for
+    // exact double equality. This is more robust. It may also be overkill
+    // since we are working on the same map (MS1 level)
+    const double mindiff = 0.1;
+    std::vector<double> vec1, vec2;
 
-    std::pair<Size, Size> tr1_fwhm_idx(tr1.getFWHMborders());
-    std::pair<Size, Size> tr2_fwhm_idx(tr2.getFWHMborders());
-
-    //    std::cout << tr1_fwhm_idx.first << " " << tr1_fwhm_idx.second << '\n';
-    //    std::cout << tr2_fwhm_idx.first << " " << tr2_fwhm_idx.second << '\n';
-
-    //    Size tr1_fwhm_size(tr1_fwhm_idx.second - tr1_fwhm_idx.first);
-    //    Size tr2_fwhm_size(tr2_fwhm_idx.second - tr2_fwhm_idx.first);
-
-    //    double max_length = (tr1_fwhm_size > tr2_fwhm_size) ? tr1_fwhm_size : tr2_fwhm_size;
-
-    double tr1_length(tr1.getFWHM());
-    double tr2_length(tr2.getFWHM());
-    double max_length = (tr1_length > tr2_length) ? tr1_length : tr2_length;
-
-    // std::cout << "tr1 " << tr1_length << " tr2 " << tr2_length << '\n';
-
-    // Extract peak shape between FWHM borders for both peaks
-    for (Size i = tr1_fwhm_idx.first; i <= tr1_fwhm_idx.second; ++i)
+    Size i = 0, j = 0;
+    const Size n1 = tr1.getSize(), n2 = tr2.getSize();
+    while (i < n1 && j < n2)
     {
-      coinciding_rts[tr1[i].getRT()].push_back(tr1[i].getIntensity());
-    }
-    for (Size i = tr2_fwhm_idx.first; i <= tr2_fwhm_idx.second; ++i)
-    {
-      coinciding_rts[tr2[i].getRT()].push_back(tr2[i].getIntensity());
-    }
-
-    // Look at peaks at the same RT
-    // TODO: this only works if both traces are sampled with equal rate at the same RT
-    std::vector<double> x, y, overlap_rts;
-    for (std::map<double, std::vector<double> >::const_iterator m_it = coinciding_rts.begin(); m_it != coinciding_rts.end(); ++m_it)
-    {
-      if (m_it->second.size() == 2)
+      const double rt1 = tr1[i].getRT();
+      const double rt2 = tr2[j].getRT();
+      if (std::fabs(rt1 - rt2) < mindiff)
       {
-        x.push_back(m_it->second[0]);
-        y.push_back(m_it->second[1]);
-        overlap_rts.push_back(m_it->first);
+        vec1.push_back(tr1[i].getIntensity());
+        vec2.push_back(tr2[j].getIntensity());
+        ++i; ++j;
+      }
+      else if (rt1 < rt2)
+      {
+        vec1.push_back(tr1[i].getIntensity());
+        vec2.push_back(0.0);
+        ++i;
+      }
+      else
+      {
+        vec1.push_back(0.0);
+        vec2.push_back(tr2[j].getIntensity());
+        ++j;
       }
     }
+    while (i < n1) { vec1.push_back(tr1[i].getIntensity()); vec2.push_back(0.0); ++i; }
+    while (j < n2) { vec1.push_back(0.0); vec2.push_back(tr2[j].getIntensity()); ++j; }
 
-    //    if (x.size() < std::floor(0.8*max_length))
-    //        {
-    //            return 0.0;
-    //        }
-    // double rt_range(0.0)
-    // if (coinciding_rts.size() > 0)
-    // {
-    //     rt_range = std::fabs(coinciding_rts.rbegin()->first - coinciding_rts.begin()->first);
-    // }
+    // compute pearson correlation. If a correlation is below a cutoff,
+    // quit calculation and filter this pair as unlikely.
+    const double pearson = Math::pearsonCorrelationCoefficient(
+        vec1.begin(), vec1.end(), vec2.begin(), vec2.end());
+    if (pearson < rt_min_pearson_correlation_) return 0.0;
 
+    // normalized cross correlation to identify traces that are slightly shifted due to noise
+    // maxdelay --> how many offsets (in units of scans) to consider. Usually, this should match local_rt_range
+    // lag --> I believe this is the step size when considering max lag. Hard-coding this as 1 means it will
+    // evaluate every possible scan offset within +/- maxdelay.
+    // Since this function is borrowed from OpenSWATH, lag parameter may be helpful in XIC with 100s of data points.
+    // but here, mass traces are roughly around 15 ~ 30 points.
+    OpenSwath::Scoring::XCorrArrayType xcorr =
+        OpenSwath::Scoring::normalizedCrossCorrelation(vec1, vec2, rt_max_lag_, 1);
+    OpenSwath::Scoring::XCorrArrayType::const_iterator best =
+        OpenSwath::Scoring::xcorrArrayGetMaxPeak(xcorr);
 
-    double overlap(0.0);
-    if (!overlap_rts.empty())
-    {
-      double start_rt(*(overlap_rts.begin())), end_rt(*(overlap_rts.rbegin()));
-      overlap = std::fabs(end_rt - start_rt);
-    }
-
-    double proportion(overlap / max_length);
-    if (proportion < 0.7)
-    {
-      return 0.0;
-    }
-    return computeCosineSim_(x, y);
+    return best->second;
   }
 
   Range FeatureFindingPeptide::getTheoreticIsotopicMassWindow_(const std::vector<Element const *>& alphabet, int peakOffset) const
