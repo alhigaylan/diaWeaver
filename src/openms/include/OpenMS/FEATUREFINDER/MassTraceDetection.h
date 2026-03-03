@@ -198,6 +198,7 @@ namespace OpenMS
         double max_trace_length_;
 
         bool reestimate_mt_sd_;
+        bool impute_zeros_missing_scans_;
 
         // Metadata array indices - set during run_()
         mutable int fwhm_meta_idx_ = -1;

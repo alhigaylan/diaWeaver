@@ -30,6 +30,9 @@ namespace OpenMS
       defaults_.setValue("reestimate_mt_sd", "true", "Enables dynamic re-estimation of m/z variance during mass trace collection stage.");
       defaults_.setValidStrings("reestimate_mt_sd", {"true","false"});
 
+      defaults_.setValue("impute_zeros_missing_scans", "false", "Insert a zero-intensity data point at every scan position where no acceptable peak was found during trace extension, instead of silently skipping it. This preserves the full RT grid of each trace.", {"advanced"});
+      defaults_.setValidStrings("impute_zeros_missing_scans", {"true","false"});
+
       defaults_.setValue("quant_method", String(MassTrace::names_of_quantmethod[0]), "Method of quantification for mass traces. For LC data 'area' is recommended, 'median' for direct injection data. 'max_height' simply uses the most intense peak in the trace.");
       defaults_.setValidStrings("quant_method", std::vector<std::string>(MassTrace::names_of_quantmethod, MassTrace::names_of_quantmethod +(int)MassTrace::SIZE_OF_MT_QUANTMETHOD));
 
@@ -541,6 +544,14 @@ namespace OpenMS
               else
               {
                 ++down_state.consecutive_missed;
+                if (impute_zeros_missing_scans_)
+                {
+                  Peak2D zero_peak;
+                  zero_peak.setRT(spec_trace_down.getRT());
+                  zero_peak.setMZ(centroid_mz);
+                  zero_peak.setIntensity(0.0);
+                  current_trace.push_front(zero_peak);
+                }
               }
             }
             // Empty spectra don't affect termination counters
@@ -594,6 +605,14 @@ namespace OpenMS
               else
               {
                 ++up_state.consecutive_missed;
+                if (impute_zeros_missing_scans_)
+                {
+                  Peak2D zero_peak;
+                  zero_peak.setRT(spec_trace_up.getRT());
+                  zero_peak.setMZ(centroid_mz);
+                  zero_peak.setIntensity(0.0);
+                  current_trace.push_back(zero_peak);
+                }
               }
             }
             // Empty spectra don't affect termination counters
@@ -690,6 +709,7 @@ namespace OpenMS
       min_trace_length_ = (double)param_.getValue("min_trace_length");
       max_trace_length_ = (double)param_.getValue("max_trace_length");
       reestimate_mt_sd_ = param_.getValue("reestimate_mt_sd").toBool();
+      impute_zeros_missing_scans_ = param_.getValue("impute_zeros_missing_scans").toBool();
     }
 
 }

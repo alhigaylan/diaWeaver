@@ -407,12 +407,20 @@ namespace OpenMS
     // return success if this filter is disabled
     if (!enable_RT_filtering_) return 1.0;
 
+    // Use Savitzky-Golay smoothed intensities from ElutionPeakDetection if
+    // available; fall back to raw intensities if smoothing was not run
+    // (e.g. when EPD is disabled).
+    const std::vector<double>& sm1 = tr1.getSmoothedIntensities();
+    const std::vector<double>& sm2 = tr2.getSmoothedIntensities();
+    const bool use_sm1 = !sm1.empty();
+    const bool use_sm2 = !sm2.empty();
+
     // Build RT-aligned intensity vectors using a tolerance-based merge
     // (handles missing data points by filling in with zeros).
-    // Non-overlapping ends are zero-padded
-    // mindiff is hard-coded as 0.1 RT. in FFMetabo, we used to search for
-    // exact double equality. This is more robust. It may also be overkill
-    // since we are working on the same map (MS1 level)
+    // Non-overlapping ends are zero-padded.
+    // mindiff is hard-coded as 0.1 s. In FFMetabo, exact double equality
+    // was used since we work on the same map.
+    // But this is more robust for same-map traces and matches OpenSWATH/diaWeaver behavior.
     const double mindiff = 0.1;
     std::vector<double> vec1, vec2;
 
@@ -424,25 +432,25 @@ namespace OpenMS
       const double rt2 = tr2[j].getRT();
       if (std::fabs(rt1 - rt2) < mindiff)
       {
-        vec1.push_back(tr1[i].getIntensity());
-        vec2.push_back(tr2[j].getIntensity());
+        vec1.push_back(use_sm1 ? sm1[i] : tr1[i].getIntensity());
+        vec2.push_back(use_sm2 ? sm2[j] : tr2[j].getIntensity());
         ++i; ++j;
       }
       else if (rt1 < rt2)
       {
-        vec1.push_back(tr1[i].getIntensity());
+        vec1.push_back(use_sm1 ? sm1[i] : tr1[i].getIntensity());
         vec2.push_back(0.0);
         ++i;
       }
       else
       {
         vec1.push_back(0.0);
-        vec2.push_back(tr2[j].getIntensity());
+        vec2.push_back(use_sm2 ? sm2[j] : tr2[j].getIntensity());
         ++j;
       }
     }
-    while (i < n1) { vec1.push_back(tr1[i].getIntensity()); vec2.push_back(0.0); ++i; }
-    while (j < n2) { vec1.push_back(0.0); vec2.push_back(tr2[j].getIntensity()); ++j; }
+    while (i < n1) { vec1.push_back(use_sm1 ? sm1[i] : tr1[i].getIntensity()); vec2.push_back(0.0); ++i; }
+    while (j < n2) { vec1.push_back(0.0); vec2.push_back(use_sm2 ? sm2[j] : tr2[j].getIntensity()); ++j; }
 
     // compute pearson correlation. If a correlation is below a cutoff,
     // quit calculation and filter this pair as unlikely.
