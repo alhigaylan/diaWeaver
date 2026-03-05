@@ -671,7 +671,7 @@ namespace OpenMS
 
           found_masstraces.push_back(new_trace);
 
-          peaks_detected += new_trace.getSize();
+          peaks_detected += gathered_idx.size();
           this->setProgress(peaks_detected);
 
           // check if we already reached the (optional) maximum number of traces
