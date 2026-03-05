@@ -211,6 +211,7 @@ protected:
       p_mtd.setValue("reestimate_mt_sd", "false", "Enables dynamic re-estimation of m/z variance during mass trace collection stage.");
       p_mtd.setValue("quant_method", "max_height", "Method of quantification for mass traces. For LC data 'area' is recommended, 'median' for direct injection data. 'max_height' simply uses the most intense peak in the trace.");
       p_mtd.setValue("trace_termination_outliers", 2, "Mass trace extension in one direction cancels if this number of consecutive spectra with no detectable peaks is reached.");
+      p_mtd.setValue("impute_zeros_missing_scans", "true", "Insert a zero-intensity data point at every scan position where no acceptable peak was found during trace extension, instead of silently skipping it. This preserves the full RT grid of each trace.");
 
       p_mtd.remove("noise_threshold_int");
       p_mtd.remove("chrom_peak_snr");
@@ -269,6 +270,7 @@ protected:
       p_mtd.setValue("reestimate_mt_sd", "false", "Enables dynamic re-estimation of m/z variance during mass trace collection stage.");
       p_mtd.setValue("quant_method", "max_height", "Method of quantification for mass traces. For LC data 'area' is recommended, 'median' for direct injection data. 'max_height' simply uses the most intense peak in the trace.");
       p_mtd.setValue("trace_termination_outliers", 2, "Mass trace extension in one direction cancels if this number of consecutive spectra with no detectable peaks is reached.");
+      p_mtd.setValue("impute_zeros_missing_scans", "true", "Insert a zero-intensity data point at every scan position where no acceptable peak was found during trace extension, instead of silently skipping it. This preserves the full RT grid of each trace.");
 
       p_mtd.remove("noise_threshold_int");
       p_mtd.remove("chrom_peak_snr");
