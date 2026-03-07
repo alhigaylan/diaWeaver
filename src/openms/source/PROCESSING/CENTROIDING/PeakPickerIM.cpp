@@ -19,6 +19,7 @@
 #include <OpenMS/MATH/MISC/CubicSpline2d.h>
 #include <OpenMS/MATH/MISC/SplineBisection.h>
 #include <OpenMS/IONMOBILITY/IMDataConverter.h>
+#include <OpenMS/KERNEL/SpectrumHelper.h>
 #include <OpenMS/CONCEPT/LogStream.h>
 #include <OpenMS/FEATUREFINDER/MassTraceDetection.h>
 #include <OpenMS/FEATUREFINDER/ElutionPeakDetection.h>
@@ -932,7 +933,15 @@ namespace OpenMS
         if (!include_unclaimed_)
         {
           OPENMS_LOG_WARN << "No m/z peaks picked. Returning empty spectrum.\n";
-          spectrum.clear(true);
+          // Preserve metadata (RT, MS level, precursor info) but clear peak data.
+          // Mirrors the successful picking path (lines below spectrum = centroided_frame)
+          // and PeakPickerHiRes::pick(), both of which retain spectrum metadata even
+          // when no peaks are found.
+          MSSpectrum empty_frame;
+          copySpectrumMeta(spectrum, empty_frame);
+          empty_frame.setType(SpectrumSettings::SpectrumType::CENTROID);
+          empty_frame.setIMFormat(IMFormat::CENTROIDED);
+          spectrum = std::move(empty_frame);
           return;
         }
 
@@ -951,10 +960,8 @@ namespace OpenMS
         Add_unclaimedPeaks(centroided_frame, spectrum, claimed);
 
         // Copy spectrum settings to output
-        static_cast<SpectrumSettings&>(centroided_frame) = static_cast<const SpectrumSettings&>(spectrum);
-        centroided_frame.setMSLevel(spectrum.getMSLevel());
-        centroided_frame.setName(spectrum.getName());
-        centroided_frame.setRT(spectrum.getRT());
+        copySpectrumMeta(spectrum, centroided_frame, false);
+        centroided_frame.setType(SpectrumSettings::SpectrumType::CENTROID);
         centroided_frame.setIMFormat(IMFormat::CENTROIDED);
         spectrum = std::move(centroided_frame);
         return;
@@ -1111,14 +1118,12 @@ namespace OpenMS
 #ifdef DEBUG_PICKER
       OPENMS_LOG_DEBUG << "--- Centroided frame has  " << centroided_frame.size() << " --- peaks.\n";
 #endif
-      // Copy only SpectrumSettings from the input into the centroided result
-      static_cast<SpectrumSettings&>(centroided_frame) = static_cast<const SpectrumSettings&>(spectrum);
-      centroided_frame.setMSLevel(spectrum.getMSLevel());
-      centroided_frame.setName(spectrum.getName());
-      centroided_frame.setRT(spectrum.getRT());
+      // Copy spectrum metadata from input into the centroided result
+      copySpectrumMeta(spectrum, centroided_frame, false);
+      centroided_frame.setType(SpectrumSettings::SpectrumType::CENTROID);
       centroided_frame.setIMFormat(IMFormat::CENTROIDED);
       spectrum = std::move(centroided_frame);
-      
+
 #ifdef DEBUG_PICKER
       // Print peaks for debugging
       OPENMS_LOG_DEBUG << "--- Spectrum final output object has ..  " << spectrum.size() << " --- peaks.\n";
@@ -1361,6 +1366,7 @@ namespace OpenMS
       spectrum.updateRanges();
       // ensure the output IM array is updated
       spectrum.getFloatDataArrays()[im_data_index].setName(Constants::UserParam::ION_MOBILITY_CENTROID);
+      spectrum.setType(SpectrumSettings::SpectrumType::CENTROID);
       spectrum.setIMFormat(IMFormat::CENTROIDED);
       removeAllFloatDataArraysExcept(spectrum, Constants::UserParam::ION_MOBILITY_CENTROID);
     } // End of pickIMCluster function
@@ -1456,6 +1462,7 @@ namespace OpenMS
       input.updateRanges();
       // ensure the output im name is updated
       input.getFloatDataArrays()[im_data_index].setName(Constants::UserParam::ION_MOBILITY_CENTROID);
+      input.setType(SpectrumSettings::SpectrumType::CENTROID);
       input.setIMFormat(IMFormat::CENTROIDED);
       removeAllFloatDataArraysExcept(input, Constants::UserParam::ION_MOBILITY_CENTROID);
     }
