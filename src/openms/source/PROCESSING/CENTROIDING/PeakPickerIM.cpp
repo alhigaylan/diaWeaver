@@ -939,6 +939,13 @@ namespace OpenMS
           // when no peaks are found.
           MSSpectrum empty_frame;
           copySpectrumMeta(spectrum, empty_frame);
+          // Add an empty IM centroid array so that this spectrum is consistent
+          // with successfully picked spectra, which always carry ION_MOBILITY_CENTROID.
+          // MassTraceDetection requires this array to be uniformly present or absent
+          // across all spectra in the experiment.
+          MSSpectrum::FloatDataArray empty_im_array;
+          empty_im_array.setName(Constants::UserParam::ION_MOBILITY_CENTROID);
+          empty_frame.getFloatDataArrays().push_back(std::move(empty_im_array));
           empty_frame.setType(SpectrumSettings::SpectrumType::CENTROID);
           empty_frame.setIMFormat(IMFormat::CENTROIDED);
           spectrum = std::move(empty_frame);
