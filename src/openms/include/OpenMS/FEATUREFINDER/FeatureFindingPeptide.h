@@ -124,9 +124,8 @@ private:
      * @param[in] mt2 Second mass trace
      * @param[in] isotopic_position Isotopic position
      * @param[in] charge Charge
-     * @param[in] isotope_window Isotope window
     */
-    double scoreMZ_(const MassTrace& mt1, const MassTrace& mt2, Size isotopic_position, Size charge, Range isotope_window) const;
+    double scoreMZ_(const MassTrace& mt1, const MassTrace& mt2, Size isotopic_position, Size charge) const;
 
     /**
      * @brief score isotope m/z distance based on the expected m/z distances using C13-C12 or Kenar method
@@ -211,14 +210,11 @@ private:
     bool use_smoothed_intensities_;
     bool report_smoothed_intensities_;
 
-    bool use_mz_scoring_C13_;
-    bool use_mz_scoring_by_element_range_;
     bool report_convex_hulls_;
     bool report_chromatograms_;
 
     bool remove_single_traces_;
     bool overlapping_features_;
-    std::vector<const Element*> elements_;
 
     double rt_min_pearson_correlation_;
     int rt_max_lag_;

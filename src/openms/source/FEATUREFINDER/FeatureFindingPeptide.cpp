@@ -44,9 +44,6 @@ namespace OpenMS
     defaults_.setValue("isotope_filtering_model", "metabolites (5% RMS)", "Remove/score candidate assemblies based on isotope intensities. SVM isotope models for metabolites were trained with either 2% or 5% RMS error. For peptides, an averagine cosine scoring is used. Select the appropriate noise model according to the quality of measurement or MS device.");
     defaults_.setValidStrings("isotope_filtering_model", {"metabolites (2% RMS)","metabolites (5% RMS)","peptides","none"});
 
-    defaults_.setValue("mz_scoring_13C", "false", "Use the 13C isotope peak position (~1.003355 Da) as the expected shift in m/z for isotope mass traces (highly recommended for lipidomics!). Disable for general metabolites (as described in Kenar et al. 2014, MCP.).");
-    defaults_.setValidStrings("mz_scoring_13C", {"false","true"});
-
     defaults_.setValue("use_smoothed_intensities", "true", "Use LOWESS intensities instead of raw intensities.", {"advanced"});
     defaults_.setValidStrings("use_smoothed_intensities", {"false","true"});
     defaults_.setValue("report_smoothed_intensities", "true", "Report smoothed intensities (only if use_smoothed_intensities is true).", {"advanced"});
@@ -60,11 +57,6 @@ namespace OpenMS
 
     defaults_.setValue("remove_single_traces", "false", "Remove unassembled traces (single traces).");
     defaults_.setValidStrings("remove_single_traces", {"false","true"});
-
-    defaults_.setValue("mz_scoring_by_elements", "false", "Use the m/z range of the assumed elements to detect isotope peaks. A expected m/z range is computed from the isotopes of the assumed elements. If enabled, this ignores 'mz_scoring_13C'");
-    defaults_.setValidStrings("mz_scoring_by_elements", {"false","true"});
-
-    defaults_.setValue("elements", "CHNOPS", "Elements assumes to be present in the sample (this influences isotope detection).");
 
     defaults_.setValue("overlapping_features", "false", "Allow mass traces to be reused to explain lower scoring features. Recommended for peptides.");
     defaults_.setValidStrings("overlapping_features", {"false","true"});
@@ -113,15 +105,10 @@ namespace OpenMS
     use_smoothed_intensities_ = use_smoothed;
     report_smoothed_intensities_ = report_smoothed;
 
-    use_mz_scoring_C13_ = param_.getValue("mz_scoring_13C").toBool();
     report_convex_hulls_ = param_.getValue("report_convex_hulls").toBool();
     report_chromatograms_ = param_.getValue("report_chromatograms").toBool();
 
     remove_single_traces_ = param_.getValue("remove_single_traces").toBool();
-
-    use_mz_scoring_by_element_range_ = param_.getValue("mz_scoring_by_elements").toBool();
-    std::string elements_list_ = param_.getValue("elements");
-    elements_ = elementsFromString_(elements_list_);
 
     rt_min_pearson_correlation_ = (double)param_.getValue("rt_min_pearson_correlation");
     rt_max_lag_ = (int)param_.getValue("rt_max_lag");
@@ -301,52 +288,22 @@ namespace OpenMS
     }
   }
 
-  double FeatureFindingPeptide::scoreMZ_(const MassTrace& tr1, const MassTrace& tr2, Size iso_pos, Size charge, Range isotope_window) const
+  double FeatureFindingPeptide::scoreMZ_(const MassTrace& tr1, const MassTrace& tr2, Size iso_pos, Size charge) const
   {
-
-    double mz1(tr1.getCentroidMZ());
-    double mz2(tr2.getCentroidMZ());
-
-    // double centered_mz(std::fabs(mz2 - mz1) - mu);
-    double diff_mz(std::fabs(mz2 - mz1));
+    double diff_mz(std::fabs(tr2.getCentroidMZ() - tr1.getCentroidMZ()));
 
     double mt_sigma1(tr1.getCentroidSD());
     double mt_sigma2(tr2.getCentroidSD());
-    // double mt_variances1(mt_sigma1*mt_sigma1 + mt_sigma2*mt_sigma2);
     double mt_variances(std::exp(2 * std::log(mt_sigma1)) + std::exp(2 * std::log(mt_sigma2)));
-    // std::cout << "mt1: " << mt_sigma1 << " mt2: " << mt_sigma2 << " mt_variances: " << mt_variances << " old " << mt_variances1 <<  std::endl;
 
-    // double score_sigma_old(std::sqrt(sd*sd + mt_variances));
-
-    double mz_score(0.0);
-
-    if (use_mz_scoring_by_element_range_)
-    {
-      mz_score = scoreMZByExpectedRange_(charge, diff_mz, mt_variances, isotope_window);
-    }
-    else
-    {
-      mz_score = scoreMZByExpectedMean_(iso_pos, charge, diff_mz, mt_variances);
-    }
-
-    // std::cout << tr1.getLabel() << "_" << tr2.getLabel() << " diffmz: " << diff_mz << " charge " << charge << " isopos: " << iso_pos << " score: " << mz_score << std::endl ;
-
-    return mz_score;
+    return scoreMZByExpectedMean_(iso_pos, charge, diff_mz, mt_variances);
   }
 
   double FeatureFindingPeptide::scoreMZByExpectedMean_(Size iso_pos, Size charge, const double diff_mz, double mt_variances) const
   {
-    double mu, sd;
-    if (use_mz_scoring_C13_)
-    { // this reflects some data better (at least all Orbitrap)
-      mu = (Constants::C13C12_MASSDIFF_U * iso_pos) / charge; // using '1.0033548378'
-      sd = (0.0016633 * iso_pos - 0.0004751) / charge;
-    }
-    else
-    { // original implementation from Kenar et al.;
-      mu = (1.000857 * iso_pos + 0.001091) / charge;
-      sd = (0.0016633 * iso_pos - 0.0004751) / charge;
-    }
+    // Use C13-C12 mass difference as expected isotope spacing for peptides
+    const double mu = (Constants::C13C12_MASSDIFF_U * iso_pos) / charge;
+    const double sd = (0.0016633 * iso_pos - 0.0004751) / charge;
 
     double sigma_mult(3.0);
     double mz_score(0.0);
@@ -563,8 +520,6 @@ namespace OpenMS
         //const double neutron_mass = 1.0033548378;  // Da
         //const double iso_ppm_tolerance = 20.0; // ppm tolerance
 
-        //estimate expected m/z window for iso_pos
-        Range isotope_window = getTheoreticIsotopicMassWindow_(elements_, iso_pos);
         // Find mass trace that best agrees with current hypothesis of charge
         // and isotopic position
         double best_so_far(0.0);
@@ -600,7 +555,7 @@ namespace OpenMS
           // currently, if pearson correlation score is below rt_min_pearson_correlation,
           // scoreRT_ will return 0.
           double rt_score(scoreRT_(*candidates[0], *candidates[mt_idx]));
-          double mz_score(scoreMZ_(*candidates[0], *candidates[mt_idx], iso_pos, charge, isotope_window));
+          double mz_score(scoreMZ_(*candidates[0], *candidates[mt_idx], iso_pos, charge));
 
           // disable intensity scoring for now...
           double int_score(1.0);
@@ -664,14 +619,6 @@ namespace OpenMS
 
   void FeatureFindingPeptide::run(std::vector<MassTrace>& input_mtraces, FeatureMap& output_featmap, std::vector<std::vector< OpenMS::MSChromatogram > >& output_chromatograms)
   {
-
-    if (use_mz_scoring_by_element_range_ && isotope_filtering_model_ != "none")
-    {
-      OPENMS_LOG_WARN << "Isotope filtering is not supported, when using the mz scoring by elements.\n"
-                      << "The parameter isotope_filtering_model will be set to 'none'."
-                      << '\n';
-      isotope_filtering_model_ = "none";
-    }
 
     output_featmap.clear();
     output_chromatograms.clear();
