@@ -182,7 +182,6 @@ private:
     bool report_chromatograms_;
 
     bool remove_single_traces_;
-    bool overlapping_features_;
 
     double rt_min_pearson_correlation_;
     int rt_max_lag_;
