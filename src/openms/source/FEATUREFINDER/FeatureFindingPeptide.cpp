@@ -58,6 +58,9 @@ namespace OpenMS
     defaults_.setValue("rt_max_lag", 5, "Maximum lag (in number of scans) allowed when computing the normalized cross-correlation between two isotopic elution profiles. A value of 5 permits isotope traces shifted by up to 5 scans relative to the monoisotopic trace. Usually should match local_rt_range");
     defaults_.setMinInt("rt_max_lag", 0);
 
+    defaults_.setValue("overlapping_features", "false", "Allow the bottom 25% scoring hypotheses to reuse mass traces already claimed by higher-scoring features, provided they propose a different charge state.");
+    defaults_.setValidStrings("overlapping_features", {"false","true"});
+
     defaultsToParam_();
 
     this->setLogType(CMD);
@@ -95,6 +98,7 @@ namespace OpenMS
 
     rt_min_pearson_correlation_ = (double)param_.getValue("rt_min_pearson_correlation");
     rt_max_lag_ = (int)param_.getValue("rt_max_lag");
+    overlapping_features_ = param_.getValue("overlapping_features").toBool();
   }
 
 
@@ -531,9 +535,9 @@ namespace OpenMS
 
     // Compute the 25th percentile (Q1) of hypothesis scores.
     // Since the vector is sorted descending, Q1 sits at the 3/4 mark.
-    // Hypotheses below this threshold are considered low-confidence and are
-    // allowed to reuse traces from already-accepted features if they propose
-    // a different charge state for the same monoisotopic trace.
+    // Used only when overlapping_features_ is enabled: hypotheses below this
+    // threshold are allowed to reuse traces from already-accepted features if
+    // they propose a different charge state for the same monoisotopic trace.
     const double score_q1 = feat_hypos.empty() ? 0.0 : feat_hypos[feat_hypos.size() * 3 / 4].getScore();
 
 #ifdef FFM_DEBUG
@@ -560,18 +564,36 @@ namespace OpenMS
       const std::vector<String>& labels = feat_hypos[hypo_idx].getLabels();
       int current_charge = feat_hypos[hypo_idx].getCharge();
 
-      // Low-confidence hypotheses (below median score) are allowed to reuse
-      // traces from already-accepted features, but only if they propose a
-      // different charge state for the same monoisotopic trace.
-      const bool use_overlapping_features = feat_hypos[hypo_idx].getScore() < score_q1;
-
+      // Check all traces for collision (any trace already used at any charge)
       bool trace_coll = false;
-
-      if (use_overlapping_features)
+      for (Size lab_idx = 0; lab_idx < labels.size(); ++lab_idx)
       {
-        // Low-confidence: check all traces, but only collide if any is already
-        // claimed at the same charge. A different charge on the same traces is
-        // allowed (e.g. mt2 used at +2 does not block a +3 hypothesis).
+        auto range = trace_excl_map.equal_range(labels[lab_idx]);
+        if (range.first != range.second)
+        {
+          trace_coll = true;
+          break;
+        }
+      }
+
+      if (trace_coll)
+      {
+        if (!overlapping_features_)
+        {
+          // Strict mode: any collision → skip
+          continue;
+        }
+
+        // Overlapping mode: low-confidence hypotheses (bottom Q1) may reuse
+        // traces if they propose a different charge state.
+        const bool use_overlapping_features = feat_hypos[hypo_idx].getScore() < score_q1;
+        if (!use_overlapping_features)
+        {
+          continue; // high-confidence: still strict
+        }
+
+        // Low-confidence: only skip if any trace is already claimed at the same charge
+        bool same_charge_coll = false;
         for (Size lab_idx = 0; lab_idx < labels.size(); ++lab_idx)
         {
           auto range = trace_excl_map.equal_range(labels[lab_idx]);
@@ -579,31 +601,13 @@ namespace OpenMS
           {
             if (it->second == current_charge)
             {
-              trace_coll = true;
+              same_charge_coll = true;
               break;
             }
           }
-          if (trace_coll) break;
+          if (same_charge_coll) break;
         }
-      }
-      else
-      {
-        // High-confidence hypothesis: strict check — any trace already used at any charge is a collision
-        for (Size lab_idx = 0; lab_idx < labels.size(); ++lab_idx)
-        {
-          auto range = trace_excl_map.equal_range(labels[lab_idx]);
-          if (range.first != range.second)
-          {
-            trace_coll = true;
-            break;
-          }
-        }
-      }
-
-      // skip if collision
-      if (trace_coll)
-      {
-        continue;
+        if (same_charge_coll) continue;
       }
 
       // Accept hypothesis → mark all its traces at the current charge.
