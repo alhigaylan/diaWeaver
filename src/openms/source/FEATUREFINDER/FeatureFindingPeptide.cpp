@@ -117,16 +117,6 @@ namespace OpenMS
   }
 
 
-  std::vector<const Element*> FeatureFindingPeptide::elementsFromString_(const std::string& elements_string) const
-  {
-    std::vector<const Element*> elements;
-    for (const auto& element_with_amount : EmpiricalFormula(elements_string))
-    {
-      elements.push_back(element_with_amount.first);
-    }
-    return elements;
-  }
-
   double FeatureFindingPeptide::computeAveragineSimScore_(const std::vector<double>& hypo_ints, const double& mol_weight) const
   {
     CoarseIsotopePatternGenerator solver(hypo_ints.size());

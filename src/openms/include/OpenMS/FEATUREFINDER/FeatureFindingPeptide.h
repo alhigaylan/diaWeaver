@@ -55,13 +55,6 @@ protected:
 
 private:
     /**
-     * @brief parses a string of element symbols into a vector of Elements
-     * @param[in] elements_string string of element symbols without whitespaces or commas. e.g. CHNOPSCl
-     * @return vector of Elements
-     */
-    std::vector<const Element*> elementsFromString_(const std::string& elements_string) const;
-
-    /**
      * Calculate the maximal and minimal mass defects of isotopes for a given set of elements.
      *
      * @param[in] alphabet   chemical alphabet (elements which are expected to be present)
