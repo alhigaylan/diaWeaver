@@ -17,11 +17,7 @@
 #include <OpenMS/OPENSWATHALGO/ALGO/Scoring.h>
 #include <OpenMS/SYSTEM/File.h>
 
-#include <fstream>
-
 #include <boost/dynamic_bitset.hpp>
-
-#include "svm.h"
 
 // #define FFM_DEBUG
 
@@ -40,9 +36,6 @@ namespace OpenMS
     defaults_.setValidStrings("report_summed_ints", {"false","true"});
     defaults_.setValue("enable_RT_filtering", "true", "Require sufficient overlap in RT while assembling mass traces. Disable for direct injection data..");
     defaults_.setValidStrings("enable_RT_filtering", {"false","true"});
-
-    defaults_.setValue("isotope_filtering_model", "metabolites (5% RMS)", "Remove/score candidate assemblies based on isotope intensities. SVM isotope models for metabolites were trained with either 2% or 5% RMS error. For peptides, an averagine cosine scoring is used. Select the appropriate noise model according to the quality of measurement or MS device.");
-    defaults_.setValidStrings("isotope_filtering_model", {"metabolites (2% RMS)","metabolites (5% RMS)","peptides","none"});
 
     defaults_.setValue("use_smoothed_intensities", "true", "Use LOWESS intensities instead of raw intensities.", {"advanced"});
     defaults_.setValidStrings("use_smoothed_intensities", {"false","true"});
@@ -73,13 +66,7 @@ namespace OpenMS
     this->setLogType(CMD);
   }
 
-  FeatureFindingPeptide::~FeatureFindingPeptide()
-  {
-    if (isotope_filt_svm_ != nullptr)
-    {
-      svm_free_and_destroy_model(&isotope_filt_svm_);
-    }
-  }
+  FeatureFindingPeptide::~FeatureFindingPeptide() = default;
 
   void FeatureFindingPeptide::updateMembers_()
   {
@@ -94,7 +81,6 @@ namespace OpenMS
     report_summed_ints_ = param_.getValue("report_summed_ints").toBool();
     enable_RT_filtering_ = param_.getValue("enable_RT_filtering").toBool();
 
-    isotope_filtering_model_ = param_.getValue("isotope_filtering_model").toString();
     use_smoothed_intensities_ = param_.getValue("use_smoothed_intensities").toBool();
     bool use_smoothed = param_.getValue("use_smoothed_intensities").toBool();
     bool report_smoothed = param_.getValue("report_smoothed_intensities").toBool();
@@ -148,134 +134,6 @@ namespace OpenMS
 
     double iso_score = computeCosineSim_(averagine_ratios, hypo_isos);
     return iso_score;
-  }
-
-  int FeatureFindingPeptide::isLegalIsotopePattern_(const FeatureHypothesis& feat_hypo) const
-  {
-    if (feat_hypo.getSize() == 1)
-    {
-      return -1;
-    }
-
-    if (svm_feat_centers_.empty() || svm_feat_scales_.empty())
-    {
-      throw Exception::Precondition(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "Isotope filtering invoked, but no model loaded. Internal error. Please report this!");
-    }
-
-    std::vector<double> all_ints = feat_hypo.getAllIntensities(use_smoothed_intensities_);
-
-    double mono_int(all_ints[0]); // monoisotopic intensity
-
-    const Size FEAT_NUM(4);
-    svm_node* nodes = new svm_node[FEAT_NUM + 1];
-
-    double act_mass(feat_hypo.getCentroidMZ() * feat_hypo.getCharge());
-
-    // isotope model currently restricted to formulas up to 1000 Da
-    if (act_mass > 1000.0)
-    {
-      act_mass = 1000.0;
-    }
-
-    nodes[0].index = 1;
-    nodes[0].value = (act_mass - svm_feat_centers_[0]) / svm_feat_scales_[0];
-
-    // Iterate, start with first isotopic trace (skip monoisotopic)
-    Size i = 2;
-
-    Size feat_size(feat_hypo.getSize());
-
-    if (feat_size > FEAT_NUM)
-    {
-      feat_size = FEAT_NUM;
-    }
-
-    for (; i - 1 < feat_size; ++i)
-    {
-      nodes[i - 1].index = static_cast<Int>(i);
-
-      // compute ratio of trace to monoisotopic intensity
-      double ratio((all_ints[i - 1] / mono_int));
-
-      double tmp_val((ratio - svm_feat_centers_[i - 1]) / svm_feat_scales_[i - 1]);
-      nodes[i - 1].value = tmp_val;
-    }
-
-    for (; i < FEAT_NUM + 1; ++i)
-    {
-      nodes[i - 1].index = static_cast<Int>(i);
-      nodes[i - 1].value = (-svm_feat_centers_[i - 1]) / svm_feat_scales_[i - 1];
-    }
-
-    nodes[FEAT_NUM].index = -1;
-    nodes[FEAT_NUM].value = 0;
-
-    // debug output
-    //    std::cout << "isocheck for " << feat_hypo.getLabel() << " " << feat_hypo.getSize() << '\n';
-    //    for (Size i = 0; i < FEAT_NUM + 1; ++i)
-    //    {
-    //        std::cout << "idx: " << nodes[i].index << " val: " << nodes[i].value << '\n';
-    //    }
-
-    // Use SVM model to predict the category in which the current trace group
-    // belongs ...
-    double predict = svm_predict(isotope_filt_svm_, nodes);
-
-    // std::cout << "predict: " << predict << '\n';
-    delete[] nodes;
-
-    return (predict == 2.0) ? 1 : 0;
-  }
-
-  void FeatureFindingPeptide::loadIsotopeModel_(const String& model_name)
-  {
-    String search_name("CHEMISTRY/" + model_name);
-
-    std::string model_filename = File::find(search_name + ".svm");
-    std::string scale_filename = File::find(search_name + ".scale");
-
-    if (isotope_filt_svm_ != nullptr)
-    {
-      svm_free_and_destroy_model(&isotope_filt_svm_);
-    }
-    isotope_filt_svm_ = svm_load_model(model_filename.c_str());
-    if (isotope_filt_svm_ == nullptr)
-    {
-      throw Exception::ParseError(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-          "Loading " + model_filename + " failed", model_filename);
-    }
-
-
-    std::ifstream ifs(scale_filename.c_str());
-
-    std::string line;
-    std::stringstream str_buf;
-    std::istream_iterator<double> eol;
-
-    svm_feat_centers_.clear();
-    svm_feat_scales_.clear();
-
-    while (getline(ifs, line))
-    {
-      str_buf.clear();
-      str_buf << line;
-      std::istream_iterator<double> istr_it(str_buf);
-
-      while (istr_it != eol)
-      {
-        svm_feat_centers_.push_back(*istr_it);
-        ++istr_it;
-        svm_feat_scales_.push_back(*istr_it);
-        ++istr_it;
-      }
-    }
-
-    if (svm_feat_centers_.size() != svm_feat_scales_.size())
-    {
-      throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-          "Numbers of centers and scales from file " + scale_filename + " are different!",
-          String(svm_feat_centers_.size()) + " and " + String(svm_feat_scales_.size()));
-    }
   }
 
   double FeatureFindingPeptide::scoreMZ_(const MassTrace& tr1, const MassTrace& tr2, Size iso_pos, Size charge) const
@@ -551,7 +409,6 @@ namespace OpenMS
           double int_score(1.0);
           // double int_score((candidates[0]->getIntensity(use_smoothed_intensities_))/total_weight + (candidates[mt_idx]->getIntensity(use_smoothed_intensities_))/total_weight);
 
-          if (isotope_filtering_model_ == "peptides")
           {
             std::vector<double> tmp_ints(fh_tmp.getAllIntensities());
             tmp_ints.push_back(candidates[mt_idx]->getIntensity(use_smoothed_intensities_));
@@ -623,20 +480,6 @@ namespace OpenMS
 
     this->startProgress(0, input_mtraces.size(), "assembling mass traces to features");
 
-    // *********************************************************** //
-    // Step 1 initialize SVM model for isotope ratio filtering
-    // *********************************************************** //
-    if (isotope_filtering_model_ == "metabolites (2% RMS)")
-    {
-      OPENMS_LOG_INFO << "Loading metabolite isotope model with 2% RMS error\n";
-      loadIsotopeModel_("MetaboliteIsoModelNoised2");
-    }
-    else if (isotope_filtering_model_ == "metabolites (5% RMS)")
-    {
-      OPENMS_LOG_INFO << "Loading metabolite isotope model with 5% RMS error\n";
-      loadIsotopeModel_("MetaboliteIsoModelNoised5");
-    }
-
     double total_intensity(0.0);
     for (Size i = 0; i < input_mtraces.size(); ++i)
     {
@@ -696,9 +539,8 @@ namespace OpenMS
     // output all hypotheses:
     for (Size hypo_idx = 0; hypo_idx < feat_hypos.size(); ++ hypo_idx)
     {
-      bool legal = isLegalIsotopePattern_(feat_hypos[hypo_idx]) > 0;
       std::cout << feat_hypos[hypo_idx].getLabel() << " ch: " << feat_hypos[hypo_idx].getCharge() <<
-        " score: " << feat_hypos[hypo_idx].getScore() << " legal: " << legal << '\n';
+        " score: " << feat_hypos[hypo_idx].getScore() << '\n';
     }
 #endif
 
@@ -769,22 +611,6 @@ namespace OpenMS
         }
       }
 
-      // Check whether the trace  passes the intensity filter (metabolites
-      // only). This is based on a pre-trained SVM model of isotopic
-      // intensities.
-      int pass_isotope_filter = -1; // -1 == 'did not test'; 0 = no pass; 1 = pass
-      if (isotope_filtering_model_ != "none" && isotope_filtering_model_ != "peptides")
-      {
-        pass_isotope_filter = isLegalIsotopePattern_(feat_hypos[hypo_idx]);
-      }
-
-      // std::cout << "\nlegal iso? " << feat_hypos[hypo_idx].getLabel() << " score: " << feat_hypos[hypo_idx].getScore() << " " << result << std::endl;
-
-      if (pass_isotope_filter == 0) // not passing filter
-      {
-        continue;
-      }
-
       // filter out single traces if option is set
       if (remove_single_traces_ && feat_hypos[hypo_idx].getCharge() == 0)
       {
@@ -827,7 +653,6 @@ namespace OpenMS
       f.setMetaValue("masstrace_centroid_mz", feat_hypos[hypo_idx].getAllCentroidMZ());
       f.setMetaValue("masstrace_centroid_im", feat_hypos[hypo_idx].getAllCentroidIM());
       f.setMetaValue("isotope_distances", feat_hypos[hypo_idx].getIsotopeDistances());
-      f.setMetaValue("legal_isotope_pattern", pass_isotope_filter);
       f.applyMemberFunction(&UniqueIdInterface::setUniqueId);
       output_featmap.push_back(f);
 

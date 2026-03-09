@@ -75,22 +75,6 @@ private:
     */
     double computeCosineSim_(const std::vector<double>& vec1, const std::vector<double>& vec2) const;
 
-    /** @brief Compare intensities of feature hypothesis with model
-     *
-     * Use a pre-trained SVM model to evaluate the intensity distribution of a
-     * given feature hypothesis. The model is trained on the monoisotopic and
-     * the first tree isotopic traces of each feature and uses the scaled
-     * ratios between the traces as input.
-     *
-     * Reference: Kenar et al., doi: 10.1074/mcp.M113.031278
-     *
-     * @param[in] feat_hypo A feature hypotheses containing mass traces
-     * @return 0 for 'no'; 1 for 'yes'; -1 if only a single mass trace exists
-    */
-    int isLegalIsotopePattern_(const FeatureHypothesis& feat_hypo) const;
-
-    void loadIsotopeModel_(const String&);
-
     /** @brief Perform mass to charge scoring of two multiple mass traces
      *
      * Scores two mass traces based on the m/z and the hypothesis that one
@@ -181,14 +165,6 @@ private:
     */
     void findLocalFeatures_(const std::vector<const MassTrace*>& candidates, double total_intensity, std::vector<FeatureHypothesis>& output_hypotheses) const;
 
-    /// SVM parameters
-    svm_model* isotope_filt_svm_ = nullptr;
-    std::vector<double> svm_feat_centers_;
-    std::vector<double> svm_feat_scales_;
-
-    //unused
-    //double total_intensity_;
-
     /// parameter stuff
     double local_rt_range_;
     double local_im_range_;
@@ -199,7 +175,6 @@ private:
 
     bool report_summed_ints_;
     bool enable_RT_filtering_;
-    String isotope_filtering_model_;
     bool use_smoothed_intensities_;
     bool report_smoothed_intensities_;
 
