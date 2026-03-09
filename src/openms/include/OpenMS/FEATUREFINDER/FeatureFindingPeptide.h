@@ -163,7 +163,7 @@ private:
      * @param[in] total_intensity Total intensity
      * @param[out] output_hypotheses Output feature hypotheses
     */
-    void findLocalFeatures_(const std::vector<const MassTrace*>& candidates, double total_intensity, std::vector<FeatureHypothesis>& output_hypotheses) const;
+    void findLocalFeatures_(const std::vector<const MassTrace*>& candidates, std::vector<FeatureHypothesis>& output_hypotheses) const;
 
     /// parameter stuff
     double local_rt_range_;

@@ -333,12 +333,12 @@ namespace OpenMS
   }
 
 
-  void FeatureFindingPeptide::findLocalFeatures_(const std::vector<const MassTrace*>& candidates, const double total_intensity, std::vector<FeatureHypothesis>& output_hypotheses) const
+  void FeatureFindingPeptide::findLocalFeatures_(const std::vector<const MassTrace*>& candidates, std::vector<FeatureHypothesis>& output_hypotheses) const
   {
-    // single Mass trace hypothesis
+    // single Mass trace hypothesis — no pair score available, quality is 0
     FeatureHypothesis tmp_hypo;
     tmp_hypo.addMassTrace(*candidates[0]);
-    tmp_hypo.setScore((candidates[0]->getIntensity(use_smoothed_intensities_)) / total_intensity);
+    tmp_hypo.setScore(0.0);
 
 #ifdef _OPENMP
 #pragma omp critical (OPENMS_FFMetabo_output_hypos)
@@ -352,13 +352,10 @@ namespace OpenMS
     {
       FeatureHypothesis fh_tmp;
       fh_tmp.addMassTrace(*candidates[0]);
-      fh_tmp.setScore((candidates[0]->getIntensity(use_smoothed_intensities_)) / total_intensity);
-
-      // double mono_iso_rt(candidates[0]->getCentroidRT());
-      // double mono_iso_mz(candidates[0]->getCentroidMZ());
-      // double mono_iso_int(candidates[0]->computePeakArea());
 
       Size last_iso_idx(0);
+      double score_sum(0.0);
+      Size num_pairs(0);
       Size iso_pos_max(static_cast<Size>(std::floor(charge * local_mz_range_)));
       for (Size iso_pos = 1; iso_pos <= iso_pos_max; ++iso_pos)
       {
@@ -437,9 +434,9 @@ namespace OpenMS
         if (best_so_far > 0.0)
         {
           fh_tmp.addMassTrace(*candidates[best_idx]);
-          double weighted_score(((candidates[best_idx]->getIntensity(use_smoothed_intensities_)) * best_so_far) / total_intensity);
-
-          fh_tmp.setScore(fh_tmp.getScore() + weighted_score);
+          score_sum += best_so_far;
+          ++num_pairs;
+          fh_tmp.setScore(score_sum / num_pairs);
           fh_tmp.setCharge(charge);
           last_iso_idx = best_idx;
 
@@ -478,12 +475,6 @@ namespace OpenMS
     std::sort(input_mtraces.begin(), input_mtraces.end(), CmpMassTraceByMZ());
 
     this->startProgress(0, input_mtraces.size(), "assembling mass traces to features");
-
-    double total_intensity(0.0);
-    for (Size i = 0; i < input_mtraces.size(); ++i)
-    {
-      total_intensity += input_mtraces[i].getIntensity(use_smoothed_intensities_);
-    }
 
     // *********************************************************** //
     // Step 2 Iterate through all mass traces to find likely matches
@@ -526,7 +517,7 @@ namespace OpenMS
           local_traces.push_back(&input_mtraces[ext_idx]);
         }
       }
-      findLocalFeatures_(local_traces, total_intensity, feat_hypos);
+      findLocalFeatures_(local_traces, feat_hypos);
     }
     this->endProgress();
 
