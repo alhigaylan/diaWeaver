@@ -359,52 +359,25 @@ namespace OpenMS
       Size iso_pos_max(static_cast<Size>(std::floor(charge * local_mz_range_)));
       for (Size iso_pos = 1; iso_pos <= iso_pos_max; ++iso_pos)
       {
-
-        // Constants
-        //const double neutron_mass = 1.0033548378;  // Da
-        //const double iso_ppm_tolerance = 20.0; // ppm tolerance
-
         // Find mass trace that best agrees with current hypothesis of charge
         // and isotopic position
         double best_so_far(0.0);
         Size best_idx(0);
         for (Size mt_idx = last_iso_idx + 1; mt_idx < candidates.size(); ++mt_idx)
         {
-
-          /*
-          // before computing any of the scores -- implement a strict mz pattern cutoff
-          double mono_mz = candidates[0]->getCentroidMZ();
-          double cand_mz = candidates[mt_idx]->getCentroidMZ();
-
-          // Compute expected theoretical m/z shift for this isotope position and charge
-          double expected_shift = (neutron_mass * iso_pos) / charge;
-
-          // Actual observed m/z shift
-          double observed_shift = std::fabs(cand_mz - mono_mz);
-          double ppm_error = std::fabs(observed_shift - expected_shift) / expected_shift * 1e6;
-          // skip loop if isotope position is outside of expected range
-          if (ppm_error > iso_ppm_tolerance) continue;
-           */
-
-          // double tmp_iso_rt(candidates[mt_idx]->getCentroidRT());
-          // double tmp_iso_mz(candidates[mt_idx]->getCentroidMZ());
-          // double tmp_iso_int(candidates[mt_idx]->computePeakArea());
-
 #ifdef FFM_DEBUG
           std::cout << "scoring " << candidates[0]->getLabel() << " " << candidates[0]->getCentroidMZ() <<
             " with " << candidates[mt_idx]->getLabel() << " " << candidates[mt_idx]->getCentroidMZ() << '\n';
 #endif
-
           // Score current mass trace candidates against hypothesis
           // currently, if pearson correlation score is below rt_min_pearson_correlation,
           // scoreRT_ will return 0.
           double rt_score(scoreRT_(*candidates[0], *candidates[mt_idx]));
           double mz_score(scoreMZ_(*candidates[0], *candidates[mt_idx], iso_pos, charge));
 
-          // disable intensity scoring for now...
-          double int_score(1.0);
+          // initialize int score
+          double int_score(0.0);
           // double int_score((candidates[0]->getIntensity(use_smoothed_intensities_))/total_weight + (candidates[mt_idx]->getIntensity(use_smoothed_intensities_))/total_weight);
-
           {
             std::vector<double> tmp_ints(fh_tmp.getAllIntensities());
             tmp_ints.push_back(candidates[mt_idx]->getIntensity(use_smoothed_intensities_));
@@ -413,7 +386,7 @@ namespace OpenMS
 
 #ifdef FFM_DEBUG
           std::cout << fh_tmp.getLabel() << "_" << candidates[mt_idx]->getLabel() <<
-            "\t" << "ch: " << charge << " isopos: " << iso_pos << " rt: " <<
+            "\t" << "ch: " << charge << " isotope: " << iso_pos << " rt: " <<
             rt_score << "mz: " << mz_score << "int: " << int_score << '\n';
 #endif
 
@@ -436,7 +409,9 @@ namespace OpenMS
           fh_tmp.addMassTrace(*candidates[best_idx]);
           score_sum += best_so_far;
           ++num_pairs;
-          fh_tmp.setScore(score_sum / num_pairs);
+          // iso_pos_max is the max isotopes for this charge; +1 accounts for the monoisotopic trace
+          const double trace_count_score = static_cast<double>(fh_tmp.getSize()) / (iso_pos_max + 1);
+          fh_tmp.setScore((score_sum / num_pairs) * trace_count_score);
           fh_tmp.setCharge(charge);
           last_iso_idx = best_idx;
 
