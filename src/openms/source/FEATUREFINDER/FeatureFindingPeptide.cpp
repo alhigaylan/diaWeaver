@@ -597,6 +597,8 @@ namespace OpenMS
 #endif
 
           // Score current mass trace candidates against hypothesis
+          // currently, if pearson correlation score is below rt_min_pearson_correlation,
+          // scoreRT_ will return 0.
           double rt_score(scoreRT_(*candidates[0], *candidates[mt_idx]));
           double mz_score(scoreMZ_(*candidates[0], *candidates[mt_idx], iso_pos, charge, isotope_window));
 
