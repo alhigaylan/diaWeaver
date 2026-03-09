@@ -354,8 +354,6 @@ namespace OpenMS
       fh_tmp.addMassTrace(*candidates[0]);
 
       Size last_iso_idx(0);
-      double score_sum(0.0);
-      Size num_pairs(0);
       Size iso_pos_max(static_cast<Size>(std::floor(charge * local_mz_range_)));
       for (Size iso_pos = 1; iso_pos <= iso_pos_max; ++iso_pos)
       {
@@ -407,11 +405,10 @@ namespace OpenMS
         if (best_so_far > 0.0)
         {
           fh_tmp.addMassTrace(*candidates[best_idx]);
-          score_sum += best_so_far;
-          ++num_pairs;
           // iso_pos_max is the max isotopes for this charge; +1 accounts for the monoisotopic trace
-          const double trace_count_score = static_cast<double>(fh_tmp.getSize()) / (iso_pos_max + 1);
-          fh_tmp.setScore((score_sum / num_pairs) * trace_count_score);
+          // heuristic: hypotheses with only 2 traces (mono + 1 isotope) get a trace count score of 0
+          const double trace_count_score = (fh_tmp.getSize() == 2) ? 0.0 : static_cast<double>(fh_tmp.getSize()) / (iso_pos_max + 1);
+          fh_tmp.setScore((best_so_far + trace_count_score) / 2.0);
           fh_tmp.setCharge(charge);
           last_iso_idx = best_idx;
 
