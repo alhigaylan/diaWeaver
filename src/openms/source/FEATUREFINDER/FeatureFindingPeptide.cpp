@@ -355,6 +355,11 @@ namespace OpenMS
 
       Size last_iso_idx(0);
       Size iso_pos_max(static_cast<Size>(std::floor(charge * local_mz_range_)));
+
+      // Accumulators for mean individual scores across all accepted iso_pos pairs.
+      double acc_rt(0.0), acc_mz(0.0), acc_int(0.0), acc_pair(0.0);
+      Size acc_count(0);
+
       for (Size iso_pos = 1; iso_pos <= iso_pos_max; ++iso_pos)
       {
         // Find mass trace that best agrees with current hypothesis of charge and isotopic position
@@ -413,11 +418,17 @@ namespace OpenMS
         // and isotopic position
         if (best_so_far > 0.0)
         {
+          ++acc_count;
+          acc_rt    += best_rt_score;
+          acc_mz    += best_mz_score;
+          acc_int   += best_int_score;
+          acc_pair  += best_so_far;
+
           fh_tmp.addMassTrace(*candidates[best_idx]);
-          fh_tmp.setScore(best_so_far);
-          fh_tmp.setScoreRT(best_rt_score);
-          fh_tmp.setScoreMZ(best_mz_score);
-          fh_tmp.setScoreInt(best_int_score);
+          fh_tmp.setScore(acc_pair / acc_count);
+          fh_tmp.setScoreRT(acc_rt / acc_count);
+          fh_tmp.setScoreMZ(acc_mz / acc_count);
+          fh_tmp.setScoreInt(acc_int / acc_count);
           fh_tmp.setScoreTraceCount(trace_count_score);
           fh_tmp.setCharge(charge);
           last_iso_idx = best_idx;
