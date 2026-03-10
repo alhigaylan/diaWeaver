@@ -402,7 +402,7 @@ namespace OpenMS
           double total_pair_score(0.0);
           if (rt_score > 0.0 && mz_score > 0.0 && int_score > 0.0)
           {
-            total_pair_score = (std::exp(std::log(rt_score) + log(mz_score) + log(int_score)) + trace_count_score) / 2.0;
+            total_pair_score = (rt_score + mz_score + int_score + trace_count_score) / 4.0;
           }
           if (total_pair_score > best_so_far)
           {
