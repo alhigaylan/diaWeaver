@@ -366,6 +366,7 @@ namespace OpenMS
 
         double best_so_far(0.0);
         Size best_idx(0);
+        double best_rt_score(0.0), best_mz_score(0.0), best_int_score(0.0);
         for (Size mt_idx = last_iso_idx + 1; mt_idx < candidates.size(); ++mt_idx)
         {
 #ifdef FFM_DEBUG
@@ -402,6 +403,9 @@ namespace OpenMS
           {
             best_so_far = total_pair_score;
             best_idx = mt_idx;
+            best_rt_score = rt_score;
+            best_mz_score = mz_score;
+            best_int_score = int_score;
           }
         } // end mt_idx
 
@@ -411,6 +415,10 @@ namespace OpenMS
         {
           fh_tmp.addMassTrace(*candidates[best_idx]);
           fh_tmp.setScore(best_so_far);
+          fh_tmp.setScoreRT(best_rt_score);
+          fh_tmp.setScoreMZ(best_mz_score);
+          fh_tmp.setScoreInt(best_int_score);
+          fh_tmp.setScoreTraceCount(trace_count_score);
           fh_tmp.setCharge(charge);
           last_iso_idx = best_idx;
 
@@ -620,6 +628,10 @@ namespace OpenMS
       f.setMetaValue(Constants::UserParam::NUM_OF_MASSTRACES, all_ints.size());
       if (report_convex_hulls_) f.setConvexHulls(feat_hypos[hypo_idx].getConvexHulls());
       f.setOverallQuality(feat_hypos[hypo_idx].getScore());
+      f.setMetaValue("score_rt", feat_hypos[hypo_idx].getScoreRT());
+      f.setMetaValue("score_mz", feat_hypos[hypo_idx].getScoreMZ());
+      f.setMetaValue("score_int", feat_hypos[hypo_idx].getScoreInt());
+      f.setMetaValue("score_trace_count", feat_hypos[hypo_idx].getScoreTraceCount());
       f.setMetaValue("masstrace_intensity", all_ints);
       f.setMetaValue("masstrace_centroid_rt", feat_hypos[hypo_idx].getAllCentroidRT());
       f.setMetaValue("masstrace_centroid_mz", feat_hypos[hypo_idx].getAllCentroidMZ());

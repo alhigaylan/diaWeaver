@@ -56,6 +56,18 @@ public:
 
     void setScore(const double& score);
 
+    double getScoreRT() const;
+    void setScoreRT(double score);
+
+    double getScoreMZ() const;
+    void setScoreMZ(double score);
+
+    double getScoreInt() const;
+    void setScoreInt(double score);
+
+    double getScoreTraceCount() const;
+    void setScoreTraceCount(double score);
+
     SignedSize getCharge() const;
 
     void setCharge(const SignedSize& ch);
@@ -94,6 +106,10 @@ private:
     std::vector<const MassTrace*> iso_pattern_;
 
     double feat_score_{};
+    double score_rt_{};
+    double score_mz_{};
+    double score_int_{};
+    double score_trace_count_{};
 
     SignedSize charge_{};
   };

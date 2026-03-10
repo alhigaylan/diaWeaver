@@ -255,6 +255,18 @@ namespace OpenMS
     return feat_score_;
   }
 
+  double FeatureHypothesis::getScoreRT() const { return score_rt_; }
+  void   FeatureHypothesis::setScoreRT(double score) { score_rt_ = score; }
+
+  double FeatureHypothesis::getScoreMZ() const { return score_mz_; }
+  void   FeatureHypothesis::setScoreMZ(double score) { score_mz_ = score; }
+
+  double FeatureHypothesis::getScoreInt() const { return score_int_; }
+  void   FeatureHypothesis::setScoreInt(double score) { score_int_ = score; }
+
+  double FeatureHypothesis::getScoreTraceCount() const { return score_trace_count_; }
+  void   FeatureHypothesis::setScoreTraceCount(double score) { score_trace_count_ = score; }
+
   FeatureFindingMetabo::FeatureFindingMetabo() :
     DefaultParamHandler("FeatureFindingMetabo"), ProgressLogger()
   {
