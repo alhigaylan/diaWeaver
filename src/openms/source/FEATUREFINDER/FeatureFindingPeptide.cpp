@@ -357,8 +357,13 @@ namespace OpenMS
       Size iso_pos_max(static_cast<Size>(std::floor(charge * local_mz_range_)));
       for (Size iso_pos = 1; iso_pos <= iso_pos_max; ++iso_pos)
       {
-        // Find mass trace that best agrees with current hypothesis of charge
-        // and isotopic position
+        // Find mass trace that best agrees with current hypothesis of charge and isotopic position
+        // Add a new score: trace count in a given hypothesis.
+        // Quadratic trace count score: rewards larger hypotheses. keeping range [0,1].
+        // Ideally, this will be biased against +1 charged peptides and small hypothesis (~2 isotopes)
+        const double trace_count_fraction = static_cast<double>(fh_tmp.getSize() + 1) / static_cast<double>(iso_pos_max + 1);
+        const double trace_count_score = trace_count_fraction * trace_count_fraction;
+
         double best_so_far(0.0);
         Size best_idx(0);
         for (Size mt_idx = last_iso_idx + 1; mt_idx < candidates.size(); ++mt_idx)
@@ -391,7 +396,7 @@ namespace OpenMS
           double total_pair_score(0.0);
           if (rt_score > 0.0 && mz_score > 0.0 && int_score > 0.0)
           {
-            total_pair_score = std::exp(std::log(rt_score) + log(mz_score) + log(int_score));
+            total_pair_score = (std::exp(std::log(rt_score) + log(mz_score) + log(int_score)) + trace_count_score) / 2.0;
           }
           if (total_pair_score > best_so_far)
           {
@@ -405,10 +410,7 @@ namespace OpenMS
         if (best_so_far > 0.0)
         {
           fh_tmp.addMassTrace(*candidates[best_idx]);
-          // iso_pos_max is the max isotopes for this charge; +1 accounts for the monoisotopic trace
-          // heuristic: hypotheses with only 2 traces (mono + 1 isotope) get a trace count score of 0
-          const double trace_count_score = (fh_tmp.getSize() == 2) ? 0.0 : static_cast<double>(fh_tmp.getSize()) / (iso_pos_max + 1);
-          fh_tmp.setScore((best_so_far + trace_count_score) / 2.0);
+          fh_tmp.setScore(best_so_far);
           fh_tmp.setCharge(charge);
           last_iso_idx = best_idx;
 
