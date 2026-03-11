@@ -61,6 +61,11 @@ namespace OpenMS
     defaults_.setValue("overlapping_features", "false", "Allow the bottom 25% scoring hypotheses to reuse mass traces already claimed by higher-scoring features, provided they propose a different charge state.");
     defaults_.setValidStrings("overlapping_features", {"false","true"});
 
+    defaults_.setValue("mass_defect_filtering", "true", "Filter feature hypotheses by peptide mass defect boundaries (adapted from DIA-Umpire). Rejects features whose mass defect falls outside the linear boundary defined for peptides.");
+    defaults_.setValidStrings("mass_defect_filtering", {"false","true"});
+    defaults_.setValue("mass_defect_offset", 0.1, "Mass defect tolerance offset (in Da, applied to the fractional mass) for the peptide mass defect filter. Increasing defect tolerance is recommended for modified peptides", {"advanced"});
+    defaults_.setMinFloat("mass_defect_offset", 0.0);
+
     defaultsToParam_();
 
     this->setLogType(CMD);
@@ -99,6 +104,8 @@ namespace OpenMS
     rt_min_pearson_correlation_ = (double)param_.getValue("rt_min_pearson_correlation");
     rt_max_lag_ = (int)param_.getValue("rt_max_lag");
     overlapping_features_ = param_.getValue("overlapping_features").toBool();
+    enable_mass_defect_filtering_ = param_.getValue("mass_defect_filtering").toBool();
+    mass_defect_offset_ = (double)param_.getValue("mass_defect_offset");
   }
 
 
@@ -333,6 +340,26 @@ namespace OpenMS
   }
 
 
+  bool FeatureFindingPeptide::isMassDefectValid_(double neutral_mass, double d) const
+  {
+    // Fractional part (mass defect) helper: frac(x) = x - floor(x)
+    auto massDefect = [](double x) { return x - std::floor(x); };
+
+    // Linear boundaries fitted to the peptide mass defect filter (from DIA-Umpire; Tsou et al.): https://doi.org/10.1002/pmic.201500526
+    // which was adapted from Toumi et al. https://doi.org/10.1021/pr100291q
+    const double u = massDefect(0.00052738 * neutral_mass + 0.066015  + d);
+    const double l = massDefect(0.00042565 * neutral_mass + 0.00038210 - d);
+    const double defect = massDefect(neutral_mass);
+
+    if (u > l)
+    {
+      // Normal (non-wrapping) interval
+      return defect >= l && defect <= u;
+    }
+    // filter wraps across the 0/1 boundary (e.g. l=0.9, u=0.1)
+    return defect >= l || defect <= u;
+  }
+
   void FeatureFindingPeptide::findLocalFeatures_(const std::vector<const MassTrace*>& candidates, std::vector<FeatureHypothesis>& output_hypotheses) const
   {
     // single Mass trace hypothesis — no pair score available, quality is 0
@@ -350,6 +377,17 @@ namespace OpenMS
 
     for (Size charge = charge_lower_bound_; charge <= charge_upper_bound_; ++charge)
     {
+      // Reject this charge hypothesis immediately if the neutral mass falls outside
+      // the expected peptide mass defect filter
+      if (enable_mass_defect_filtering_)
+      {
+        const double neutral_mass = charge * (candidates[0]->getCentroidMZ() - Constants::PROTON_MASS_U);
+        if (!isMassDefectValid_(neutral_mass, mass_defect_offset_))
+        {
+          continue;
+        }
+      }
+
       FeatureHypothesis fh_tmp;
       fh_tmp.addMassTrace(*candidates[0]);
 

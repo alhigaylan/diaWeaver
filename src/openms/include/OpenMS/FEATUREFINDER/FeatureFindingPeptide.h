@@ -63,6 +63,26 @@ private:
      */
     Range getTheoreticIsotopicMassWindow_(const std::vector<Element const *>& alphabet, int peakOffset) const;
 
+    /**
+     * @brief Check whether a neutral peptide mass falls within the expected peptide mass defect filter.
+     * This function was implemented in Tsou et al. (DIA-UMPIRE) https://doi.org/10.1002/pmic.201500526
+     * and adapted from Toumi et al. https://doi.org/10.1021/pr100291q
+     *
+     * Peptides have a characteristic mass defect pattern that can be described by two linear
+     * boundaries as a function of nominal mass. This filter, adapted from DIA-Umpire, rejects
+     * mass traces whose fractional mass falls outside the filter defined by:
+     *
+     *   upper = frac(0.00052738 * mass + 0.066015 + d)
+     *   lower = frac(0.00042565 * mass + 0.00038210 - d)
+     *
+     * where frac(x) = x - floor(x) and d is a user-configurable tolerance offset.
+     * increasing d is needed for modified peptides.
+     * @param[in] neutral_mass Neutral monoisotopic peptide mass (in Da)
+     * @param[in] d            Tolerance offset (default 0.1). Increase this for modified peptides.
+     * @return true if the mass defect is within the expected peptide corridor
+     */
+    bool isMassDefectValid_(double neutral_mass, double d) const;
+
     /** @brief Computes the cosine similarity between two vectors
      *
      * The cosine similarity (or cosine distance) is the cosine of the angle
@@ -183,6 +203,9 @@ private:
 
     bool remove_single_traces_;
     bool overlapping_features_;
+
+    bool enable_mass_defect_filtering_;
+    double mass_defect_offset_;
 
     double rt_min_pearson_correlation_;
     int rt_max_lag_;
