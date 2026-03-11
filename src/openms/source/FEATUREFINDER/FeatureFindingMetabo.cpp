@@ -267,6 +267,9 @@ namespace OpenMS
   double FeatureHypothesis::getScoreTraceCount() const { return score_trace_count_; }
   void   FeatureHypothesis::setScoreTraceCount(double score) { score_trace_count_ = score; }
 
+  double FeatureHypothesis::getScoreOverlap() const { return score_overlap_; }
+  void   FeatureHypothesis::setScoreOverlap(double score) { score_overlap_ = score; }
+
   FeatureFindingMetabo::FeatureFindingMetabo() :
     DefaultParamHandler("FeatureFindingMetabo"), ProgressLogger()
   {

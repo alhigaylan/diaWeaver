@@ -213,25 +213,19 @@ namespace OpenMS
     return mz_score;
   }
 
-  double FeatureFindingPeptide::scoreRT_(const MassTrace& tr1, const MassTrace& tr2) const
+  std::pair<double, double> FeatureFindingPeptide::scoreRT_(const MassTrace& tr1, const MassTrace& tr2) const
   {
-    // return success if this filter is disabled
-    if (!enable_RT_filtering_) return 1.0;
+    if (!enable_RT_filtering_) return {1.0, 1.0};
 
-    // Use Savitzky-Golay smoothed intensities from ElutionPeakDetection if
-    // available; fall back to raw intensities if smoothing was not run
-    // (e.g. when EPD is disabled).
+    // Align elution profiles using smoothed intensities
+    // Tolerance-based merge (mindiff = 0.1 s) pairs scans within 0.1 s of each
+    // other and zero-pads non-overlapping ends. This avoids the exact-RT-equality
+    // assumption that FeatureFindingMetabo relied on.
     const std::vector<double>& sm1 = tr1.getSmoothedIntensities();
     const std::vector<double>& sm2 = tr2.getSmoothedIntensities();
     const bool use_sm1 = !sm1.empty();
     const bool use_sm2 = !sm2.empty();
 
-    // Build RT-aligned intensity vectors using a tolerance-based merge
-    // (handles missing data points by filling in with zeros).
-    // Non-overlapping ends are zero-padded.
-    // mindiff is hard-coded as 0.1 s. In FFMetabo, exact double equality
-    // was used since we work on the same map.
-    // But this is more robust for same-map traces and matches OpenSWATH/diaWeaver behavior.
     const double mindiff = 0.1;
     std::vector<double> vec1, vec2;
 
@@ -263,24 +257,38 @@ namespace OpenMS
     while (i < n1) { vec1.push_back(use_sm1 ? sm1[i] : tr1[i].getIntensity()); vec2.push_back(0.0); ++i; }
     while (j < n2) { vec1.push_back(0.0); vec2.push_back(use_sm2 ? sm2[j] : tr2[j].getIntensity()); ++j; }
 
-    // compute pearson correlation. If a correlation is below a cutoff,
-    // quit calculation and filter this pair as unlikely.
+    // FWHM overlap check (adapted from FeatureFindingMetabo)
+    // Reject pairs whose FWHM windows share less than 70 % of the longer FWHM.
+    const std::pair<Size, Size> fwhm1 = tr1.getFWHMborders();
+    const std::pair<Size, Size> fwhm2 = tr2.getFWHMborders();
+
+    const double fwhm1_start = tr1[fwhm1.first].getRT();
+    const double fwhm1_end   = tr1[fwhm1.second].getRT();
+    const double fwhm2_start = tr2[fwhm2.first].getRT();
+    const double fwhm2_end   = tr2[fwhm2.second].getRT();
+
+    const double overlap    = std::max(0.0, std::min(fwhm1_end, fwhm2_end) - std::max(fwhm1_start, fwhm2_start));
+    const double max_length = std::max(tr1.getFWHM(), tr2.getFWHM());
+
+    const double proportion = overlap / max_length;
+
+    if (proportion < 0.7)
+    {
+      return {0.0, 0.0};
+    }
+
+    // Pearson correlation
     const double pearson = Math::pearsonCorrelationCoefficient(
         vec1.begin(), vec1.end(), vec2.begin(), vec2.end());
-    if (pearson < rt_min_pearson_correlation_) return 0.0;
+    if (pearson < rt_min_pearson_correlation_) return {0.0, proportion};
 
-    // normalized cross correlation to identify traces that are slightly shifted due to noise
-    // maxdelay --> how many offsets (in units of scans) to consider. Usually, this should match local_rt_range
-    // lag --> I believe this is the step size when considering max lag. Hard-coding this as 1 means it will
-    // evaluate every possible scan offset within +/- maxdelay.
-    // Since this function is borrowed from OpenSWATH, lag parameter may be helpful in XIC with 100s of data points.
-    // but here, mass traces are roughly around 15 ~ 30 points.
+    // Normalised cross-correlation: evaluates shape similarity at multiple lags,
+    // subsumes cosine similarity (which is NCC at lag=0).
     OpenSwath::Scoring::XCorrArrayType xcorr =
         OpenSwath::Scoring::normalizedCrossCorrelation(vec1, vec2, rt_max_lag_, 1);
-    OpenSwath::Scoring::XCorrArrayType::const_iterator best =
-        OpenSwath::Scoring::xcorrArrayGetMaxPeak(xcorr);
+    const double xcorr_score = OpenSwath::Scoring::xcorrArrayGetMaxPeak(xcorr)->second;
 
-    return best->second;
+    return {xcorr_score, proportion};
   }
 
   Range FeatureFindingPeptide::getTheoreticIsotopicMassWindow_(const std::vector<Element const *>& alphabet, int peakOffset) const
@@ -395,7 +403,7 @@ namespace OpenMS
       Size iso_pos_max(static_cast<Size>(std::floor(charge * local_mz_range_)));
 
       // Accumulators for mean individual scores across all accepted iso_pos pairs.
-      double acc_rt(0.0), acc_mz(0.0), acc_int(0.0), acc_pair(0.0);
+      double acc_rt(0.0), acc_mz(0.0), acc_int(0.0), acc_overlap(0.0), acc_pair(0.0);
       Size acc_count(0);
 
       for (Size iso_pos = 1; iso_pos <= iso_pos_max; ++iso_pos)
@@ -409,17 +417,14 @@ namespace OpenMS
 
         double best_so_far(0.0);
         Size best_idx(0);
-        double best_rt_score(0.0), best_mz_score(0.0), best_int_score(0.0);
+        double best_rt_score(0.0), best_mz_score(0.0), best_int_score(0.0), best_overlap_score(0.0);
         for (Size mt_idx = last_iso_idx + 1; mt_idx < candidates.size(); ++mt_idx)
         {
 #ifdef FFM_DEBUG
           std::cout << "scoring " << candidates[0]->getLabel() << " " << candidates[0]->getCentroidMZ() <<
             " with " << candidates[mt_idx]->getLabel() << " " << candidates[mt_idx]->getCentroidMZ() << '\n';
 #endif
-          // Score current mass trace candidates against hypothesis
-          // currently, if pearson correlation score is below rt_min_pearson_correlation,
-          // scoreRT_ will return 0.
-          double rt_score(scoreRT_(*candidates[0], *candidates[mt_idx]));
+          const auto [rt_score, overlap_score] = scoreRT_(*candidates[0], *candidates[mt_idx]);
           double mz_score(scoreMZ_(*candidates[0], *candidates[mt_idx], iso_pos, charge));
 
           // initialize int score
@@ -449,6 +454,7 @@ namespace OpenMS
             best_rt_score = rt_score;
             best_mz_score = mz_score;
             best_int_score = int_score;
+            best_overlap_score = overlap_score;
           }
         } // end mt_idx
 
@@ -457,16 +463,18 @@ namespace OpenMS
         if (best_so_far > 0.0)
         {
           ++acc_count;
-          acc_rt    += best_rt_score;
-          acc_mz    += best_mz_score;
-          acc_int   += best_int_score;
-          acc_pair  += best_so_far;
+          acc_rt      += best_rt_score;
+          acc_mz      += best_mz_score;
+          acc_int     += best_int_score;
+          acc_overlap += best_overlap_score;
+          acc_pair    += best_so_far;
 
           fh_tmp.addMassTrace(*candidates[best_idx]);
           fh_tmp.setScore(acc_pair / acc_count);
           fh_tmp.setScoreRT(acc_rt / acc_count);
           fh_tmp.setScoreMZ(acc_mz / acc_count);
           fh_tmp.setScoreInt(acc_int / acc_count);
+          fh_tmp.setScoreOverlap(acc_overlap / acc_count);
           fh_tmp.setScoreTraceCount(trace_count_score);
           fh_tmp.setCharge(charge);
           last_iso_idx = best_idx;
@@ -680,6 +688,7 @@ namespace OpenMS
       f.setMetaValue("score_rt", feat_hypos[hypo_idx].getScoreRT());
       f.setMetaValue("score_mz", feat_hypos[hypo_idx].getScoreMZ());
       f.setMetaValue("score_int", feat_hypos[hypo_idx].getScoreInt());
+      f.setMetaValue("score_overlap", feat_hypos[hypo_idx].getScoreOverlap());
       f.setMetaValue("score_trace_count", feat_hypos[hypo_idx].getScoreTraceCount());
       f.setMetaValue("masstrace_intensity", all_ints);
       f.setMetaValue("masstrace_centroid_rt", feat_hypos[hypo_idx].getAllCentroidRT());

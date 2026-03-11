@@ -68,6 +68,9 @@ public:
     double getScoreTraceCount() const;
     void setScoreTraceCount(double score);
 
+    double getScoreOverlap() const;
+    void setScoreOverlap(double score);
+
     SignedSize getCharge() const;
 
     void setCharge(const SignedSize& ch);
@@ -110,6 +113,7 @@ private:
     double score_mz_{};
     double score_int_{};
     double score_trace_count_{};
+    double score_overlap_{};
 
     SignedSize charge_{};
   };

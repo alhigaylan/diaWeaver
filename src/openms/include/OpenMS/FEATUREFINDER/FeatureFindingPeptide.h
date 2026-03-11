@@ -144,21 +144,21 @@ private:
      */
     double scoreMZByExpectedRange_(Size charge, const double diff_mz, double mt_variances, Range isotope_window) const;
 
-    /** @brief Perform retention time scoring of two multiple mass traces
+    /** @brief Unified RT similarity scoring combining profile alignment, FWHM overlap,
+     *  cosine similarity, Pearson correlation and normalised cross-correlation.
      *
-     * Computes the similarity of the two peak shapes using cosine similarity
-     * (see computeCosineSim_) if some conditions are fulfilled. Mainly the
-     * overlap between the two peaks at FHWM needs to exceed a certain
-     * threshold. The threshold is set at 0.7 (i.e. 70 % overlap) as also
-     * described in Kenar et al.
+     *  The function:
+     *  1. Aligns the full elution profiles using a tolerance-based merge (0.1 s),
+     *     preferring smoothed intensities when available.
+     *  2. Checks that the FWHM windows of the two traces overlap by at least 70 %
+     *     (adapted from FeatureFindingMetabo). Returns 0 immediately if they do not.
+     *  3. Filters on Pearson correlation (rt_min_pearson_correlation_).
+     *  4. Computes normalised cross-correlation (up to rt_max_lag_ scans of shift) on the aligned profiles.
      *
-     * @note this only works for equally sampled mass traces, e.g. they need to
-     * come from the same map (not for SRM measurements for example).
-     *
-     * @param[in] mt1 First mass trace
-     * @param[in] mt2 Second mass trace
-    */
-    double scoreRT_(const MassTrace& mt1, const MassTrace& mt2) const;
+     * @param[in] mt1 First mass trace (monoisotopic)
+     * @param[in] mt2 Second mass trace (candidate isotope)
+     */
+    std::pair<double, double> scoreRT_(const MassTrace& mt1, const MassTrace& mt2) const;
 
     /** @brief Perform intensity scoring using the averagine model (for peptides only)
      *
