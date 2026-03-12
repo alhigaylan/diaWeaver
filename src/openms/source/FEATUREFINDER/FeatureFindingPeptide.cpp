@@ -412,9 +412,6 @@ namespace OpenMS
         // Add a new score: trace count in a given hypothesis.
         // Quadratic trace count score: rewards larger hypotheses. keeping range [0,1].
         // Ideally, this will be biased against +1 charged peptides and small hypothesis (~2 isotopes)
-        const double trace_count_fraction = static_cast<double>(fh_tmp.getSize() + 1) / static_cast<double>(iso_pos_max + 1);
-        const double trace_count_score = trace_count_fraction * trace_count_fraction;
-
         double best_so_far(0.0);
         Size best_idx(0);
         double best_rt_score(0.0), best_mz_score(0.0), best_int_score(0.0), best_overlap_score(0.0);
@@ -445,7 +442,7 @@ namespace OpenMS
           double total_pair_score(0.0);
           if (rt_score > 0.0 && mz_score > 0.0 && int_score > 0.0)
           {
-            total_pair_score = (rt_score + mz_score + int_score + trace_count_score) / 4.0;
+            total_pair_score = (rt_score + mz_score + int_score) / 3.0;
           }
           if (total_pair_score > best_so_far)
           {
@@ -475,7 +472,6 @@ namespace OpenMS
           fh_tmp.setScoreMZ(acc_mz / acc_count);
           fh_tmp.setScoreInt(acc_int / acc_count);
           fh_tmp.setScoreOverlap(acc_overlap / acc_count);
-          fh_tmp.setScoreTraceCount(trace_count_score);
           fh_tmp.setCharge(charge);
           last_iso_idx = best_idx;
 
@@ -689,7 +685,6 @@ namespace OpenMS
       f.setMetaValue("score_mz", feat_hypos[hypo_idx].getScoreMZ());
       f.setMetaValue("score_int", feat_hypos[hypo_idx].getScoreInt());
       f.setMetaValue("score_overlap", feat_hypos[hypo_idx].getScoreOverlap());
-      f.setMetaValue("score_trace_count", feat_hypos[hypo_idx].getScoreTraceCount());
       f.setMetaValue("masstrace_intensity", all_ints);
       f.setMetaValue("masstrace_centroid_rt", feat_hypos[hypo_idx].getAllCentroidRT());
       f.setMetaValue("masstrace_centroid_mz", feat_hypos[hypo_idx].getAllCentroidMZ());
