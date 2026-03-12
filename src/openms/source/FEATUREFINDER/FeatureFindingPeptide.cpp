@@ -51,6 +51,10 @@ namespace OpenMS
     defaults_.setValue("remove_single_traces", "false", "Remove unassembled traces (single traces).");
     defaults_.setValidStrings("remove_single_traces", {"false","true"});
 
+    defaults_.setValue("rt_peak_overlap_threshold", 0.3, "Minimum FWHM overlap proportion required between two mass traces to be considered co-eluting. Computed as the intersection of the two FWHM windows divided by the longer FWHM. Range [0, 1].");
+    defaults_.setMinFloat("rt_peak_overlap_threshold", 0.0);
+    defaults_.setMaxFloat("rt_peak_overlap_threshold", 1.0);
+
     defaults_.setValue("rt_min_pearson_correlation", 0.7, "Minimum Pearson correlation required between two mass trace elution profiles before cross-correlation is computed. Pairs below this threshold are rejected without the more expensive XCorr calculation.");
     defaults_.setMinFloat("rt_min_pearson_correlation", 0.0);
     defaults_.setMaxFloat("rt_min_pearson_correlation", 1.0);
@@ -101,6 +105,7 @@ namespace OpenMS
 
     remove_single_traces_ = param_.getValue("remove_single_traces").toBool();
 
+    rt_peak_overlap_threshold_ = (double)param_.getValue("rt_peak_overlap_threshold");
     rt_min_pearson_correlation_ = (double)param_.getValue("rt_min_pearson_correlation");
     rt_max_lag_ = (int)param_.getValue("rt_max_lag");
     overlapping_features_ = param_.getValue("overlapping_features").toBool();
@@ -274,7 +279,7 @@ namespace OpenMS
 
     const double proportion = overlap / max_length;
 
-    if (proportion < 0.7)
+    if (proportion < rt_peak_overlap_threshold_)
     {
       return {0.0, 0.0};
     }

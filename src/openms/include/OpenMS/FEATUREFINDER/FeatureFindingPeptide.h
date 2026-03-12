@@ -207,6 +207,7 @@ private:
     bool enable_mass_defect_filtering_;
     double mass_defect_offset_;
 
+    double rt_peak_overlap_threshold_;
     double rt_min_pearson_correlation_;
     int rt_max_lag_;
   };
