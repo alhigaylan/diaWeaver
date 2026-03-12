@@ -270,6 +270,8 @@ namespace OpenMS
     const double overlap    = std::max(0.0, std::min(fwhm1_end, fwhm2_end) - std::max(fwhm1_start, fwhm2_start));
     const double max_length = std::max(tr1.getFWHM(), tr2.getFWHM());
 
+    if (max_length == 0.0) return {0.0, 0.0};
+
     const double proportion = overlap / max_length;
 
     if (proportion < 0.7)
