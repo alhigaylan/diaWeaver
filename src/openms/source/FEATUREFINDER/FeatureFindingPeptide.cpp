@@ -268,7 +268,7 @@ namespace OpenMS
     const double fwhm2_end   = tr2[fwhm2.second].getRT();
 
     const double overlap    = std::max(0.0, std::min(fwhm1_end, fwhm2_end) - std::max(fwhm1_start, fwhm2_start));
-    const double max_length = std::max(tr1.getFWHM(), tr2.getFWHM());
+    const double max_length = std::max(fwhm1_end - fwhm1_start, fwhm2_end - fwhm2_start);
 
     if (max_length == 0.0) return {0.0, 0.0};
 
