@@ -112,7 +112,7 @@ namespace OpenMS
   double FeatureFindingPeptide::computeAveragineSimScore_(const std::vector<double>& hypo_ints, const double& mol_weight) const
   {
     CoarseIsotopePatternGenerator solver(hypo_ints.size());
-    auto isodist = solver.estimateFromPeptideWeight(mol_weight);
+    auto isodist = solver.estimateFromPeptideMonoWeight(mol_weight);
     // isodist.renormalize();
 
     IsotopeDistribution::ContainerType averagine_dist = isodist.getContainer();
@@ -432,7 +432,7 @@ namespace OpenMS
           {
             std::vector<double> tmp_ints(fh_tmp.getAllIntensities());
             tmp_ints.push_back(candidates[mt_idx]->getIntensity(use_smoothed_intensities_));
-            int_score = computeAveragineSimScore_(tmp_ints, candidates[mt_idx]->getCentroidMZ() * charge);
+            int_score = computeAveragineSimScore_(tmp_ints, charge * (candidates[mt_idx]->getCentroidMZ() - Constants::PROTON_MASS_U));
           }
 
 #ifdef FFM_DEBUG
