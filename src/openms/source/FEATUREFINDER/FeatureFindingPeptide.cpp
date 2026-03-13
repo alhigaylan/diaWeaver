@@ -37,7 +37,7 @@ namespace OpenMS
     defaults_.setValue("enable_RT_filtering", "true", "Require sufficient overlap in RT while assembling mass traces. Disable for direct injection data..");
     defaults_.setValidStrings("enable_RT_filtering", {"false","true"});
 
-    defaults_.setValue("use_smoothed_intensities", "true", "Use LOWESS intensities instead of raw intensities.", {"advanced"});
+    defaults_.setValue("use_smoothed_intensities", "true", "Use Savitzky-Golay smoothed intensities (produced by ElutionPeakDetection) instead of raw intensities.", {"advanced"});
     defaults_.setValidStrings("use_smoothed_intensities", {"false","true"});
     defaults_.setValue("report_smoothed_intensities", "true", "Report smoothed intensities (only if use_smoothed_intensities is true).", {"advanced"});
     defaults_.setValidStrings("report_smoothed_intensities", {"false","true"});

@@ -238,7 +238,7 @@ protected:
       p_ffp.setValue("charge_lower_bound", 2, "Lowest charge state to consider");
       p_ffp.setValue("charge_upper_bound", 4, "Highest charge state to consider");
       p_ffp.setValue("remove_single_traces", "true", "Remove unassembled traces (single traces).");
-      p_ffp.setValue("use_smoothed_intensities", "true", "Use LOWESS intensities instead of raw intensities.");
+      p_ffp.setValue("use_smoothed_intensities", "true", "Use Savitzky-Golay smoothed intensities (produced by ElutionPeakDetection) instead of raw intensities.");
       p_ffp.setValue("mass_defect_filtering", "true", "Filter feature hypotheses by peptide mass defect boundaries.");
       p_ffp.setValue("mass_defect_offset", 0.1, "Mass defect tolerance offset for the peptide mass defect filter.");
       p_ffp.setValue("overlapping_features", "false", "Do not allow low-scoring hypotheses to reuse already claimed mass traces.");
