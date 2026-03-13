@@ -189,8 +189,11 @@ class SpokeML :
 
       // For each theoretical b/y ion that matches in exp_spec within ppm_tolerance,
       // writes one row to out_tsv with the ion's scores from the diaWeaver FloatDataArrays.
+      // used_peaks tracks experimental peak indices already claimed by the target; decoy
+      // is barred from reusing them.
       auto writeMatchedIons = [&](const AASequence& seq, const MSSpectrum& exp_spec,
-                                  const String& spec_ref, const String& type)
+                                  const String& spec_ref, const String& type,
+                                  std::set<Int>& used_peaks)
       {
         PeakSpectrum theo;
         tsg.getSpectrum(theo, seq, 1, 2);
@@ -212,6 +215,9 @@ class SpokeML :
           const double tol = mz * ppm_tolerance * 1e-6;
           const Int exp_idx = exp_spec.findNearest(mz, tol);
           if (exp_idx == -1) continue;
+          if (used_peaks.count(exp_idx)) continue;
+
+          if (type == "target") used_peaks.insert(exp_idx);
 
           double pearson = 0.0, xcorr = 0.0, frt = 0.0, fim = 0.0;
           for (const auto& fda : exp_spec.getFloatDataArrays())
@@ -244,8 +250,9 @@ class SpokeML :
         const MSSpectrum& exp_spec = *spec_it->second;
         const String spec_ref = pi.getSpectrumReference();
 
-        writeMatchedIons(pi.getHits()[0].getSequence(), exp_spec, spec_ref, "target");
-        writeMatchedIons(pi.getHits()[1].getSequence(), exp_spec, spec_ref, "decoy");
+        std::set<Int> used_peaks;
+        writeMatchedIons(pi.getHits()[0].getSequence(), exp_spec, spec_ref, "target", used_peaks);
+        writeMatchedIons(pi.getHits()[1].getSequence(), exp_spec, spec_ref, "decoy", used_peaks);
       }
 
       return EXECUTION_OK;
