@@ -181,6 +181,10 @@ class SpokeML :
 
       const double ppm_tolerance = 20.0;
 
+      std::ofstream out_tsv(out);
+      out_tsv << "spectrum_index\tsequence\ttype\tfragment_label\t"
+              << "pearson_score\txcorr_lag_intensity\tdelta_rt\tdelta_im\n";
+
       // For each theoretical b/y ion that matches in exp_spec within ppm_tolerance,
       // writes one row to out_tsv with the ion's scores from the diaWeaver FloatDataArrays.
       auto writeMatchedIons = [&](const AASequence& seq, const MSSpectrum& exp_spec,
@@ -230,17 +234,13 @@ class SpokeML :
         }
       };
 
-      std::ofstream out_tsv(out);
-      out_tsv << "spectrum_index\tsequence\ttype\tfragment_label\t"
-              << "pearson_score\txcorr_lag_intensity\tdelta_rt\tdelta_im\n";
-
       for (const auto& pi : peptide_ids)
       {
-        auto spec_it = native_id_to_spec.find(pi.getSpectrumRef());
+        auto spec_it = native_id_to_spec.find(pi.getSpectrumReference());
         if (spec_it == native_id_to_spec.end()) continue;
 
         const MSSpectrum& exp_spec = *spec_it->second;
-        const String spec_ref = pi.getSpectrumRef();
+        const String spec_ref = pi.getSpectrumReference();
 
         writeMatchedIons(pi.getHits()[0].getSequence(), exp_spec, spec_ref, "target");
         writeMatchedIons(pi.getHits()[1].getSequence(), exp_spec, spec_ref, "decoy");
