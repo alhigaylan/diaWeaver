@@ -10,10 +10,14 @@
 #include <OpenMS/ANALYSIS/ID/SimpleSearchEngineAlgorithm.h>
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
 
+#include <OpenMS/CHEMISTRY/TheoreticalSpectrumGenerator.h>
+#include <OpenMS/CONCEPT/Constants.h>
 #include <OpenMS/FORMAT/FileHandler.h>
+#include <OpenMS/KERNEL/MSExperiment.h>
 #include <OpenMS/KERNEL/StandardTypes.h>
 #include <OpenMS/SYSTEM/File.h>
 
+#include <cmath>
 #include <fstream>
 
 #ifdef _OPENMP
@@ -152,13 +156,94 @@ class SpokeML :
       }
       peptide_ids = std::move(filtered_ids);
 
+      // Load experimental spectra for ion matching
+      PeakMap exp;
+      FileHandler().loadExperiment(in, exp, {FileTypes::MZML});
+
+      // Build native ID -> spectrum map for fast lookup
+      std::map<String, const MSSpectrum*> native_id_to_spec;
+      for (const auto& spec : exp)
+      {
+        native_id_to_spec[spec.getNativeID()] = &spec;
+      }
+
+      // Configure TheoreticalSpectrumGenerator for b/y ions only
+      TheoreticalSpectrumGenerator tsg;
+      Param tsg_params = tsg.getDefaults();
+      tsg_params.setValue("add_b_ions", "true");
+      tsg_params.setValue("add_y_ions", "true");
+      tsg_params.setValue("add_a_ions", "false");
+      tsg_params.setValue("add_c_ions", "false");
+      tsg_params.setValue("add_x_ions", "false");
+      tsg_params.setValue("add_z_ions", "false");
+      tsg_params.setValue("add_metainfo", "true");
+      tsg.setParameters(tsg_params);
+
+      const double ppm_tolerance = 20.0;
+
+      // For each theoretical b/y ion that matches in exp_spec within ppm_tolerance,
+      // writes one row to out_tsv with the ion's scores from the diaWeaver FloatDataArrays.
+      auto writeMatchedIons = [&](const AASequence& seq, const MSSpectrum& exp_spec,
+                                  const String& spec_ref, const String& type)
+      {
+        PeakSpectrum theo;
+        tsg.getSpectrum(theo, seq, 1, 2);
+
+        const MSSpectrum::StringDataArray* ion_names = nullptr;
+        for (const auto& sda : theo.getStringDataArrays())
+        {
+          if (sda.getName() == Constants::UserParam::IonNames)
+          {
+            ion_names = &sda;
+            break;
+          }
+        }
+        if (!ion_names) return;
+
+        for (Size i = 0; i < theo.size(); ++i)
+        {
+          const double mz  = theo[i].getMZ();
+          const double tol = mz * ppm_tolerance * 1e-6;
+          const Int exp_idx = exp_spec.findNearest(mz, tol);
+          if (exp_idx == -1) continue;
+
+          double pearson = 0.0, xcorr = 0.0, frt = 0.0, fim = 0.0;
+          for (const auto& fda : exp_spec.getFloatDataArrays())
+          {
+            if      (fda.getName() == "pearson_score")         pearson = fda[exp_idx];
+            else if (fda.getName() == "xcorr_lag_intensity")   xcorr   = fda[exp_idx];
+            else if (fda.getName() == "fragment_rt")           frt     = fda[exp_idx];
+            else if (fda.getName() == "fragment_ion_mobility") fim     = fda[exp_idx];
+          }
+
+          const double delta_rt = std::abs(frt - exp_spec.getRT());
+          const double delta_im = std::abs(fim - exp_spec.getDriftTime());
+
+          out_tsv << spec_ref          << "\t"
+                  << seq.toString()    << "\t"
+                  << type              << "\t"
+                  << (*ion_names)[i]   << "\t"
+                  << pearson           << "\t"
+                  << xcorr             << "\t"
+                  << delta_rt          << "\t"
+                  << delta_im          << "\n";
+        }
+      };
+
       std::ofstream out_tsv(out);
-      out_tsv << "spectrum_index\ttarget_sequence\tdecoy_sequence\n";
+      out_tsv << "spectrum_index\tsequence\ttype\tfragment_label\t"
+              << "pearson_score\txcorr_lag_intensity\tdelta_rt\tdelta_im\n";
+
       for (const auto& pi : peptide_ids)
       {
-        const String target_seq = pi.getHits()[0].getSequence().toString();
-        const String decoy_seq  = pi.getHits()[1].getSequence().toString();
-        out_tsv << pi.getSpectrumRef() << "\t" << target_seq << "\t" << decoy_seq << "\n";
+        auto spec_it = native_id_to_spec.find(pi.getSpectrumRef());
+        if (spec_it == native_id_to_spec.end()) continue;
+
+        const MSSpectrum& exp_spec = *spec_it->second;
+        const String spec_ref = pi.getSpectrumRef();
+
+        writeMatchedIons(pi.getHits()[0].getSequence(), exp_spec, spec_ref, "target");
+        writeMatchedIons(pi.getHits()[1].getSequence(), exp_spec, spec_ref, "decoy");
       }
 
       return EXECUTION_OK;
