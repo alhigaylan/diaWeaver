@@ -97,6 +97,7 @@ class SpokeML :
       // FDR parameters
       Param fdr_params_with_subsection;
       fdr_params_with_subsection.insert("FDR:", FalseDiscoveryRate().getDefaults());
+      fdr_params_with_subsection.setValue("FDR:add_decoy_peptides", "true");
       registerFullParam_(fdr_params_with_subsection);
 
       registerDoubleOption_("FDR:PSM_threshold", "<value>", 0.01, "q-value threshold for PSM-level FDR filtering.", false);
