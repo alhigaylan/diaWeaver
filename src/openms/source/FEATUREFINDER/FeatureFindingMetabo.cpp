@@ -290,7 +290,7 @@ namespace OpenMS
     defaults_.setValue("mz_scoring_13C", "false", "Use the 13C isotope peak position (~1.003355 Da) as the expected shift in m/z for isotope mass traces (highly recommended for lipidomics!). Disable for general metabolites (as described in Kenar et al. 2014, MCP.).");
     defaults_.setValidStrings("mz_scoring_13C", {"false","true"});
 
-    defaults_.setValue("use_smoothed_intensities", "true", "Use LOWESS intensities instead of raw intensities.", {"advanced"});
+    defaults_.setValue("use_smoothed_intensities", "true", "Use Savitzky-Golay smoothed intensities (produced by ElutionPeakDetection) instead of raw intensities.", {"advanced"});
     defaults_.setValidStrings("use_smoothed_intensities", {"false","true"});
     defaults_.setValue("report_smoothed_intensities", "true", "Report smoothed intensities (only if use_smoothed_intensities is true).", {"advanced"});
     defaults_.setValidStrings("report_smoothed_intensities", {"false","true"});
