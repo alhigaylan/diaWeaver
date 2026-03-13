@@ -140,6 +140,7 @@ TriqlerConverter
 XFDR
 XMLValidator
 diaWeaver
+SpokeML
 )
 
 if(NOT DISABLE_OPENSWATH)
