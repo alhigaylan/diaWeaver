@@ -17,7 +17,7 @@
 #include <OpenMS/PROCESSING/CENTROIDING/PeakPickerHiRes.h>
 #include <OpenMS/FEATUREFINDER/MassTraceDetection.h>
 #include <OpenMS/FEATUREFINDER/ElutionPeakDetection.h>
-#include <OpenMS/FEATUREFINDER/FeatureFindingMetabo.h>
+#include <OpenMS/FEATUREFINDER/FeatureFindingPeptide.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/ClusterMassTracesByPrecursor.h>
 #include <OpenMS/FORMAT/DATAACCESS/MSDataWritingConsumer.h>
 #include <OpenMS/FORMAT/MSNumpressCoder.h>
@@ -48,7 +48,7 @@ per DIA window containing the reconstructed spectra.
 
 The processing pipeline for each DIA window:
 1. Peak picking on MS1 and MS2 spectra (PeakPickerIM for ion mobility data, PeakPickerHiRes otherwise)
-2. FeatureFinderMetabo on MS1 to detect monoisotopic peptide precursor features
+2. FeatureFinderPeptide on MS1 to detect monoisotopic peptide precursor features
 3. MassTraceExtractor on MS2 to extract fragment mass traces
 4. Correlation of MS1 feature elution profiles with MS2 fragment traces using Pearson correlation
 5. Assembly of correlated fragments into pseudo MS/MS spectra
@@ -155,7 +155,7 @@ protected:
 
     registerSubsection_("PeakPickerHiRes", "Parameters for high-resolution peak picking (used when input has no IM data)");
 
-    registerSubsection_("FeatureFinderMetabo", "Parameters for FeatureFinderMetabo algorithm (precursor detection on MS1 and unfragmented precursors)");
+    registerSubsection_("FeatureFinderPeptide", "Parameters for FeatureFinderPeptide algorithm (precursor detection on MS1 and unfragmented precursors)");
 
     registerSubsection_("MassTraceExtractor", "Parameters for MassTraceExtractor algorithm (mass trace detection on MS2 data)");
 
@@ -191,11 +191,11 @@ protected:
       PeakPickerHiRes pphr;
       return pphr.getDefaults();
     }
-    if (name == "FeatureFinderMetabo")
+    if (name == "FeatureFinderPeptide")
     {
       Param combined;
 
-      // Common parameters for all FFM sub-algorithms
+      // Common parameters for all FFP sub-algorithms
       Param p_com;
       p_com.setValue("noise_threshold_int", 60.0, "Intensity threshold below which peaks are regarded as noise.");
       p_com.setValue("chrom_peak_snr", 1.0, "Minimum signal-to-noise a mass trace should have.");
@@ -230,22 +230,26 @@ protected:
       combined.insert("epd:", p_epd);
       combined.setSectionDescription("epd", "Elution Profile Detection (to separate isobaric Mass Traces by elution time).");
 
-      // FeatureFindingMetabo parameters
-      Param p_ffm = FeatureFindingMetabo().getDefaults();
-      p_ffm.setValue("isotope_filtering_model", "peptides", "Use peptide isotope model for filtering");
-      p_ffm.setValue("local_rt_range", 5.0, "RT range where to look for coeluting mass traces");
-      p_ffm.setValue("local_mz_range", 3.0, "MZ range where to look for isotopic mass traces");
-      p_ffm.setValue("local_im_range", 0.02, "IM range where to look for isotopic mass traces");
-      p_ffm.setValue("charge_lower_bound", 2, "Lowest charge state to consider");
-      p_ffm.setValue("charge_upper_bound", 4, "Highest charge state to consider");
-      p_ffm.setValue("remove_single_traces", "true", "Remove unassembled traces (single traces).");
-      p_ffm.setValue("mz_scoring_13C", "true", "Use the 13C isotope peak position (~1.003355 Da) as the expected shift in m/z for isotope mass traces (highly recommended for lipidomics!). Disable for general metabolites (as described in Kenar et al. 2014, MCP.)");
-      p_ffm.setValue("use_smoothed_intensities", "false", "Use LOWESS intensities instead of raw intensities.");
+      // FeatureFindingPeptide parameters
+      Param p_ffp = FeatureFindingPeptide().getDefaults();
+      p_ffp.setValue("local_rt_range", 5.0, "RT range where to look for coeluting mass traces");
+      p_ffp.setValue("local_mz_range", 3.0, "MZ range where to look for isotopic mass traces");
+      p_ffp.setValue("local_im_range", 0.02, "IM range where to look for isotopic mass traces");
+      p_ffp.setValue("charge_lower_bound", 2, "Lowest charge state to consider");
+      p_ffp.setValue("charge_upper_bound", 4, "Highest charge state to consider");
+      p_ffp.setValue("remove_single_traces", "true", "Remove unassembled traces (single traces).");
+      p_ffp.setValue("use_smoothed_intensities", "true", "Use LOWESS intensities instead of raw intensities.");
+      p_ffp.setValue("mass_defect_filtering", "true", "Filter feature hypotheses by peptide mass defect boundaries.");
+      p_ffp.setValue("mass_defect_offset", 0.1, "Mass defect tolerance offset for the peptide mass defect filter.");
+      p_ffp.setValue("overlapping_features", "false", "Do not allow low-scoring hypotheses to reuse already claimed mass traces.");
+      p_ffp.setValue("rt_max_lag", 5, "Maximum lag (in scans) for normalised cross-correlation between isotope elution profiles.");
+      p_ffp.setValue("rt_min_pearson_correlation", 0.3, "Minimum Pearson correlation between two mass trace elution profiles.");
+      p_ffp.setValue("rt_peak_overlap_threshold", 0.3, "Minimum FWHM overlap proportion required between two co-eluting mass traces.");
 
-      p_ffm.remove("chrom_fwhm");
-      p_ffm.remove("report_chromatograms");
-      combined.insert("ffm:", p_ffm);
-      combined.setSectionDescription("ffm", "FeatureFinder parameters (assembling mass traces to charged features)");
+      p_ffp.remove("chrom_fwhm");
+      p_ffp.remove("report_chromatograms");
+      combined.insert("ffp:", p_ffp);
+      combined.setSectionDescription("ffp", "FeatureFindingPeptide parameters (assembling mass traces to charged features)");
 
       return combined;
     }
@@ -310,23 +314,23 @@ protected:
   }
 
   /**
-   * @brief Run FeatureFinderMetabo pipeline on a centroided MSExperiment
+   * @brief Run FeatureFinderPeptide pipeline on a centroided MSExperiment
    * @param[in,out] ms_peakmap Input centroided peak map (will be sorted)
-   * @param[in] common_param Common parameters for FFM algorithms
+   * @param[in] common_param Common parameters for FFP algorithms
    * @param[in] mtd_param MassTraceDetection parameters
    * @param[in] epd_param ElutionPeakDetection parameters
-   * @param[in] ffm_param FeatureFindingMetabo parameters
+   * @param[in] ffp_param FeatureFindingPeptide parameters
    * @param[out] feat_map Output feature map
    * @param[out] traces_out Output mass traces (for accessing raw intensity data)
    * @return True on success, false on error
    */
-  bool runFeatureFinderMetabo_(MSExperiment& ms_peakmap,
-                               const Param& common_param,
-                               Param mtd_param,
-                               Param epd_param,
-                               Param ffm_param,
-                               FeatureMap& feat_map,
-                               std::vector<MassTrace>& traces_out)
+  bool runFeatureFinderPeptide_(MSExperiment& ms_peakmap,
+                                const Param& common_param,
+                                Param mtd_param,
+                                Param epd_param,
+                                Param ffp_param,
+                                FeatureMap& feat_map,
+                                std::vector<MassTrace>& traces_out)
   {
     if (ms_peakmap.empty())
     {
@@ -379,23 +383,23 @@ protected:
       {
         m_traces_final[i].estimateFWHM(false);
       }
-      if (ffm_param.getValue("use_smoothed_intensities").toBool())
+      if (ffp_param.getValue("use_smoothed_intensities").toBool())
       {
         OPENMS_LOG_WARN << "Without EPD, smoothing is not supported. Setting 'use_smoothed_intensities' to false!" << std::endl;
-        ffm_param.setValue("use_smoothed_intensities", "false");
+        ffp_param.setValue("use_smoothed_intensities", "false");
       }
     }
 
     // Configure and run feature finding
-    ffm_param.insert("", common_param);
-    ffm_param.remove("noise_threshold_int");
-    ffm_param.remove("chrom_peak_snr");
-    ffm_param.setValue("report_chromatograms", "false");
+    ffp_param.insert("", common_param);
+    ffp_param.remove("noise_threshold_int");
+    ffp_param.remove("chrom_peak_snr");
+    ffp_param.setValue("report_chromatograms", "false");
 
     std::vector<std::vector<MSChromatogram>> feat_chromatograms;
-    FeatureFindingMetabo ffmet;
-    ffmet.setParameters(ffm_param);
-    ffmet.run(m_traces_final, feat_map, feat_chromatograms);
+    FeatureFindingPeptide ffpep;
+    ffpep.setParameters(ffp_param);
+    ffpep.run(m_traces_final, feat_map, feat_chromatograms);
 
     // Filter features with zero intensity
     auto intensity_zero = [](Feature& f) { return f.getIntensity() == 0; };
@@ -496,11 +500,11 @@ protected:
     const Param ppim_params = getParam_().copy("PeakPickerIM:", true);
     const Param pphr_params = getParam_().copy("PeakPickerHiRes:", true);
 
-    // FeatureFinderMetabo parameters (for MS1 and precursor data)
-    const Param ffm_common_param = getParam_().copy("FeatureFinderMetabo:common:", true);
-    Param ffm_mtd_param = getParam_().copy("FeatureFinderMetabo:mtd:", true);
-    Param ffm_epd_param = getParam_().copy("FeatureFinderMetabo:epd:", true);
-    Param ffm_ffm_param = getParam_().copy("FeatureFinderMetabo:ffm:", true);
+    // FeatureFinderPeptide parameters (for MS1 and precursor data)
+    const Param ffm_common_param = getParam_().copy("FeatureFinderPeptide:common:", true);
+    Param ffm_mtd_param = getParam_().copy("FeatureFinderPeptide:mtd:", true);
+    Param ffm_epd_param = getParam_().copy("FeatureFinderPeptide:epd:", true);
+    Param ffm_ffp_param = getParam_().copy("FeatureFinderPeptide:ffp:", true);
 
     // MassTraceExtractor parameters (for MS1 and MS2 data)
     const Param mte_common_param = getParam_().copy("MassTraceExtractor:common:", true);
@@ -770,13 +774,13 @@ protected:
             }
           }
         }
-        // Run FeatureFinderMetabo on precursor data (results used internally, not saved)
+        // Run FeatureFinderPeptide on precursor data (results used internally, not saved)
         FeatureMap precursor_features;
         std::vector<MassTrace> precursor_traces;
         Param mtd_copy = ffm_mtd_param;
         Param epd_copy = ffm_epd_param;
-        Param ffm_copy = ffm_ffm_param;
-        runFeatureFinderMetabo_(precursor_exp, ffm_common_param, mtd_copy, epd_copy, ffm_copy, precursor_features, precursor_traces);
+        Param ffp_copy = ffm_ffp_param;
+        runFeatureFinderPeptide_(precursor_exp, ffm_common_param, mtd_copy, epd_copy, ffp_copy, precursor_features, precursor_traces);
       }
 
       // Extract MS1 (on-demand from disk - each thread has its own file handle)
@@ -853,16 +857,16 @@ protected:
         }
       }
 
-      // Run FeatureFinderMetabo on MS1 data and cluster with MS2 traces to create pseudo spectra
+      // Run FeatureFinderPeptide on MS1 data and cluster with MS2 traces to create pseudo spectra
       if (!ms1_exp.empty() && !ms2_traces.empty())
       {
         FeatureMap ms1_features;
         std::vector<MassTrace> ms1_traces;
         Param mtd_copy = ffm_mtd_param;
         Param epd_copy = ffm_epd_param;
-        Param ffm_copy = ffm_ffm_param;
+        Param ffp_copy = ffm_ffp_param;
 
-        if (runFeatureFinderMetabo_(ms1_exp, ffm_common_param, mtd_copy, epd_copy, ffm_copy, ms1_features, ms1_traces)
+        if (runFeatureFinderPeptide_(ms1_exp, ffm_common_param, mtd_copy, epd_copy, ffp_copy, ms1_features, ms1_traces)
             && !ms1_features.empty())
         {
           MSExperiment pseudo_spectra;
