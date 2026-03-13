@@ -14,6 +14,8 @@
 #include <OpenMS/KERNEL/StandardTypes.h>
 #include <OpenMS/SYSTEM/File.h>
 
+#include <fstream>
+
 #ifdef _OPENMP
   #include <omp.h>
 #endif
@@ -77,18 +79,24 @@ class SpokeML :
       registerInputFile_("database", "<file>", "", "Protein sequence database.");
       setValidFormats_("database", ListUtils::create<String>("fasta"));
 
-      registerOutputFile_("out", "<file>", "", "Output peptide identifications.");
-      setValidFormats_("out", ListUtils::create<String>("idXML"));
+      registerOutputFile_("out", "<file>", "", "Output TSV with target/decoy sequence pairs per spectrum.");
+      setValidFormats_("out", ListUtils::create<String>("tsv"));
 
       // put search algorithm parameters at Search: subtree of parameters
+      // default top_hits is raised to 10 so both target and decoy candidates are captured per spectrum
       Param search_algo_params_with_subsection;
       search_algo_params_with_subsection.insert("Search:", SimpleSearchEngineAlgorithm().getDefaults());
+      search_algo_params_with_subsection.setValue("Search:report:top_hits", 10);
       registerFullParam_(search_algo_params_with_subsection);
 
       // FDR parameters
       Param fdr_params_with_subsection;
       fdr_params_with_subsection.insert("FDR:", FalseDiscoveryRate().getDefaults());
       registerFullParam_(fdr_params_with_subsection);
+
+      registerDoubleOption_("FDR:PSM_threshold", "<value>", 0.01, "q-value threshold for PSM-level FDR filtering.", false);
+      setMinFloat_("FDR:PSM_threshold", 0.0);
+      setMaxFloat_("FDR:PSM_threshold", 1.0);
     }
 
     ExitCodes main_(int, const char**) override
@@ -96,9 +104,6 @@ class SpokeML :
       String in = getStringOption_("in");
       String database = getStringOption_("database");
       String out = getStringOption_("out");
-
-      ProgressLogger progresslogger;
-      progresslogger.setLogType(log_type_);
 
       vector<ProteinIdentification> protein_ids;
       PeptideIdentificationList peptide_ids;
@@ -115,14 +120,46 @@ class SpokeML :
       fdr.setParameters(getParam_().copy("FDR:", true));
       fdr.applyBasic(protein_ids, peptide_ids);
 
-      // MS path already set in algorithm. Overwrite here so we get something testable
-      if (getFlag_("test"))
+      // Filter PSMs at FDR threshold and retain top target + top decoy hit per passing PSM.
+      // After applyBasic, the score is q-value (lower is better) and hits are sorted accordingly.
+      double fdr_threshold = getDoubleOption_("FDR:PSM_threshold");
+      PeptideIdentificationList filtered_ids;
+      for (auto& pi : peptide_ids)
       {
-        // if test mode set, add file without path so we can compare it
-        protein_ids[0].setPrimaryMSRunPath({"file://" + File::basename(in)});
-      }
+        if (pi.getHits().empty()) continue;
+        if (pi.getHits()[0].getScore() > fdr_threshold) continue;
 
-      FileHandler().storeIdentifications(out, protein_ids, peptide_ids, {FileTypes::IDXML});
+        PeptideHit* top_target = nullptr;
+        PeptideHit* top_decoy = nullptr;
+        for (auto& hit : pi.getHits())
+        {
+          String td = hit.getMetaValue("target_decoy").toString();
+          if (!top_target && (td == "target" || td == "target+decoy"))
+          {
+            top_target = &hit;
+          }
+          else if (!top_decoy && td == "decoy")
+          {
+            top_decoy = &hit;
+          }
+          if (top_target && top_decoy) break;
+        }
+
+        if (!top_target || !top_decoy) continue;
+
+        pi.setHits({*top_target, *top_decoy});
+        filtered_ids.push_back(pi);
+      }
+      peptide_ids = std::move(filtered_ids);
+
+      std::ofstream out_tsv(out);
+      out_tsv << "spectrum_index\ttarget_sequence\tdecoy_sequence\n";
+      for (const auto& pi : peptide_ids)
+      {
+        const String target_seq = pi.getHits()[0].getSequence().toString();
+        const String decoy_seq  = pi.getHits()[1].getSequence().toString();
+        out_tsv << pi.getSpectrumRef() << "\t" << target_seq << "\t" << decoy_seq << "\n";
+      }
 
       return EXECUTION_OK;
     }
