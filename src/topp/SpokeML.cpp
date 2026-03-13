@@ -91,6 +91,7 @@ class SpokeML :
       Param search_algo_params_with_subsection;
       search_algo_params_with_subsection.insert("Search:", SimpleSearchEngineAlgorithm().getDefaults());
       search_algo_params_with_subsection.setValue("Search:report:top_hits", 10);
+      search_algo_params_with_subsection.setValue("Search:decoys", "true");
       registerFullParam_(search_algo_params_with_subsection);
 
       // FDR parameters
