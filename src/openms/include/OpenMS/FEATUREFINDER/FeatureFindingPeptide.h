@@ -203,6 +203,7 @@ private:
 
     bool remove_single_traces_;
     bool overlapping_features_;
+    double hypothesis_score_quantile_;
 
     bool enable_mass_defect_filtering_;
     double mass_defect_offset_;

@@ -62,8 +62,12 @@ namespace OpenMS
     defaults_.setValue("rt_max_lag", 5, "Maximum lag (in number of scans) allowed when computing the normalized cross-correlation between two isotopic elution profiles. A value of 5 permits isotope traces shifted by up to 5 scans relative to the monoisotopic trace. Usually should match local_rt_range");
     defaults_.setMinInt("rt_max_lag", 0);
 
-    defaults_.setValue("overlapping_features", "false", "Allow the bottom 25% scoring hypotheses to reuse mass traces already claimed by higher-scoring features, provided they propose a different charge state.");
+    defaults_.setValue("overlapping_features", "false", "Allow low-confidence hypotheses (below the hypothesis_score_quantile threshold) to reuse mass traces already claimed by higher-scoring features, provided they propose a different charge state.");
     defaults_.setValidStrings("overlapping_features", {"false","true"});
+
+    defaults_.setValue("hypothesis_score_quantile", 0.5, "Quantile of hypothesis scores used as the low-confidence threshold when overlapping_features is enabled. Hypotheses scoring below this quantile may reuse traces from higher-scoring features at a different charge state. Default is the 50th percentile (median).");
+    defaults_.setMinFloat("hypothesis_score_quantile", 0.0);
+    defaults_.setMaxFloat("hypothesis_score_quantile", 1.0);
 
     defaults_.setValue("mass_defect_filtering", "true", "Filter feature hypotheses by peptide mass defect boundaries (adapted from DIA-Umpire). Rejects features whose mass defect falls outside the linear boundary defined for peptides.");
     defaults_.setValidStrings("mass_defect_filtering", {"false","true"});
@@ -109,6 +113,7 @@ namespace OpenMS
     rt_min_pearson_correlation_ = (double)param_.getValue("rt_min_pearson_correlation");
     rt_max_lag_ = (int)param_.getValue("rt_max_lag");
     overlapping_features_ = param_.getValue("overlapping_features").toBool();
+    hypothesis_score_quantile_ = (double)param_.getValue("hypothesis_score_quantile");
     enable_mass_defect_filtering_ = param_.getValue("mass_defect_filtering").toBool();
     mass_defect_offset_ = (double)param_.getValue("mass_defect_offset");
   }
@@ -567,12 +572,14 @@ namespace OpenMS
     // sort feature candidates by their score (descending)
     std::sort(feat_hypos.begin(), feat_hypos.end(), CmpHypothesesByScore());
 
-    // Compute the 25th percentile (Q1) of hypothesis scores.
-    // Since the vector is sorted descending, Q1 sits at the 3/4 mark.
+    // Compute the score threshold at hypothesis_score_quantile_.
+    // The vector is sorted descending, so the quantile index from the high end
+    // maps to position (size * (1 - quantile)).
     // Used only when overlapping_features_ is enabled: hypotheses below this
     // threshold are allowed to reuse traces from already-accepted features if
     // they propose a different charge state for the same monoisotopic trace.
-    const double score_q1 = feat_hypos.empty() ? 0.0 : feat_hypos[feat_hypos.size() * 3 / 4].getScore();
+    const Size quantile_idx = feat_hypos.empty() ? 0 : static_cast<Size>(feat_hypos.size() * (1.0 - hypothesis_score_quantile_));
+    const double score_quantile = feat_hypos.empty() ? 0.0 : feat_hypos[std::min(quantile_idx, feat_hypos.size() - 1)].getScore();
 
 #ifdef FFM_DEBUG
     std::cout << "size of hypotheses: " << feat_hypos.size() << '\n';
@@ -590,47 +597,51 @@ namespace OpenMS
     // already been used by a higher scoring hypothesis.
     // *********************************************************** //
 
-    // ---------- allow trace collision if it uses different isotopes / charge ----
-    std::multimap<String, int> trace_excl_map;
+    // Two exclusion maps implement the overlapping_features_ semantics:
+    //   strict_excl: traces claimed by high-confidence hypotheses (score >= quantile).
+    //                Hard block — no later hypothesis may reuse these traces regardless of charge.
+    //   soft_excl:   traces claimed by low-confidence hypotheses (score < quantile).
+    //                Soft block — a later low-confidence hypothesis may reuse a trace here
+    //                only if it proposes a different charge state.
+    std::set<String> strict_excl;
+    std::multimap<String, int> soft_excl;
 
     for (Size hypo_idx = 0; hypo_idx < feat_hypos.size(); ++hypo_idx)
     {
       const std::vector<String>& labels = feat_hypos[hypo_idx].getLabels();
       int current_charge = feat_hypos[hypo_idx].getCharge();
+      const bool is_low_confidence = overlapping_features_ && feat_hypos[hypo_idx].getScore() < score_quantile;
 
-      // Check all traces for collision (any trace already used at any charge)
-      bool trace_coll = false;
-      for (Size lab_idx = 0; lab_idx < labels.size(); ++lab_idx)
+      // Rule 1: any trace in strict_excl (claimed by a high-confidence hypothesis) → always skip.
+      bool strict_coll = false;
+      for (const auto& lab : labels)
       {
-        auto range = trace_excl_map.equal_range(labels[lab_idx]);
-        if (range.first != range.second)
+        if (strict_excl.count(lab))
         {
-          trace_coll = true;
+          strict_coll = true;
+          break;
+        }
+      }
+      if (strict_coll) continue;
+
+      // Rule 2: check soft_excl (traces from low-confidence hypotheses).
+      bool soft_coll = false;
+      for (const auto& lab : labels)
+      {
+        if (soft_excl.count(lab))
+        {
+          soft_coll = true;
           break;
         }
       }
 
-      if (trace_coll)
+      if (soft_coll)
       {
-        if (!overlapping_features_)
-        {
-          // Strict mode: any collision → skip
-          continue;
-        }
-
-        // Overlapping mode: low-confidence hypotheses (bottom Q1) may reuse
-        // traces if they propose a different charge state.
-        const bool use_overlapping_features = feat_hypos[hypo_idx].getScore() < score_q1;
-        if (!use_overlapping_features)
-        {
-          continue; // high-confidence: still strict
-        }
-
-        // Low-confidence: only skip if any trace is already claimed at the same charge
+        // Low-confidence: allowed only if no soft claim exists at the same charge.
         bool same_charge_coll = false;
-        for (Size lab_idx = 0; lab_idx < labels.size(); ++lab_idx)
+        for (const auto& lab : labels)
         {
-          auto range = trace_excl_map.equal_range(labels[lab_idx]);
+          auto range = soft_excl.equal_range(lab);
           for (auto it = range.first; it != range.second; ++it)
           {
             if (it->second == current_charge)
@@ -644,12 +655,14 @@ namespace OpenMS
         if (same_charge_coll) continue;
       }
 
-      // Accept hypothesis → mark all its traces at the current charge.
-      // In overlapping mode this allows a different charge to reuse these traces;
-      // in strict mode it blocks any charge from reusing them (enforced in the check above).
-      for (const auto& lab : labels)
+      // Accept hypothesis → register traces in the appropriate exclusion map.
+      if (is_low_confidence)
       {
-        trace_excl_map.emplace(lab, current_charge);
+        for (const auto& lab : labels) soft_excl.emplace(lab, current_charge);
+      }
+      else
+      {
+        for (const auto& lab : labels) strict_excl.insert(lab);
       }
 
       // filter out single traces if option is set
