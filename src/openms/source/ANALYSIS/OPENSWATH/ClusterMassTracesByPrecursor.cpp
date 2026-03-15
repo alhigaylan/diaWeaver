@@ -83,6 +83,10 @@ namespace OpenMS
       "Weight for the delta ion mobility component in the combined score used to rank precursor-fragment assignments.");
     defaults_.setMinFloat("delta_im_weight", 0.0);
 
+    defaults_.setValue("max_nr_ions", 500,
+      "Maximum number of fragment ions written per output spectrum. Assignments are ranked and truncated to this limit. Set to 0 to disable the limit and retain all correlated fragments.");
+    defaults_.setMinInt("max_nr_ions", 0);
+
     defaults_.setValue("use_combined_scores", "true",
       "If true, precursor-fragment assignments are ranked by a weighted combination of Pearson correlation, delta RT and delta IM. If false, ranking uses Pearson correlation only.");
     defaults_.setValidStrings("use_combined_scores", {"false", "true"});
@@ -109,6 +113,7 @@ namespace OpenMS
     pearson_weight_ = param_.getValue("pearson_weight");
     delta_rt_weight_ = param_.getValue("delta_rt_weight");
     delta_im_weight_ = param_.getValue("delta_im_weight");
+    max_nr_ions_ = static_cast<Size>(static_cast<int>(param_.getValue("max_nr_ions")));
     use_combined_scores_ = param_.getValue("use_combined_scores").toBool();
     output_fragment_scores_ = param_.getValue("output_fragment_scores").toBool();
   }
@@ -626,8 +631,8 @@ namespace OpenMS
       // Get assignments for this precursor
       auto& assignments = assignment_map[i];
 
-      // If more than 500 assignments to one precursor, sort by combined score and keep top 500
-      if (assignments.size() > 500)
+      // If max_nr_ions_ is set and exceeded, sort and truncate
+      if (max_nr_ions_ > 0 && assignments.size() > max_nr_ions_)
       {
         std::sort(assignments.begin(), assignments.end(),
                   [&](const HullScore& a, const HullScore& b)
@@ -642,7 +647,7 @@ namespace OpenMS
                     };
                     return combined(a) > combined(b);
                   });
-        assignments.resize(500);
+        assignments.resize(max_nr_ions_);
       }
 
       if (output_fragment_scores_)

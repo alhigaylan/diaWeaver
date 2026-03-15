@@ -174,6 +174,9 @@ namespace OpenMS
     /// Weight for delta ion mobility in combined ranking score
     double delta_im_weight_;
 
+    /// Maximum number of fragment ions per output spectrum (0 = no limit)
+    Size max_nr_ions_;
+
     /// Whether to rank assignments by combined score (true) or Pearson only (false)
     bool use_combined_scores_;
 
