@@ -640,13 +640,12 @@ namespace OpenMS
 
       if (output_fragment_scores_)
       {
-        spectrum.getFloatDataArrays().resize(6);
+        spectrum.getFloatDataArrays().resize(5);
         spectrum.getFloatDataArrays()[0].setName("pearson_score");
         spectrum.getFloatDataArrays()[1].setName("xcorr_lag");
         spectrum.getFloatDataArrays()[2].setName("xcorr_lag_intensity");
-        spectrum.getFloatDataArrays()[3].setName("fragment_rt");
-        spectrum.getFloatDataArrays()[4].setName("fragment_ion_mobility");
-        spectrum.getFloatDataArrays()[5].setName("combined_score");
+        spectrum.getFloatDataArrays()[3].setName("delta_rt");
+        spectrum.getFloatDataArrays()[4].setName("delta_im");
       }
 
       // Add fragment ions with their scores, RT, and ion mobility
@@ -659,16 +658,11 @@ namespace OpenMS
 
         if (output_fragment_scores_)
         {
-          double norm_pearson = (pearson_range > 0) ? (hs.pearson - min_pearson_correlation_) / pearson_range : 1.0;
-          double norm_rt = 1.0 - (hs.delta_rt / max_rt_apex_difference_);
-          double norm_im = (has_im_data && im_tolerance_ > 0) ? 1.0 - (hs.delta_im / im_tolerance_) : 1.0;
-          double combined = (pearson_weight_ * norm_pearson) + (delta_rt_weight_ * norm_rt) + (delta_im_weight_ * norm_im);
           spectrum.getFloatDataArrays()[0].push_back(hs.pearson);
           spectrum.getFloatDataArrays()[1].push_back(static_cast<float>(hs.lag));
           spectrum.getFloatDataArrays()[2].push_back(hs.lag_intensity);
-          spectrum.getFloatDataArrays()[3].push_back(fragment_rt[hs.index]);
-          spectrum.getFloatDataArrays()[4].push_back(fragment_im[hs.index]);
-          spectrum.getFloatDataArrays()[5].push_back(combined);
+          spectrum.getFloatDataArrays()[3].push_back(hs.delta_rt);
+          spectrum.getFloatDataArrays()[4].push_back(hs.delta_im);
         }
       }
 

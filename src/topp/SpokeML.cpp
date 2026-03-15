@@ -219,17 +219,14 @@ class SpokeML :
 
           if (type == "target") used_peaks.insert(exp_idx);
 
-          double pearson = 0.0, xcorr = 0.0, frt = 0.0, fim = 0.0;
+          double pearson = 0.0, xcorr = 0.0, delta_rt = 0.0, delta_im = 0.0;
           for (const auto& fda : exp_spec.getFloatDataArrays())
           {
-            if      (fda.getName() == "pearson_score")         pearson = fda[exp_idx];
-            else if (fda.getName() == "xcorr_lag_intensity")   xcorr   = fda[exp_idx];
-            else if (fda.getName() == "fragment_rt")           frt     = fda[exp_idx];
-            else if (fda.getName() == "fragment_ion_mobility") fim     = fda[exp_idx];
+            if      (fda.getName() == "pearson_score")       pearson  = fda[exp_idx];
+            else if (fda.getName() == "xcorr_lag_intensity") xcorr    = fda[exp_idx];
+            else if (fda.getName() == "delta_rt")            delta_rt = fda[exp_idx];
+            else if (fda.getName() == "delta_im")            delta_im = fda[exp_idx];
           }
-
-          const double delta_rt = std::abs(frt - exp_spec.getRT());
-          const double delta_im = std::abs(fim - exp_spec.getDriftTime());
 
           out_tsv << spec_ref          << "\t"
                   << seq.toString()    << "\t"
