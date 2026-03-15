@@ -83,6 +83,10 @@ namespace OpenMS
       "Weight for the delta ion mobility component in the combined score used to rank precursor-fragment assignments.");
     defaults_.setMinFloat("delta_im_weight", 0.0);
 
+    defaults_.setValue("use_combined_scores", "true",
+      "If true, precursor-fragment assignments are ranked by a weighted combination of Pearson correlation, delta RT and delta IM. If false, ranking uses Pearson correlation only.");
+    defaults_.setValidStrings("use_combined_scores", {"false", "true"});
+
     defaults_.setValue("output_fragment_scores", "false",
       "If true, output per-fragment scores (pearson_score, xcorr_lag, xcorr_lag_intensity, fragment_rt, fragment_ion_mobility, combined_score) as FloatDataArrays in the output spectra.");
     defaults_.setValidStrings("output_fragment_scores", {"false", "true"});
@@ -105,6 +109,7 @@ namespace OpenMS
     pearson_weight_ = param_.getValue("pearson_weight");
     delta_rt_weight_ = param_.getValue("delta_rt_weight");
     delta_im_weight_ = param_.getValue("delta_im_weight");
+    use_combined_scores_ = param_.getValue("use_combined_scores").toBool();
     output_fragment_scores_ = param_.getValue("output_fragment_scores").toBool();
   }
 
@@ -471,10 +476,11 @@ namespace OpenMS
       {
         cnt_fragments_filtered++;
 
-        // Sort by combined score (descending)
+        // Sort by combined score or Pearson only (descending)
         std::sort(fragment_assignments[j].begin(), fragment_assignments[j].end(),
                   [&](const HullScore& a, const HullScore& b)
                   {
+                    if (!use_combined_scores_) return a.pearson > b.pearson;
                     auto combined = [&](const HullScore& hs)
                     {
                       double norm_pearson = (hs.pearson - min_pearson_correlation_) / pearson_range;
@@ -626,6 +632,7 @@ namespace OpenMS
         std::sort(assignments.begin(), assignments.end(),
                   [&](const HullScore& a, const HullScore& b)
                   {
+                    if (!use_combined_scores_) return a.pearson > b.pearson;
                     auto combined = [&](const HullScore& hs)
                     {
                       double norm_pearson = (hs.pearson - min_pearson_correlation_) / pearson_range;

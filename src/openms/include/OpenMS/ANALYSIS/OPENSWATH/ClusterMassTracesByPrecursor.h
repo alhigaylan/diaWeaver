@@ -174,6 +174,9 @@ namespace OpenMS
     /// Weight for delta ion mobility in combined ranking score
     double delta_im_weight_;
 
+    /// Whether to rank assignments by combined score (true) or Pearson only (false)
+    bool use_combined_scores_;
+
     /// Whether to output per-fragment scores as FloatDataArrays
     bool output_fragment_scores_;
   };
