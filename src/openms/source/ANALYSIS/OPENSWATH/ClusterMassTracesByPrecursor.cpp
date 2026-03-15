@@ -83,6 +83,10 @@ namespace OpenMS
       "Weight for the delta ion mobility component in the combined score used to rank precursor-fragment assignments.");
     defaults_.setMinFloat("delta_im_weight", 0.0);
 
+    defaults_.setValue("output_fragment_scores", "false",
+      "If true, output per-fragment scores (pearson_score, xcorr_lag, xcorr_lag_intensity, fragment_rt, fragment_ion_mobility, combined_score) as FloatDataArrays in the output spectra.");
+    defaults_.setValidStrings("output_fragment_scores", {"false", "true"});
+
     defaultsToParam_();
   }
 
@@ -101,6 +105,7 @@ namespace OpenMS
     pearson_weight_ = param_.getValue("pearson_weight");
     delta_rt_weight_ = param_.getValue("delta_rt_weight");
     delta_im_weight_ = param_.getValue("delta_im_weight");
+    output_fragment_scores_ = param_.getValue("output_fragment_scores").toBool();
   }
 
   void ClusterMassTracesByPrecursor::run(
@@ -633,14 +638,16 @@ namespace OpenMS
         assignments.resize(500);
       }
 
-      // Prepare FloatDataArrays for correlation scores, fragment RT and ion mobility
-      spectrum.getFloatDataArrays().resize(6);
-      spectrum.getFloatDataArrays()[0].setName("pearson_score");
-      spectrum.getFloatDataArrays()[1].setName("xcorr_lag");
-      spectrum.getFloatDataArrays()[2].setName("xcorr_lag_intensity");
-      spectrum.getFloatDataArrays()[3].setName("fragment_rt");
-      spectrum.getFloatDataArrays()[4].setName("fragment_ion_mobility");
-      spectrum.getFloatDataArrays()[5].setName("combined_score");
+      if (output_fragment_scores_)
+      {
+        spectrum.getFloatDataArrays().resize(6);
+        spectrum.getFloatDataArrays()[0].setName("pearson_score");
+        spectrum.getFloatDataArrays()[1].setName("xcorr_lag");
+        spectrum.getFloatDataArrays()[2].setName("xcorr_lag_intensity");
+        spectrum.getFloatDataArrays()[3].setName("fragment_rt");
+        spectrum.getFloatDataArrays()[4].setName("fragment_ion_mobility");
+        spectrum.getFloatDataArrays()[5].setName("combined_score");
+      }
 
       // Add fragment ions with their scores, RT, and ion mobility
       for (const auto& hs : assignments)
@@ -649,17 +656,20 @@ namespace OpenMS
         peak.setMZ(fragment_mz[hs.index]);
         peak.setIntensity(fragment_intensity[hs.index]);
         spectrum.push_back(peak);
-        spectrum.getFloatDataArrays()[0].push_back(hs.pearson);
-        spectrum.getFloatDataArrays()[1].push_back(static_cast<float>(hs.lag));
-        spectrum.getFloatDataArrays()[2].push_back(hs.lag_intensity);
-        spectrum.getFloatDataArrays()[3].push_back(fragment_rt[hs.index]);
-        spectrum.getFloatDataArrays()[4].push_back(fragment_im[hs.index]);
 
-        double norm_pearson = (pearson_range > 0) ? (hs.pearson - min_pearson_correlation_) / pearson_range : 1.0;
-        double norm_rt = 1.0 - (hs.delta_rt / max_rt_apex_difference_);
-        double norm_im = (has_im_data && im_tolerance_ > 0) ? 1.0 - (hs.delta_im / im_tolerance_) : 1.0;
-        double combined = (pearson_weight_ * norm_pearson) + (delta_rt_weight_ * norm_rt) + (delta_im_weight_ * norm_im);
-        spectrum.getFloatDataArrays()[5].push_back(combined);
+        if (output_fragment_scores_)
+        {
+          double norm_pearson = (pearson_range > 0) ? (hs.pearson - min_pearson_correlation_) / pearson_range : 1.0;
+          double norm_rt = 1.0 - (hs.delta_rt / max_rt_apex_difference_);
+          double norm_im = (has_im_data && im_tolerance_ > 0) ? 1.0 - (hs.delta_im / im_tolerance_) : 1.0;
+          double combined = (pearson_weight_ * norm_pearson) + (delta_rt_weight_ * norm_rt) + (delta_im_weight_ * norm_im);
+          spectrum.getFloatDataArrays()[0].push_back(hs.pearson);
+          spectrum.getFloatDataArrays()[1].push_back(static_cast<float>(hs.lag));
+          spectrum.getFloatDataArrays()[2].push_back(hs.lag_intensity);
+          spectrum.getFloatDataArrays()[3].push_back(fragment_rt[hs.index]);
+          spectrum.getFloatDataArrays()[4].push_back(fragment_im[hs.index]);
+          spectrum.getFloatDataArrays()[5].push_back(combined);
+        }
       }
 
       if (spectrum.size() >= min_nr_ions_)

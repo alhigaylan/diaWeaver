@@ -173,6 +173,9 @@ namespace OpenMS
 
     /// Weight for delta ion mobility in combined ranking score
     double delta_im_weight_;
+
+    /// Whether to output per-fragment scores as FloatDataArrays
+    bool output_fragment_scores_;
   };
 
 } // namespace OpenMS
