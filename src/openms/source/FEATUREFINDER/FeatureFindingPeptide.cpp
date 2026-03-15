@@ -720,11 +720,6 @@ namespace OpenMS
       }
 
 
-      for (Size lab_idx = 0; lab_idx < labels.size(); ++lab_idx)
-      {
-        trace_excl_map.emplace(labels[lab_idx], current_charge);
-      }
-
     }
     output_featmap.setUniqueId(UniqueIdGenerator::getUniqueId());
     output_featmap.sortByMZ();
