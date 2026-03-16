@@ -598,9 +598,9 @@ namespace OpenMS
     // *********************************************************** //
 
     // Two exclusion maps implement the overlapping_features_ semantics:
-    //   strict_excl: traces claimed by high-confidence hypotheses (score >= quantile).
+    //   strict_excl: traces claimed by high-confidence hypotheses (score >= quantile AND >= 3 isotopes).
     //                Hard block — no later hypothesis may reuse these traces regardless of charge.
-    //   soft_excl:   traces claimed by low-confidence hypotheses (score < quantile).
+    //   soft_excl:   traces claimed by low-confidence hypotheses (score < quantile OR < 3 isotopes).
     //                Soft block — a later low-confidence hypothesis may reuse a trace here
     //                only if it proposes a different charge state.
     std::set<String> strict_excl;
@@ -610,7 +610,8 @@ namespace OpenMS
     {
       const std::vector<String>& labels = feat_hypos[hypo_idx].getLabels();
       int current_charge = feat_hypos[hypo_idx].getCharge();
-      const bool is_low_confidence = overlapping_features_ && feat_hypos[hypo_idx].getScore() < score_quantile;
+      const bool is_low_confidence = overlapping_features_ &&
+        (feat_hypos[hypo_idx].getScore() < score_quantile || feat_hypos[hypo_idx].getSize() < 3);
 
       // Rule 1: any trace in strict_excl (claimed by a high-confidence hypothesis) → always skip.
       bool strict_coll = false;
