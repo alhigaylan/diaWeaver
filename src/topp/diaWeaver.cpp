@@ -774,13 +774,34 @@ protected:
             }
           }
         }
-        // Run FeatureFinderPeptide on precursor data (results used internally, not saved)
+        // Run FeatureFinderPeptide on precursor data, then cluster with MS2 traces
         FeatureMap precursor_features;
         std::vector<MassTrace> precursor_traces;
         Param mtd_copy = ffm_mtd_param;
         Param epd_copy = ffm_epd_param;
         Param ffp_copy = ffm_ffp_param;
-        runFeatureFinderPeptide_(precursor_exp, ffm_common_param, mtd_copy, epd_copy, ffp_copy, precursor_features, precursor_traces);
+
+        if (runFeatureFinderPeptide_(precursor_exp, ffm_common_param, mtd_copy, epd_copy, ffp_copy, precursor_features, precursor_traces)
+            && !precursor_features.empty() && !ms2_traces.empty())
+        {
+          MSExperiment pseudo_spectra;
+
+          ClusterMassTracesByPrecursor clusterFragments;
+          clusterFragments.setParameters(cluster_param);
+          clusterFragments.run(precursor_features, precursor_traces, ms2_traces, w.lower_mz, w.upper_mz, pseudo_spectra);
+
+          if (!pseudo_spectra.empty())
+          {
+#pragma omp critical (write_spectra)
+            {
+              for (auto& spectrum : pseudo_spectra)
+              {
+                spectrum.setNativeID("scan=" + String(++spectrum_index));
+                consumer.consumeSpectrum(spectrum);
+              }
+            }
+          }
+        }
       }
 
       // Extract MS1 (on-demand from disk - each thread has its own file handle)
