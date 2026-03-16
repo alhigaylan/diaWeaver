@@ -517,7 +517,7 @@ namespace OpenMS
       std::ofstream tsv(tsv_output_path_);
 
       // Header: fragment identity columns + one column per rank slot
-      tsv << "fragment_label\tfragment_mz";
+      tsv << "fragment_label";
       for (Size k = 1; k <= nr_precursors_per_fragment_; ++k)
       {
         tsv << "\tprecursor-rank-" << k;
@@ -557,12 +557,18 @@ namespace OpenMS
           tsv << "\t";
           if (k < entries.size())
           {
-            int pi = entries[k].index;
+            const HullScore& hs = entries[k];
+            int pi = hs.index;
+            double norm_pearson = (hs.pearson - min_pearson_correlation_) / pearson_range;
+            double norm_rt      = 1.0 - (hs.delta_rt / max_rt_apex_difference_);
+            double norm_im      = (has_im_data && im_tolerance_ > 0) ? 1.0 - (hs.delta_im / im_tolerance_) : 1.0;
+            double combined     = (pearson_weight_ * norm_pearson) + (delta_rt_weight_ * norm_rt) + (delta_im_weight_ * norm_im);
             tsv << pi << ";"
                 << precursor_mz[pi] << ";"
                 << precursor_charge[pi] << ";"
                 << precursor_im[pi] << ";"
-                << precursor_rt[pi];
+                << precursor_rt[pi] << ";"
+                << combined;
           }
           else
           {
