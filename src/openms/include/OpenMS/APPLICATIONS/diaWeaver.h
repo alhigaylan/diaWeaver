@@ -69,6 +69,28 @@ namespace OpenMS
     using WindowMap = std::map<DIAWindow, std::vector<Size>>;
     using WindowedExperiments = std::map<DIAWindow, MSExperiment>;
 
+    /// Build a TSV filename for a given DIA window, e.g. "mz500-525_im068-079.tsv".
+    /// An optional tag (e.g. "ms1", "precursor") is appended before the extension
+    /// to distinguish files when clustering is run more than once per window.
+    static String windowTSVFilename(const DIAWindow& w, const String& tag = "")
+    {
+      String fname = "mz" + String(static_cast<int>(std::round(w.lower_mz)))
+                   + "-" + String(static_cast<int>(std::round(w.upper_mz)));
+      if (w.hasIonMobility())
+      {
+        // Encode IM as zero-padded 3-digit integer (e.g. 0.68 -> "068")
+        auto fmt = [](double v) -> String {
+          int vi = static_cast<int>(std::round(v * 100));
+          String s = String(vi);
+          while (s.size() < 3) s = "0" + s;
+          return s;
+        };
+        fname += "_im" + fmt(w.lower_im) + "-" + fmt(w.upper_im);
+      }
+      if (!tag.empty()) fname += "_" + tag;
+      return fname + ".tsv";
+    }
+
     /**
       @brief Information about ion mobility data availability in the dataset
 

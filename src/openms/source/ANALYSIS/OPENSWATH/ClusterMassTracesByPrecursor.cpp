@@ -12,6 +12,7 @@
 #include <OpenMS/IONMOBILITY/IMTypes.h>
 
 #include <algorithm>
+#include <fstream>
 #include <map>
 #include <set>
 #include <cmath>
@@ -506,6 +507,70 @@ namespace OpenMS
       OPENMS_LOG_INFO << "Filtered " << cnt_fragments_filtered << " fragments that were assigned to more than "
                       << nr_precursors_per_fragment_ << " precursors (kept top " << nr_precursors_per_fragment_
                       << " by combined score)" << std::endl;
+    }
+
+    // -----------------------------------
+    // Write fragment-precursor rank TSV
+    // -----------------------------------
+    if (!tsv_output_path_.empty())
+    {
+      std::ofstream tsv(tsv_output_path_);
+
+      // Header: fragment identity columns + one column per rank slot
+      tsv << "fragment_label\tfragment_mz";
+      for (Size k = 1; k <= nr_precursors_per_fragment_; ++k)
+      {
+        tsv << "\tprecursor-rank-" << k;
+      }
+      tsv << "\n";
+
+      for (Size j = 0; j < fragment_assignments.size(); ++j)
+      {
+        if (fragment_assignments[j].empty()) continue;
+
+        // Entries with size > nr_precursors_per_fragment_ were already sorted above.
+        // Sort the rest (size <= N) so rank-1 is always the best score.
+        auto& entries = fragment_assignments[j];
+        if (entries.size() <= nr_precursors_per_fragment_)
+        {
+          std::sort(entries.begin(), entries.end(),
+                    [&](const HullScore& a, const HullScore& b)
+                    {
+                      if (!use_combined_scores_) return a.pearson > b.pearson;
+                      auto combined = [&](const HullScore& hs)
+                      {
+                        double norm_pearson = (hs.pearson - min_pearson_correlation_) / pearson_range;
+                        double norm_rt = 1.0 - (hs.delta_rt / max_rt_apex_difference_);
+                        double norm_im = (has_im_data && im_tolerance_ > 0) ? 1.0 - (hs.delta_im / im_tolerance_) : 1.0;
+                        return (pearson_weight_ * norm_pearson) + (delta_rt_weight_ * norm_rt) + (delta_im_weight_ * norm_im);
+                      };
+                      return combined(a) > combined(b);
+                    });
+        }
+
+        // Row: {fragment_idx;fragment_mz;fragment_rt;fragment_im}
+        tsv << j << ";" << fragment_mz[j] << ";" << fragment_rt[j] << ";" << fragment_im[j];
+
+        // One column per rank slot up to nr_precursors_per_fragment_
+        for (Size k = 0; k < nr_precursors_per_fragment_; ++k)
+        {
+          tsv << "\t";
+          if (k < entries.size())
+          {
+            int pi = entries[k].index;
+            tsv << pi << ";"
+                << precursor_mz[pi] << ";"
+                << precursor_charge[pi] << ";"
+                << precursor_im[pi] << ";"
+                << precursor_rt[pi];
+          }
+          else
+          {
+            tsv << "NA";
+          }
+        }
+        tsv << "\n";
+      }
     }
 
     // -----------------------------------

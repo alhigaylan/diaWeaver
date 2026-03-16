@@ -874,6 +874,7 @@ protected:
           // cluster MS2 fragments by precursors
           ClusterMassTracesByPrecursor clusterFragments;
           clusterFragments.setParameters(cluster_param);
+          clusterFragments.setTSVOutputPath(out + "/" + DiaWeaver::windowTSVFilename(w));
           clusterFragments.run(ms1_features, ms1_traces, ms2_traces, w.lower_mz, w.upper_mz, pseudo_spectra);
 
           if (!pseudo_spectra.empty())

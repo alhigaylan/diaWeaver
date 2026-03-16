@@ -182,6 +182,14 @@ namespace OpenMS
 
     /// Whether to output per-fragment scores as FloatDataArrays
     bool output_fragment_scores_;
+
+    /// Path for the per-window fragment-precursor rank TSV (empty = disabled)
+    String tsv_output_path_;
+
+  public:
+    /// Set the output path for the fragment-precursor rank TSV file.
+    /// Call before run(). An empty string disables TSV writing.
+    void setTSVOutputPath(const String& path) { tsv_output_path_ = path; }
   };
 
 } // namespace OpenMS
