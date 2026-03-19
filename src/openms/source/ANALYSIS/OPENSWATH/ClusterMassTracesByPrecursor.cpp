@@ -421,7 +421,6 @@ namespace OpenMS
         continue;
       }
 
-      assignment_map[i].clear();
       double current_rt = precursor_rt[i];
 
       for (Size j = 0; j < fragment_profiles.size(); ++j)
@@ -460,7 +459,6 @@ namespace OpenMS
           double delta_rt = std::fabs(precursor_rt[i] - fragment_rt[j]);
           double delta_im = has_im_data ? std::fabs(precursor_im[i] - fragment_im[j]) : 0.0;
           fragment_assignments[j].push_back({static_cast<int>(i), pearson_score, lag, lag_intensity, delta_rt, delta_im});
-          assignment_map[i].push_back({static_cast<int>(j), pearson_score, lag, lag_intensity, delta_rt, delta_im});
         }
       }
     }
