@@ -16,6 +16,7 @@
 
 #include <OpenMS/CONCEPT/Constants.h>
 #include <OpenMS/CONCEPT/Exception.h>
+#include <OpenMS/CONCEPT/LogStream.h>
 
 namespace OpenMS
 {
@@ -23,7 +24,11 @@ namespace OpenMS
             DefaultParamHandler("MassTraceDetection"), ProgressLogger()
     {
       defaults_.setValue("mass_error_ppm", 20.0, "Allowed mass deviation (in ppm).");
-      defaults_.setValue("noise_threshold_int", 10.0, "Intensity threshold below which peaks are removed as noise.");
+      defaults_.setValue("noise_threshold_int", 10.0, "Intensity threshold below which peaks are removed as noise. Ignored if auto_noise_threshold is true.");
+      defaults_.setValue("auto_noise_threshold", "true", "If true, automatically estimates the noise threshold from the input map using random scan sampling. Overrides noise_threshold_int.");
+      defaults_.setValidStrings("auto_noise_threshold", {"true","false"});
+      defaults_.setValue("noise_estimation_n_scans", 50, "Number of scans randomly sampled to estimate the noise level when auto_noise_threshold is true.", {"advanced"});
+      defaults_.setValue("noise_estimation_percentile", 20.0, "Intensity percentile used to define the noise level from sampled scans when auto_noise_threshold is true.", {"advanced"});
       defaults_.setValue("chrom_peak_snr", 3.0, "Minimum intensity above noise_threshold_int (signal-to-noise) a peak should have to be considered an apex.");
       defaults_.setValue("ion_mobility_tolerance", 0.01, "Allowed ion mobility deviation (in 1/k0).");
 
@@ -194,6 +199,13 @@ namespace OpenMS
     {
       // make sure the output vector is empty
       found_masstraces.clear();
+
+      // Optionally auto-estimate the noise threshold from the input map
+      if (auto_noise_threshold_)
+      {
+        noise_threshold_int_ = estimateNoiseFromRandomScans(input_exp, 1, noise_estimation_n_scans_, noise_estimation_percentile_);
+        OPENMS_LOG_INFO << "MassTraceDetection: auto noise threshold estimated as " << noise_threshold_int_ << std::endl;
+      }
 
       // gather all peaks that are potential chromatographic peak apices
       //   - use work_exp for actual work (remove peaks below noise threshold)
@@ -686,6 +698,9 @@ namespace OpenMS
     {
       mass_error_ppm_ = (double)param_.getValue("mass_error_ppm");
       noise_threshold_int_ = (double)param_.getValue("noise_threshold_int");
+      auto_noise_threshold_ = param_.getValue("auto_noise_threshold").toBool();
+      noise_estimation_n_scans_ = (UInt)param_.getValue("noise_estimation_n_scans");
+      noise_estimation_percentile_ = (double)param_.getValue("noise_estimation_percentile");
       chrom_peak_snr_ = (double)param_.getValue("chrom_peak_snr");
       ion_mobility_tolerance_ = (double)param_.getValue("ion_mobility_tolerance");
       quant_method_ = MassTrace::getQuantMethod((String)param_.getValue("quant_method").toString());

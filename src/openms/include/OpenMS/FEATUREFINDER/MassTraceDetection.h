@@ -13,6 +13,7 @@
 #include <OpenMS/KERNEL/MassTrace.h>
 #include <OpenMS/KERNEL/MSExperiment.h>
 #include <OpenMS/KERNEL/StandardTypes.h>
+#include <OpenMS/PROCESSING/NOISEESTIMATION/SignalToNoiseEstimator.h>
 
 #include <boost/dynamic_bitset.hpp>
 
@@ -187,6 +188,9 @@ namespace OpenMS
         double mass_error_ppm_;
         double mass_error_da_;
         double noise_threshold_int_;
+        bool auto_noise_threshold_;
+        UInt noise_estimation_n_scans_;
+        double noise_estimation_percentile_;
         double chrom_peak_snr_;
         double ion_mobility_tolerance_;
         MassTrace::MT_QUANTMETHOD quant_method_;
