@@ -203,7 +203,7 @@ protected:
       p_com.setValue("auto_noise_threshold", "true", "If true, automatically estimates the noise threshold from the input map using random scan sampling. Overrides noise_threshold_int.");
       p_com.setValidStrings("auto_noise_threshold", {"true", "false"});
       p_com.setValue("noise_estimation_n_scans", 50, "Number of scans randomly sampled to estimate the noise level when auto_noise_threshold is true.");
-      p_com.setValue("noise_estimation_percentile", 20.0, "Intensity percentile used to define the noise level from sampled scans when auto_noise_threshold is true.");
+      p_com.setValue("noise_estimation_percentile", 80.0, "Intensity percentile used to define the noise level from sampled scans when auto_noise_threshold is true.");
       combined.insert("common:", p_com);
       combined.setSectionDescription("common", "Common parameters for all other subsections");
 
@@ -272,7 +272,7 @@ protected:
       p_com.setValue("auto_noise_threshold", "true", "If true, automatically estimates the noise threshold from the input map using random scan sampling. Overrides noise_threshold_int.");
       p_com.setValidStrings("auto_noise_threshold", {"true", "false"});
       p_com.setValue("noise_estimation_n_scans", 50, "Number of scans randomly sampled to estimate the noise level when auto_noise_threshold is true.");
-      p_com.setValue("noise_estimation_percentile", 20.0, "Intensity percentile used to define the noise level from sampled scans when auto_noise_threshold is true.");
+      p_com.setValue("noise_estimation_percentile", 80.0, "Intensity percentile used to define the noise level from sampled scans when auto_noise_threshold is true.");
 
       combined.insert("common:", p_com);
       combined.setSectionDescription("common", "Common parameters for all other subsections");

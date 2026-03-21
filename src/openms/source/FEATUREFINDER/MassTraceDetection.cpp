@@ -18,6 +18,9 @@
 #include <OpenMS/CONCEPT/Exception.h>
 #include <OpenMS/CONCEPT/LogStream.h>
 
+#include <ctime>
+#include <random>
+
 namespace OpenMS
 {
     MassTraceDetection::MassTraceDetection() :
@@ -28,7 +31,7 @@ namespace OpenMS
       defaults_.setValue("auto_noise_threshold", "true", "If true, automatically estimates the noise threshold from the input map using random scan sampling. Overrides noise_threshold_int.");
       defaults_.setValidStrings("auto_noise_threshold", {"true","false"});
       defaults_.setValue("noise_estimation_n_scans", 50, "Number of scans randomly sampled to estimate the noise level when auto_noise_threshold is true.", {"advanced"});
-      defaults_.setValue("noise_estimation_percentile", 20.0, "Intensity percentile used to define the noise level from sampled scans when auto_noise_threshold is true.", {"advanced"});
+      defaults_.setValue("noise_estimation_percentile", 80.0, "Intensity percentile used to define the noise level from sampled scans when auto_noise_threshold is true.", {"advanced"});
       defaults_.setValue("chrom_peak_snr", 3.0, "Minimum intensity above noise_threshold_int (signal-to-noise) a peak should have to be considered an apex.");
       defaults_.setValue("ion_mobility_tolerance", 0.01, "Allowed ion mobility deviation (in 1/k0).");
 
@@ -203,7 +206,7 @@ namespace OpenMS
       // Optionally auto-estimate the noise threshold from the input map
       if (auto_noise_threshold_)
       {
-        noise_threshold_int_ = estimateNoiseFromRandomScans(input_exp, 1, noise_estimation_n_scans_, noise_estimation_percentile_);
+        noise_threshold_int_ = estimateNoiseLevel_(input_exp, noise_estimation_n_scans_, noise_estimation_percentile_);
         OPENMS_LOG_INFO << "MassTraceDetection: auto noise threshold estimated as " << noise_threshold_int_ << std::endl;
       }
 
@@ -693,6 +696,44 @@ namespace OpenMS
       this->endProgress();
     }
 
+
+    double MassTraceDetection::estimateNoiseLevel_(const PeakMap& exp, UInt n_scans, double percentile, Size min_peaks)
+    {
+      std::vector<Size> spec_indices;
+      for (Size i = 0; i < exp.size(); ++i)
+      {
+        if (exp[i].getMSLevel() == 1 && exp[i].size() >= min_peaks)
+        {
+          spec_indices.push_back(i);
+        }
+      }
+
+      if (spec_indices.empty())
+      {
+        OPENMS_LOG_WARN << "MassTraceDetection: no spectra with >= " << min_peaks
+                        << " peaks found for noise estimation. Falling back to noise_threshold_int." << std::endl;
+        return 0.0;
+      }
+
+      std::default_random_engine generator(time(nullptr));
+      std::uniform_real_distribution<double> distribution(0.0, 1.0);
+
+      double noise = 0.0;
+      std::vector<float> tmp;
+      for (UInt count = 0; count < n_scans; ++count)
+      {
+        UInt scan = (UInt)(distribution(generator) * (spec_indices.size() - 1));
+        tmp.clear();
+        for (const auto& peak : exp[spec_indices[scan]])
+        {
+          tmp.push_back(peak.getIntensity());
+        }
+        Size idx = tmp.size() * percentile / 100.0;
+        std::nth_element(tmp.begin(), tmp.begin() + idx, tmp.end());
+        noise += tmp[idx];
+      }
+      return noise / n_scans;
+    }
 
     void MassTraceDetection::updateMembers_()
     {

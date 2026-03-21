@@ -13,7 +13,6 @@
 #include <OpenMS/KERNEL/MassTrace.h>
 #include <OpenMS/KERNEL/MSExperiment.h>
 #include <OpenMS/KERNEL/StandardTypes.h>
-#include <OpenMS/PROCESSING/NOISEESTIMATION/SignalToNoiseEstimator.h>
 
 #include <boost/dynamic_bitset.hpp>
 
@@ -124,6 +123,10 @@ namespace OpenMS
           
           TraceExtensionState() : scan_counter(0), hitting_peak_count(0), consecutive_missed(0), active(true) {}
         };
+
+        /// Estimates the noise level by sampling random scans from the experiment.
+        /// Only spectra with at least min_peaks peaks are considered.
+        static double estimateNoiseLevel_(const PeakMap& exp, UInt n_scans, double percentile, Size min_peaks = 100);
 
         /// The internal run method
         void run_(const std::vector<Apex>& chrom_apices,
