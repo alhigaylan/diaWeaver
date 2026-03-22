@@ -206,8 +206,16 @@ namespace OpenMS
       // Optionally auto-estimate the noise threshold from the input map
       if (auto_noise_threshold_)
       {
-        noise_threshold_int_ = estimateNoiseLevel_(input_exp, noise_estimation_n_scans_, noise_estimation_percentile_);
-        OPENMS_LOG_INFO << "MassTraceDetection: auto noise threshold estimated as " << noise_threshold_int_ << std::endl;
+        double estimated = estimateNoiseLevel_(input_exp, noise_estimation_n_scans_, noise_estimation_percentile_);
+        if (estimated > 0.0)
+        {
+          noise_threshold_int_ = estimated;
+          OPENMS_LOG_INFO << "MassTraceDetection: auto noise threshold estimated as " << noise_threshold_int_ << std::endl;
+        }
+        else
+        {
+          OPENMS_LOG_WARN << "MassTraceDetection: noise estimation failed, using noise_threshold_int = " << noise_threshold_int_ << std::endl;
+        }
       }
 
       // gather all peaks that are potential chromatographic peak apices
