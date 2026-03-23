@@ -320,12 +320,9 @@ namespace OpenMS
           if (it != trace_lookup.end())
           {
             const MassTrace& mono_trace = *(it->second);
-            const std::vector<double>& smoothed = mono_trace.getSmoothedIntensities();
-            const bool has_smoothed = (smoothed.size() == mono_trace.getSize());
-            for (Size k = 0; k < mono_trace.getSize(); ++k)
+            for (const Peak2D& peak : mono_trace)
             {
-              double intensity = has_smoothed ? smoothed[k] : mono_trace[k].getIntensity();
-              points.push_back(std::make_pair(mono_trace[k].getRT(), intensity));
+              points.push_back(std::make_pair(peak.getRT(), peak.getIntensity()));
             }
           }
         }
@@ -352,12 +349,9 @@ namespace OpenMS
     for (const auto& trace : ms2_traces)
     {
       MasstraceCorrelator::MasstracePointsType points;
-      const std::vector<double>& smoothed = trace.getSmoothedIntensities();
-      const bool has_smoothed = (smoothed.size() == trace.getSize());
-      for (Size k = 0; k < trace.getSize(); ++k)
+      for (const Peak2D& peak : trace)
       {
-        double intensity = has_smoothed ? smoothed[k] : trace[k].getIntensity();
-        points.push_back(std::make_pair(trace[k].getRT(), intensity));
+        points.push_back(std::make_pair(peak.getRT(), peak.getIntensity()));
       }
       fragment_profiles.push_back(points);
 
