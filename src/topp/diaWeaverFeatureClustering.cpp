@@ -8,8 +8,9 @@
 
 #include <OpenMS/ANALYSIS/MAPMATCHING/DiaWeaverFeatureClustering.h>
 #include <OpenMS/ANALYSIS/MAPMATCHING/MapAlignmentTransformer.h>
-#include <OpenMS/APPLICATIONS/MapAlignerBase.h>
-#include <OpenMS/FORMAT/FeatureXMLFile.h>
+#include <OpenMS/APPLICATIONS/TOPPBase.h>
+#include <OpenMS/FORMAT/FileHandler.h>
+#include <OpenMS/FORMAT/FileTypes.h>
 
 #ifdef _OPENMP
 #include <omp.h>
@@ -25,7 +26,7 @@ using namespace std;
 /**
 @page TOPP_diaWeaverFeatureClustering diaWeaverFeatureClustering
 
-@brief Aligns diaWeaver FeatureMaps across experiments using pose clustering.
+@brief Aligns diaWeaver pseudo-spectrum mzML files across experiments using pose clustering.
 
 <CENTER>
   <table>
@@ -41,15 +42,18 @@ using namespace std;
   </table>
 </CENTER>
 
-Takes diaWeaver pseudo MS2 spectra represented as featureXML files (one per
-experiment) and aligns their retention time scales using pose clustering. The
-algorithm selects a reference map (largest by default), then computes an affine
-RT transformation for every other map to align it to the reference.
+Takes diaWeaver pseudo-spectrum mzML files (one per experiment) and aligns their
+retention time scales using pose clustering.
 
-Each feature's (RT, m/z, charge) corresponds directly to a diaWeaver pseudo
-spectrum precursor. After alignment, features with matching m/z and charge
-across experiments will have comparable RTs, enabling cross-experiment grouping
-with FeatureLinkerUnlabeledQT.
+Each MS2 spectrum is converted to a feature using its precursor RT, m/z, charge,
+and intensity. If the input contains ion mobility data, the precursor drift time
+is stored as feature metadata ("ion_mobility").
+
+A reference map is selected automatically (largest by MS2 count) or can be
+specified explicitly. Every other map is then aligned to the reference independently.
+
+Output is one featureXML per input file (aligned precursor features) and
+optionally one trafoXML per file.
 
 <B>The command line parameters of this tool are:</B> @n
 @verbinclude TOPP_diaWeaverFeatureClustering.cli
@@ -60,19 +64,43 @@ with FeatureLinkerUnlabeledQT.
 /// @cond TOPPCLASSES
 
 class TOPPdiaWeaverFeatureClustering :
-  public TOPPMapAlignerBase
+  public TOPPBase
 {
 
 public:
   TOPPdiaWeaverFeatureClustering() :
-    TOPPMapAlignerBase("diaWeaverFeatureClustering",
-      "Aligns diaWeaver FeatureMaps across experiments using pose clustering.")
+    TOPPBase("diaWeaverFeatureClustering",
+      "Aligns diaWeaver pseudo-spectrum mzML files across experiments using pose clustering.",
+      false)
   {}
 
 protected:
+
   void registerOptionsAndFlags_() override
   {
-    TOPPMapAlignerBase::registerOptionsAndFlagsMapAligners_("featureXML", REF_RESTRICTED);
+    registerInputFileList_("in", "<files>", StringList(),
+      "Input diaWeaver pseudo-spectrum mzML files (one per experiment).", true);
+    setValidFormats_("in", {"mzML"});
+
+    registerOutputFileList_("out", "<files>", StringList(),
+      "Output featureXML files with aligned precursor features (one per input). "
+      "Must match the number of input files if provided.", false);
+    setValidFormats_("out", {"featureXML"});
+
+    registerOutputFileList_("trafo_out", "<files>", StringList(),
+      "Output trafoXML files describing the RT transformations (one per input). "
+      "Must match the number of input files if provided.", false);
+    setValidFormats_("trafo_out", {"trafoXML"});
+
+    registerIntOption_("reference:index", "<index>", 0,
+      "1-based index of the reference file from the 'in' list. "
+      "0 (default) selects the file with the most MS2 spectra automatically.", false);
+    setMinInt_("reference:index", 0);
+
+    registerInputFile_("reference:file", "<file>", "",
+      "External reference mzML file. Overrides reference:index if provided.", false);
+    setValidFormats_("reference:file", {"mzML"});
+
     registerSubsection_("algorithm", "Algorithm parameters section");
   }
 
@@ -88,91 +116,97 @@ protected:
 
   ExitCodes main_(int, const char**) override
   {
-    ExitCodes ret = TOPPMapAlignerBase::checkParameters_();
-    if (ret != EXECUTION_OK) return ret;
+    StringList in_files   = getStringList_("in");
+    StringList out_files  = getStringList_("out");
+    StringList out_trafos = getStringList_("trafo_out");
+
+    if (in_files.empty())
+    {
+      writeLogError_("No input files provided.");
+      return ILLEGAL_PARAMETERS;
+    }
+    if (!out_files.empty() && out_files.size() != in_files.size())
+    {
+      writeLogError_("Number of 'out' files must match number of 'in' files.");
+      return ILLEGAL_PARAMETERS;
+    }
+    if (!out_trafos.empty() && out_trafos.size() != in_files.size())
+    {
+      writeLogError_("Number of 'trafo_out' files must match number of 'in' files.");
+      return ILLEGAL_PARAMETERS;
+    }
+    if (in_files.size() == 1)
+    {
+      OPENMS_LOG_WARN << "Only one input file provided to diaWeaverFeatureClustering." << std::endl;
+    }
 
     DiaWeaverFeatureClustering algorithm;
     Param algo_params = getParam_().copy("algorithm:", true);
     algorithm.setParameters(algo_params);
     algorithm.setLogType(log_type_);
 
-    StringList in_files  = getStringList_("in");
-    StringList out_files = getStringList_("out");
-    StringList out_trafos = getStringList_("trafo_out");
-
-    if (in_files.size() == 1)
-    {
-      OPENMS_LOG_WARN << "Only one input file provided to diaWeaverFeatureClustering." << std::endl;
-    }
-
+    // -----------------------------------------------------------------------
+    // Reference selection
+    // -----------------------------------------------------------------------
     Size reference_index = getIntOption_("reference:index");
     String reference_file = getStringOption_("reference:file");
 
-    String ref_file;
     if (!reference_file.empty())
     {
-      ref_file = reference_file;
-      reference_index = in_files.size(); // invalid — points past end
+      // explicit external reference
+      FeatureMap map_ref;
+      DiaWeaverFeatureClustering::loadMzMLAsFeatureMap(reference_file, map_ref);
+      algorithm.setReference(map_ref);
+      reference_index = in_files.size(); // sentinel: no in-list reference
     }
     else if (reference_index > 0)
     {
-      ref_file = in_files[--reference_index]; // 1-based in params, 0-based here
+      --reference_index; // convert 1-based parameter to 0-based index
+      FeatureMap map_ref;
+      DiaWeaverFeatureClustering::loadMzMLAsFeatureMap(in_files[reference_index], map_ref);
+      algorithm.setReference(map_ref);
     }
-    else // reference_index == 0: auto-select largest map
+    else // reference_index == 0: auto-select largest map by MS2 count
     {
-      OPENMS_LOG_INFO << "Picking reference by feature count ..." << std::flush;
-      Size max_count(0);
-      FeatureXMLFile f;
+      OPENMS_LOG_INFO << "Picking reference by MS2 spectrum count ..." << std::flush;
+      Size max_count = 0;
       for (Size i = 0; i < in_files.size(); ++i)
       {
-        Size s = f.loadSize(in_files[i]);
-        if (s > max_count)
+        FeatureMap m;
+        DiaWeaverFeatureClustering::loadMzMLAsFeatureMap(in_files[i], m);
+        if (m.size() > max_count)
         {
-          max_count = s;
+          max_count = m.size();
           reference_index = i;
         }
       }
-      OPENMS_LOG_INFO << " done" << std::endl;
-      ref_file = in_files[reference_index];
-    }
+      OPENMS_LOG_INFO << " done (selected index " << reference_index << ")" << std::endl;
 
-    // Load and set reference map
-    {
-      FileHandler fh;
-      fh.getFeatOptions().setLoadConvexHull(false);
-      fh.getFeatOptions().setLoadSubordinates(false);
       FeatureMap map_ref;
-      fh.loadFeatures(ref_file, map_ref, {FileTypes::FEATUREXML}, log_type_);
+      DiaWeaverFeatureClustering::loadMzMLAsFeatureMap(in_files[reference_index], map_ref);
       algorithm.setReference(map_ref);
     }
 
-    FileHandler f_fxml;
-    if (out_files.empty())
-    {
-      f_fxml.getFeatOptions().setLoadConvexHull(false);
-      f_fxml.getFeatOptions().setLoadSubordinates(false);
-    }
-
+    // -----------------------------------------------------------------------
+    // Align each input map to the reference
+    // -----------------------------------------------------------------------
     ProgressLogger plog;
     plog.setLogType(log_type_);
 
     vector<TransformationDescription> transformations(in_files.size());
 
     plog.startProgress(0, in_files.size(), "Aligning diaWeaver feature maps");
-    Size progress(0);
+    Size progress = 0;
 
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic, 1)
 #endif
     for (int i = 0; i < static_cast<int>(in_files.size()); ++i)
     {
-      TransformationDescription trafo;
       FeatureMap map;
+      DiaWeaverFeatureClustering::loadMzMLAsFeatureMap(in_files[i], map);
 
-      FileHandler f_fxml_tmp;
-      f_fxml_tmp.getFeatOptions() = f_fxml.getFeatOptions();
-      f_fxml_tmp.loadFeatures(in_files[i], map);
-
+      TransformationDescription trafo;
       if (i == static_cast<int>(reference_index))
       {
         trafo.fitModel("identity");
@@ -195,8 +229,7 @@ protected:
       if (!out_files.empty())
       {
         MapAlignmentTransformer::transformRetentionTimes(map, trafo);
-        addDataProcessing_(map, getProcessingInfo_(DataProcessing::ALIGNMENT));
-        f_fxml_tmp.storeFeatures(out_files[i], map, {FileTypes::FEATUREXML}, log_type_);
+        FileHandler().storeFeatures(out_files[i], map, {FileTypes::FEATUREXML}, log_type_);
       }
 
       transformations[i] = trafo;
@@ -215,12 +248,6 @@ protected:
     }
 
     plog.endProgress();
-
-    // Transform optional spectra files
-    StringList in_spectra  = getStringList_("in_spectra_files");
-    StringList out_spectra = getStringList_("out_spectra_files");
-    transformSpectraFiles_(in_spectra, out_spectra, transformations, false);
-
     return EXECUTION_OK;
   }
 

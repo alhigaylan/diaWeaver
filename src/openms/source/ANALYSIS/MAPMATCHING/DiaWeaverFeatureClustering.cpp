@@ -10,6 +10,7 @@
 #include <OpenMS/FORMAT/MzMLFile.h>
 #include <OpenMS/KERNEL/MSExperiment.h>
 #include <OpenMS/KERNEL/Feature.h>
+#include <OpenMS/CONCEPT/Constants.h>
 
 using namespace std;
 
@@ -116,17 +117,25 @@ namespace OpenMS
     MzMLFile mzml;
     mzml.load(mzml_file, exp);
 
+    const bool has_im = exp.empty() ? false : exp[0].containsIMData();
+
     for (const MSSpectrum& spec : exp)
     {
       if (spec.getMSLevel() != 2) continue;
       if (spec.getPrecursors().empty()) continue;
 
       const Precursor& prec = spec.getPrecursors()[0];
+
       Feature f;
       f.setRT(spec.getRT());
       f.setMZ(prec.getMZ());
       f.setCharge(prec.getCharge());
       f.setIntensity(prec.getIntensity());
+
+      if (has_im)
+      {
+        f.setMetaValue(Constants::UserParam::ION_MOBILITY_CENTROID, prec.getDriftTime());
+      }
 
       feature_map.push_back(std::move(f));
     }
