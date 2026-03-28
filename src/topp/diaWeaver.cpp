@@ -151,6 +151,11 @@ protected:
       "If set, aggregate signal across neighboring scans using Gaussian weighting before peak picking. "
       "This can improve signal-to-noise for low-intensity peaks (requires IM data).", false);
 
+    registerFlag_(
+      "output_picked_MS2",
+      "If set, write peak-picked MS2 spectra for each DIA window to individual mzML files "
+      "in a subfolder named after the input file inside the output directory.");
+
     registerSubsection_("PeakPickerIM", "Parameters for ion mobility peak picking (used when input has IM data)");
 
     registerSubsection_("PeakPickerHiRes", "Parameters for high-resolution peak picking (used when input has no IM data)");
@@ -511,6 +516,7 @@ protected:
     const bool save_precursors = getFlag_("save_unfragmented_precursors");
     const bool keep_ms1 = getFlag_("keep_ms1");
     const bool aggregate_scans = getFlag_("aggregate_across_scans");
+    const bool output_picked_ms2 = getFlag_("output_picked_MS2");
     const Param ppim_params = getParam_().copy("PeakPickerIM:", true);
     const Param pphr_params = getParam_().copy("PeakPickerHiRes:", true);
 
@@ -540,6 +546,16 @@ protected:
             File::basename(in) + "_diaWindows";
     }
     File::makeDir(out);
+
+    String picked_ms2_dir;
+    if (output_picked_ms2)
+    {
+      String base = File::basename(in);
+      auto dot_pos = base.rfind('.');
+      if (dot_pos != String::npos) base = base.substr(0, dot_pos);
+      picked_ms2_dir = out + "/" + base;
+      File::makeDir(picked_ms2_dir);
+    }
 
     // ------------------------------
     // Step 1: Use OnDiscMSExperiment for memory-efficient metadata access
@@ -594,6 +610,25 @@ protected:
         OPENMS_LOG_WARN << "aggregate_across_scans is set but no IM data detected. Aggregation will be skipped." << std::endl;
       }
     }
+
+    // Helper: format a double as a filename-safe string (dots replaced with hyphens,
+    // trailing zeros trimmed but at least one decimal digit kept).
+    // Uses low-precision (3 fractional digits) to avoid floating-point noise.
+    // Examples: 500.0 -> "500-0", 0.81 -> "0-81", 524.75 -> "524-75"
+    auto formatWindowVal = [](double v) -> String {
+      String s(v, false);  // 3 fractional digits, e.g. "500.000"
+      auto dot_pos = s.find('.');
+      if (dot_pos != std::string::npos)
+      {
+        Size last_nonzero = s.find_last_not_of('0');
+        if (last_nonzero > dot_pos)
+          s.resize(last_nonzero + 1);   // trim to last significant digit
+        else
+          s.resize(dot_pos + 2);        // keep at least one decimal: "x.0"
+        s.substitute('.', '-');
+      }
+      return s;
+    };
 
     // Create output file path
     String output_filepath = out + "/pseudo_spectra.mzML";
@@ -720,6 +755,20 @@ protected:
             }
           }
         }
+      }
+
+      // Write peak-picked MS2 to a per-window mzML file if requested
+      if (output_picked_ms2 && !ms2_exp.empty())
+      {
+        String ms2_fname = picked_ms2_dir + "/ms2_mz"
+          + formatWindowVal(w.lower_mz) + "_" + formatWindowVal(w.upper_mz);
+        if (w.hasIonMobility())
+        {
+          ms2_fname += "_im" + formatWindowVal(w.lower_im) + "_" + formatWindowVal(w.upper_im);
+        }
+        ms2_fname += ".mzML";
+        MzMLFile ms2_writer;
+        ms2_writer.store(ms2_fname, ms2_exp);
       }
 
       // Run MassTraceExtractor on MS2 data to get fragment traces for clustering
