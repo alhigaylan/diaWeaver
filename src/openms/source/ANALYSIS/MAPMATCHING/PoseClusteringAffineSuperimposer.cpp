@@ -7,12 +7,14 @@
 // --------------------------------------------------------------------------
 
 #include <OpenMS/ANALYSIS/MAPMATCHING/PoseClusteringAffineSuperimposer.h>
+#include <OpenMS/CONCEPT/Constants.h>
 #include <OpenMS/PROCESSING/BASELINE/MorphologicalFilter.h>
 #include <OpenMS/MATH/STATISTICS/BasicStatistics.h>
 #include <OpenMS/ML/INTERPOLATION/LinearInterpolation.h>
 #include <OpenMS/CONCEPT/LogStream.h>
 
 #include <boost/math/special_functions/fpclassify.hpp> // isnan
+#include <optional>
 
 // #define Debug_PoseClusteringAffineSuperimposer
 
@@ -64,6 +66,13 @@ namespace OpenMS
 
     defaults_.setValue("dump_pairs", "", "[DEBUG] If non-empty, base filename where the individual hashed pairs will be dumped to (large!).  "
                                          "A serial number for each invocation will be appended automatically.", {"advanced"});
+
+    defaults_.setValue("im_pair_max_distance", 0.02,
+                       "Maximum ion mobility deviation allowed for candidate feature pairs during hashing. "
+                       "Only applied when both features carry ion mobility data "
+                       "('" + String(Constants::UserParam::ION_MOBILITY_CENTROID) + "' MetaValue). "
+                       "Pairs where only one or neither feature has IM data are always accepted.");
+    defaults_.setMinFloat("im_pair_max_distance", 0.);
 
     defaultsToParam_();
   }
@@ -125,6 +134,9 @@ namespace OpenMS
   void affineTransformationHashing(const bool do_dump_pairs,
                                    const std::vector<Peak2D> & model_map,
                                    const std::vector<Peak2D> & scene_map,
+                                   const std::vector<std::optional<double>>& model_im,
+                                   const std::vector<std::optional<double>>& scene_im,
+                                   const double im_pair_max_distance,
                                    Math::LinearInterpolation<double, double>& scaling_hash_1,
                                    Math::LinearInterpolation<double, double>& scaling_hash_2,
                                    Math::LinearInterpolation<double, double>& rt_low_hash_,
@@ -181,6 +193,11 @@ namespace OpenMS
         double k_winlength_factor = 1. / (k_high - k_low);
         k_winlength_factor -= winlength_factor_baseline;
         if (k_winlength_factor <= 0)
+          continue;
+
+        // reject candidate pair (i, k) when both features carry IM data and exceed tolerance
+        if (model_im[i].has_value() && scene_im[k].has_value() &&
+            std::abs(*model_im[i] - *scene_im[k]) > im_pair_max_distance)
           continue;
 
         // compute similarity of intensities i k by taking the ratio of the two intensities
@@ -708,15 +725,71 @@ namespace OpenMS
     return total_int_model_map / total_int_scene_map;
   }
 
-  void PoseClusteringAffineSuperimposer::run(const std::vector<Peak2D> & map_model,
-                                             const std::vector<Peak2D> & map_scene, 
-                                             TransformationDescription & transformation)
+  void PoseClusteringAffineSuperimposer::run(const std::vector<Peak2D>& map_model,
+                                             const std::vector<Peak2D>& map_scene,
+                                             TransformationDescription& transformation)
+  {
+    // No IM data available — pass all-nullopt vectors
+    run_(map_model, map_scene,
+         std::vector<std::optional<double>>(map_model.size(), std::nullopt),
+         std::vector<std::optional<double>>(map_scene.size(), std::nullopt),
+         transformation);
+  }
 
+  void PoseClusteringAffineSuperimposer::run_(const std::vector<Peak2D>& map_model,
+                                              const std::vector<Peak2D>& map_scene,
+                                              const std::vector<std::optional<double>>& model_im,
+                                              const std::vector<std::optional<double>>& scene_im,
+                                              TransformationDescription& transformation)
   {
     if (map_model.empty() || map_scene.empty())
     {
       throw Exception::IllegalArgument(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
                                        "One of the input maps is empty! This is not allowed!");
+    }
+
+    //**************************************************************************
+    // Ion mobility consistency check.
+    // If IM is present in the data, every feature in both maps must carry it.
+    // Mixed maps (some features with IM, some without) are not allowed because
+    //**************************************************************************
+    {
+      const Size model_im_count = std::count_if(model_im.begin(), model_im.end(),
+        [](const std::optional<double>& v){ return v.has_value(); });
+      const Size scene_im_count = std::count_if(scene_im.begin(), scene_im.end(),
+        [](const std::optional<double>& v){ return v.has_value(); });
+
+      const bool model_has_im = (model_im_count == model_im.size());
+      const bool scene_has_im = (scene_im_count == scene_im.size());
+      const bool model_mixed  = (model_im_count > 0 && !model_has_im);
+      const bool scene_mixed  = (scene_im_count > 0 && !scene_has_im);
+
+      if (model_mixed || scene_mixed)
+      {
+        const String msg =
+          "Ion mobility data is present on some but not all features. "
+          "Mixed IM / non-IM maps are not supported. "
+          "Either all features must carry '" +
+          String(Constants::UserParam::ION_MOBILITY_CENTROID) +
+          "' or none of them should. "
+          "Model map: " + String(model_im_count) + "/" + String(model_im.size()) +
+          " features with IM.  "
+          "Scene map: " + String(scene_im_count) + "/" + String(scene_im.size()) +
+          " features with IM.";
+        OPENMS_LOG_ERROR << "[PoseClusteringAffineSuperimposer] " << msg << std::endl;
+        throw Exception::IllegalArgument(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, msg);
+      }
+
+      if (model_has_im != scene_has_im)
+      {
+        const String msg =
+          "One map has ion mobility data and the other does not. "
+          "Both maps must either carry IM data or both must lack it. "
+          "Model map: " + String(model_has_im ? "has IM" : "no IM") +
+          "  Scene map: " + String(scene_has_im ? "has IM" : "no IM") + ".";
+        OPENMS_LOG_ERROR << "[PoseClusteringAffineSuperimposer] " << msg << std::endl;
+        throw Exception::IllegalArgument(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, msg);
+      }
     }
 
     //**************************************************************************
@@ -742,6 +815,7 @@ namespace OpenMS
 
     /// Maximum deviation in mz of two partner points
     const double mz_pair_max_distance = param_.getValue("mz_pair_max_distance");
+    const double im_pair_max_distance = param_.getValue("im_pair_max_distance");
 
     //**************************************************************************
     // Working variables
@@ -897,6 +971,7 @@ namespace OpenMS
     affineTransformationHashing(
       do_dump_pairs,
       model_map, scene_map,
+      model_im, scene_im, im_pair_max_distance,
       scaling_hash_1, scaling_hash_2, rt_low_hash_, rt_high_hash_,
       1,
       rt_pair_min_distance,
@@ -937,6 +1012,7 @@ namespace OpenMS
     affineTransformationHashing(
       do_dump_pairs,
       model_map, scene_map,
+      model_im, scene_im, im_pair_max_distance,
       scaling_hash_1, scaling_hash_2, rt_low_hash_, rt_high_hash_,
       2,
       rt_pair_min_distance,
@@ -1029,24 +1105,37 @@ namespace OpenMS
                                              TransformationDescription& transformation)
   {
     std::vector<Peak2D> c_map_model, c_map_scene;
-    for (ConsensusMap::const_iterator it = map_model.begin(); it != map_model.end(); ++it)
+    std::vector<std::optional<double>> im_model, im_scene;
+
+    for (const auto& cf : map_model)
     {
       Peak2D c;
-      c.setIntensity( it->getIntensity() );
-      c.setRT( it->getRT() );
-      c.setMZ( it->getMZ() );
+      c.setIntensity(cf.getIntensity());
+      c.setRT(cf.getRT());
+      c.setMZ(cf.getMZ());
       c_map_model.push_back(c);
-    }
-    for (ConsensusMap::const_iterator it = map_scene.begin(); it != map_scene.end(); ++it)
-    {
-      Peak2D c;
-      c.setIntensity( it->getIntensity() );
-      c.setRT( it->getRT() );
-      c.setMZ( it->getMZ() );
-      c_map_scene.push_back(c);
+
+      if (cf.metaValueExists(Constants::UserParam::ION_MOBILITY_CENTROID))
+        im_model.emplace_back((double)cf.getMetaValue(Constants::UserParam::ION_MOBILITY_CENTROID));
+      else
+        im_model.emplace_back(std::nullopt);
     }
 
-    run(c_map_model, c_map_scene, transformation);
+    for (const auto& cf : map_scene)
+    {
+      Peak2D c;
+      c.setIntensity(cf.getIntensity());
+      c.setRT(cf.getRT());
+      c.setMZ(cf.getMZ());
+      c_map_scene.push_back(c);
+
+      if (cf.metaValueExists(Constants::UserParam::ION_MOBILITY_CENTROID))
+        im_scene.emplace_back((double)cf.getMetaValue(Constants::UserParam::ION_MOBILITY_CENTROID));
+      else
+        im_scene.emplace_back(std::nullopt);
+    }
+
+    run_(c_map_model, c_map_scene, im_model, im_scene, transformation);
   }
 
 } // namespace OpenMS

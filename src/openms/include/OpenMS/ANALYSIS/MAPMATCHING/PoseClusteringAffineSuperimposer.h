@@ -12,6 +12,8 @@
 #include <OpenMS/ANALYSIS/MAPMATCHING/BaseSuperimposer.h>
 #include <OpenMS/KERNEL/ConsensusMap.h>
 #include <OpenMS/KERNEL/Peak2D.h>
+#include <optional>
+#include <vector>
 
 namespace OpenMS
 {
@@ -71,9 +73,24 @@ public:
     */
     void run(const ConsensusMap & map_model, const ConsensusMap & map_scene, TransformationDescription & transformation) override;
 
-    /// Perform alignment on vector of 1D peaks
+    /// Perform alignment on vector of 1D peaks (no ion mobility data)
     virtual void run(const std::vector<Peak2D> & map_model, const std::vector<Peak2D> & map_scene, TransformationDescription & transformation);
 
+  private:
+    /// Core alignment implementation shared by both public run() overloads.
+    /// @p model_im and @p scene_im are parallel to the Peak2D vectors;
+    /// std::nullopt means the feature carries no ion mobility data.
+    ///
+    /// @pre Either all entries in both IM vectors are std::nullopt (no IM data,
+    ///      legacy behavior) or all entries in both vectors have a value (IM
+    ///      present in all features of both maps). Mixed maps — where some
+    ///      features carry IM and others do not, or where one map has IM and
+    ///      the other does not — are detected and cause an error.
+    void run_(const std::vector<Peak2D>& map_model,
+              const std::vector<Peak2D>& map_scene,
+              const std::vector<std::optional<double>>& model_im,
+              const std::vector<std::optional<double>>& scene_im,
+              TransformationDescription& transformation);
   };
 } // namespace OpenMS
 
