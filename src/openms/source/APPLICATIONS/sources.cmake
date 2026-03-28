@@ -11,6 +11,7 @@ SearchEngineBase.cpp
 ToolHandler.cpp
 TOPPBase.cpp
 diaWeaver.cpp
+diaWeaverAlign.cpp
 )
 
 ### add path to the filenames

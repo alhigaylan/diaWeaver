@@ -12,6 +12,7 @@ SearchEngineBase.h
 ToolHandler.h
 TOPPBase.h
 diaWeaver.h
+diaWeaverAlign.h
 )
 
 ### add path to the filenames
