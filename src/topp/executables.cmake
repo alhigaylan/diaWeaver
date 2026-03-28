@@ -140,6 +140,7 @@ TriqlerConverter
 XFDR
 XMLValidator
 diaWeaver
+diaWeaverFeatureClustering
 SpokeML
 )
 

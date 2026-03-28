@@ -18,6 +18,7 @@ FeatureMapping.cpp
 LabeledPairFinder.cpp
 MapAlignmentAlgorithmIdentification.cpp
 MapAlignmentAlgorithmKD.cpp
+DiaWeaverFeatureClustering.cpp
 MapAlignmentAlgorithmPoseClustering.cpp
 MapAlignmentAlgorithmTreeGuided.cpp
 MapAlignmentEvaluationAlgorithm.cpp
