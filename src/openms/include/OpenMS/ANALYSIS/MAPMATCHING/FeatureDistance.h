@@ -148,6 +148,9 @@ protected:
     /// Compute a distance even if adducts don't match?
     bool ignore_adduct_;
 
+    /// Maximum allowed ion mobility difference when both features carry IM data.
+    double im_pair_max_distance_;
+
     /// Always return @ref infinity if "max. difference" constraints are not met?
     bool force_constraints_;
 

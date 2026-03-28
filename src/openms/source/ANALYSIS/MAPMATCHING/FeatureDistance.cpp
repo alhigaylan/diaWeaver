@@ -60,6 +60,12 @@ namespace OpenMS
     defaults_.setValue("ignore_adduct", "true", "true [default]: pairing requires equal adducts (or at least one without adduct annotation); true: Pairing irrespective of adducts");
     defaults_.setValidStrings("ignore_adduct", {"true","false"});
 
+    defaults_.setValue("im_pair_max_distance", 0.02,
+      "Maximum ion mobility difference allowed when pairing features. "
+      "Only applied when both features carry '" +
+      String(Constants::UserParam::ION_MOBILITY_CENTROID) + "' metadata. "
+      "If either feature lacks IM data the check is skipped.");
+    defaults_.setMinFloat("im_pair_max_distance", 0.0);
 
     defaultsToParam_();
   }
@@ -98,6 +104,7 @@ namespace OpenMS
                                     params_intensity_.weight);
     ignore_charge_ = param_.getValue("ignore_charge").toBool();
     ignore_adduct_ = param_.getValue("ignore_adduct").toBool();
+    im_pair_max_distance_ = param_.getValue("im_pair_max_distance");
   }
 
   double FeatureDistance::distance_(double diff, const DistanceParams_ & params) const
@@ -144,6 +151,17 @@ namespace OpenMS
         {
           return make_pair(false, infinity);
         }
+      }
+    }
+
+    if (left.metaValueExists(Constants::UserParam::ION_MOBILITY_CENTROID) &&
+        right.metaValueExists(Constants::UserParam::ION_MOBILITY_CENTROID))
+    {
+      const double im_diff = fabs((double)left.getMetaValue(Constants::UserParam::ION_MOBILITY_CENTROID) -
+                                  (double)right.getMetaValue(Constants::UserParam::ION_MOBILITY_CENTROID));
+      if (im_diff > im_pair_max_distance_)
+      {
+        return make_pair(false, infinity);
       }
     }
 
