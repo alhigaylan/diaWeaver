@@ -36,7 +36,7 @@ namespace OpenMS
       bin_offsets_[b]     → first entry in fragment_entries_ for bin b
       bin_offsets_[b + 1] → one past the last entry for bin b
 
-    Within each bin, entries are in retention time order (spectrum_id order).
+    Within each bin, entries are in load order (file order, then within-file order).
   */
   class OPENMS_DLLAPI DiaWeaverAlign : public DefaultParamHandler
   {
@@ -67,9 +67,12 @@ namespace OpenMS
     */
     struct SpectrumEntry
     {
-      double retention_time{-1.0};  ///< Retention time in seconds
-      String native_id;             ///< Native ID from the source mzML
-      Size   source_file_idx{0};    ///< Index into the source file list
+      double retention_time{-1.0};   ///< Retention time in seconds
+      double precursor_mz{-1.0};     ///< Precursor m/z (-1 if unknown)
+      double drift_time{};            ///< Ion mobility drift time. Only valid when hasPrecursorIM() is true.
+      String native_id;              ///< Native ID from the source mzML
+      Size   source_file_idx{0};     ///< Index into the source file list
+      int    precursor_charge{0};    ///< Precursor charge (0 = unknown)
     };
 
 
@@ -105,6 +108,9 @@ namespace OpenMS
     double getLowerMz()              const;
     double getUpperMz()              const;
 
+    /// Returns true if ion mobility drift times were detected (and are valid for all spectra).
+    bool   hasPrecursorIM()          const;
+
 
   protected:
 
@@ -123,6 +129,7 @@ namespace OpenMS
     double   upper_mz_{2000.0};
     double   bin_width_{0.1};
     uint32_t n_bins_{0};
+    bool     precursor_im_detected_{false};
 
     uint32_t toBinIdx_(double mz) const;
     uint16_t toMassOffset_(double mz, uint32_t bin_idx) const;

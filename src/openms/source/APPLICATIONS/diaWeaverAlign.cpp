@@ -8,6 +8,7 @@
 
 #include <OpenMS/APPLICATIONS/diaWeaverAlign.h>
 #include <OpenMS/FORMAT/MzMLFile.h>
+#include <OpenMS/IONMOBILITY/IMTypes.h>
 #include <OpenMS/KERNEL/MSExperiment.h>
 
 #include <algorithm>
@@ -56,6 +57,7 @@ namespace OpenMS
     spectrum_entries_.clear();
     fragment_entries_.clear();
     bin_offsets_.clear();
+    precursor_im_detected_ = false;
 
     OPENMS_LOG_INFO << "[DiaWeaverAlign] Building fragment index  "
                     << "range=[" << lower_mz_ << ", " << upper_mz_ << "] Da  "
@@ -70,6 +72,8 @@ namespace OpenMS
     {
       MSSpectrum spectrum;
       double     retention_time{-1.0};
+      double     precursor_mz{-1.0};
+      double     drift_time{-1.0};
       int        charge{0};
       String     native_id;
       Size       source_idx{0};
@@ -88,9 +92,26 @@ namespace OpenMS
       {
         if (spec.getMSLevel() != 2 || spec.empty()) continue;
 
+        if (raw_spectra.empty())  // first MS2 spectrum sets the IM expectation
+        {
+          precursor_im_detected_ = (spec.getDriftTime() != IMTypes::DRIFTTIME_NOT_SET);
+          OPENMS_LOG_INFO << "[DiaWeaverAlign] Ion mobility: "
+                          << (precursor_im_detected_ ? "detected" : "not detected") << std::endl;
+        }
+        else if (precursor_im_detected_ && spec.getDriftTime() == IMTypes::DRIFTTIME_NOT_SET)
+        {
+          throw Exception::MissingInformation(
+            __FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+            "Ion mobility was detected in earlier spectra but spectrum '" +
+            spec.getNativeID() + "' in '" + mzml_files[file_idx] + "' has no drift time.");
+        }
+
         RawSpecEntry entry;
         entry.retention_time = spec.getRT();
-        entry.charge         = spec.getPrecursors().empty() ? 0 : spec.getPrecursors()[0].getCharge();
+        if (precursor_im_detected_)
+          entry.drift_time = spec.getDriftTime();
+        entry.charge         = spec.getPrecursors()[0].getCharge();
+        entry.precursor_mz   = spec.getPrecursors()[0].getMZ();
         entry.native_id      = spec.getNativeID();
         entry.source_idx     = file_idx;
         entry.spectrum       = std::move(spec);
@@ -104,20 +125,22 @@ namespace OpenMS
     if (raw_spectra.empty()) return;
 
     // -----------------------------------------------------------------------
-    // Phase 2: Sort by retention time and assign contiguous spectrum IDs.
+    // Phase 2: Assign contiguous spectrum IDs in load order
+    //          (file order, then within-file order).
+    //
+    // Each spectrum_id is an index into spectrum_entries_, giving O(1) metadata
+    // lookup from a FragmentEntry without needing a (file_idx, per-file-id) pair.
     // -----------------------------------------------------------------------
-
-    std::sort(raw_spectra.begin(), raw_spectra.end(),
-      [](const RawSpecEntry& a, const RawSpecEntry& b) {
-        return a.retention_time < b.retention_time;
-      });
 
     spectrum_entries_.resize(raw_spectra.size());
     for (Size i = 0; i < raw_spectra.size(); ++i)
     {
-      spectrum_entries_[i].retention_time  = raw_spectra[i].retention_time;
-      spectrum_entries_[i].native_id       = raw_spectra[i].native_id;
-      spectrum_entries_[i].source_file_idx = raw_spectra[i].source_idx;
+      spectrum_entries_[i].retention_time   = raw_spectra[i].retention_time;
+      spectrum_entries_[i].precursor_mz     = raw_spectra[i].precursor_mz;
+      spectrum_entries_[i].drift_time       = raw_spectra[i].drift_time;
+      spectrum_entries_[i].precursor_charge = raw_spectra[i].charge;
+      spectrum_entries_[i].native_id        = raw_spectra[i].native_id;
+      spectrum_entries_[i].source_file_idx  = raw_spectra[i].source_idx;
     }
 
     // -----------------------------------------------------------------------
@@ -182,7 +205,7 @@ namespace OpenMS
     // -----------------------------------------------------------------------
     // Phase 4: Sort by (bin_idx, spectrum_id) and build CSR offsets.
     //
-    // Entries within each bin are in RT order (ascending spectrum_id).
+    // Entries within each bin are in load order (ascending spectrum_id).
     // -----------------------------------------------------------------------
 
     std::sort(all_entries.begin(), all_entries.end(),
@@ -234,5 +257,6 @@ namespace OpenMS
   double DiaWeaverAlign::getBinWidth()             const { return bin_width_; }
   double DiaWeaverAlign::getLowerMz()              const { return lower_mz_; }
   double DiaWeaverAlign::getUpperMz()              const { return upper_mz_; }
+  bool   DiaWeaverAlign::hasPrecursorIM()          const { return precursor_im_detected_; }
 
 } // namespace OpenMS
