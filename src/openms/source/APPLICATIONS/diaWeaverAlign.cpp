@@ -12,7 +12,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <numeric>
 
 namespace OpenMS
 {
@@ -128,10 +127,9 @@ namespace OpenMS
     // -----------------------------------------------------------------------
     // Phase 3: Generate fragment entries.
     //
-    // For each spectrum, iterate all peaks and place each one into its bin.
-    // Peaks outside [lower_mz_, upper_mz_] are skipped.
-    // Peaks within a spectrum are ranked by descending intensity so the
-    // intensity_rank field reflects how prominent each peak is.
+    // We scan linearly: when a peak crosses into a new
+    // bin we emit the best (highest intensity) entry for the completed bin and
+    // start tracking the new one.
     // -----------------------------------------------------------------------
 
     std::vector<std::pair<uint32_t, FragmentEntry>> all_entries;
@@ -142,32 +140,44 @@ namespace OpenMS
          ++spec_id)
     {
       const MSSpectrum& spec    = raw_spectra[spec_id].spectrum;
-      const int         pcharge = raw_spectra[spec_id].charge;
-      const uint8_t charge_byte = (pcharge > 0 && pcharge <= 255)
-                                  ? static_cast<uint8_t>(pcharge) : 0;
+      const uint8_t charge_byte = static_cast<uint8_t>(raw_spectra[spec_id].charge);
 
-      // Rank peaks by descending intensity.
-      std::vector<Size> order(spec.size());
-      std::iota(order.begin(), order.end(), 0);
-      std::sort(order.begin(), order.end(), [&spec](Size a, Size b) {
-        return spec[a].getIntensity() > spec[b].getIntensity();
-      });
+      uint32_t     current_bin = std::numeric_limits<uint32_t>::max();
+      float        best_intensity = 0.0f;
+      FragmentEntry best_fe{};
 
-      for (Size rank = 0; rank < spec.size(); ++rank)
+      auto emit = [&]() {
+        if (current_bin != std::numeric_limits<uint32_t>::max())
+          all_entries.emplace_back(current_bin, best_fe);
+      };
+
+      for (Size i = 0; i < spec.size(); ++i)
       {
-        const double mz = spec[order[rank]].getMZ();
+        const double mz        = spec[i].getMZ();
+        const float  intensity = spec[i].getIntensity();
+
         if (mz < lower_mz_ || mz >= upper_mz_) continue;
 
         const uint32_t bin_idx = toBinIdx_(mz);
 
-        FragmentEntry fe;
-        fe.spectrum_id    = spec_id;
-        fe.mass_offset    = toMassOffset_(mz, bin_idx);
-        fe.intensity_rank = (rank <= 254) ? static_cast<uint8_t>(rank) : 255;
-        fe.charge         = charge_byte;
-
-        all_entries.emplace_back(bin_idx, fe);
+        if (bin_idx != current_bin)
+        {
+          emit();
+          current_bin       = bin_idx;
+          best_intensity    = intensity;
+          best_fe.spectrum_id = spec_id;
+          best_fe.mass_offset = toMassOffset_(mz, bin_idx);
+          best_fe.charge      = charge_byte;
+          best_fe.reserved    = 0;
+        }
+        else if (intensity > best_intensity)
+        {
+          best_intensity      = intensity;
+          best_fe.mass_offset = toMassOffset_(mz, bin_idx);
+        }
       }
+
+      emit(); // flush the last bin
     }
 
     OPENMS_LOG_INFO << "[DiaWeaverAlign] Generated " << all_entries.size()

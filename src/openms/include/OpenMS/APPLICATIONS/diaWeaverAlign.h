@@ -51,11 +51,11 @@ namespace OpenMS
 #pragma pack(push, 1)
     struct FragmentEntry
     {
-      uint32_t spectrum_id;    ///< RT-ordered index of the parent spectrum
-      uint16_t mass_offset;    ///< Sub-bin Da offset scaled to [0, 65535]:
-                               ///  offset_da = (mass_offset / 65535.0) * bin_width
-      uint8_t  intensity_rank; ///< 0-based rank by descending intensity within parent spectrum
-      uint8_t  charge;         ///< Precursor charge (0 = unknown)
+      uint32_t spectrum_id; ///< RT-ordered index of the parent spectrum
+      uint16_t mass_offset; ///< Sub-bin Da offset scaled to [0, 65535]:
+                            ///  offset_da = (mass_offset / 65535.0) * bin_width
+      uint8_t  charge;      ///< Precursor charge (0 = unknown)
+      uint8_t  reserved{0}; ///< Reserved for future use
     };
 #pragma pack(pop)
     static_assert(sizeof(FragmentEntry) == 8, "FragmentEntry must be exactly 8 bytes");
