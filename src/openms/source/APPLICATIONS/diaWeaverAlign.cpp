@@ -88,13 +88,9 @@ namespace OpenMS
       {
         if (spec.getMSLevel() != 2 || spec.empty()) continue;
 
-        int pcharge = 0;
-        if (!spec.getPrecursors().empty())
-          pcharge = spec.getPrecursors()[0].getCharge();
-
         RawSpecEntry entry;
         entry.retention_time = spec.getRT();
-        entry.charge         = pcharge;
+        entry.charge         = spec.getPrecursors().empty() ? 0 : spec.getPrecursors()[0].getCharge();
         entry.native_id      = spec.getNativeID();
         entry.source_idx     = file_idx;
         entry.spectrum       = std::move(spec);
