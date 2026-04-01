@@ -17,7 +17,8 @@
 
 namespace OpenMS
 {
-  class MSSpectrum; // full definition in MSSpectrum.h, included by diaWeaverAlign.cpp
+  class MSSpectrum;   // full definition in MSSpectrum.h, included by diaWeaverAlign.cpp
+  class MSExperiment; // full definition in MSExperiment.h, included by diaWeaverAlign.cpp
 
   /**
     @brief Builds a fragment index from diaWeaver pseudo MS2 spectra.
@@ -95,6 +96,20 @@ namespace OpenMS
       uint32_t matched_peaks{0};   ///< Number of query peaks that hit this spectrum's bins
     };
 
+    /**
+      @brief Per-spectrum-id score trace across an MSExperiment of query spectra.
+
+      @c rts and @c scores are parallel vectors in ascending RT order.
+      Only query spectra whose matched_peaks count met the threshold passed to
+      matchExperiment() contribute an entry.
+    */
+    struct ScoreTrace
+    {
+      uint32_t             spectrum_id{0}; ///< Index into spectrum_entries_
+      std::vector<double>   rts;           ///< Query spectrum RTs at which score >= threshold, ascending
+      std::vector<uint32_t> scores;        ///< matched_peaks count at each RT, parallel to rts
+    };
+
 
     DiaWeaverAlign();
 
@@ -127,6 +142,29 @@ namespace OpenMS
                     with the query, in ascending spectrum_id order.
     */
     std::vector<MatchResult> matchSpectrum(const MSSpectrum& query) const;
+
+    /**
+      @brief Score every MS2 spectrum in @p experiment against the fragment index.
+
+      Iterates over all MS2 spectra in load order (ascending RT), calling
+      matchSpectrum() for each. Scores that meet @p min_matched_peaks are
+      accumulated into per-spectrum_id traces. Query spectra are distributed
+      across available OpenMP threads; each thread accumulates into a private
+      map and results are merged after all threads complete. Because threads
+      process contiguous RT chunks, merging in thread-index order preserves
+      RT ordering within each trace.
+
+      IM consistency is validated before the parallel loop: if the index was
+      built with IM the experiment must carry per-peak IM on every MS2 spectrum,
+      and vice versa.
+
+      @param experiment         Peak-picked experimental MSExperiment.
+      @param min_matched_peaks  Minimum matched_peaks count to include in a trace (default 2).
+      @return                   One ScoreTrace per spectrum_id that accumulated at least one
+                                above-threshold observation, sorted by spectrum_id.
+    */
+    std::vector<ScoreTrace> matchExperiment(const MSExperiment& experiment,
+                                             uint32_t min_matched_peaks = 2) const;
 
     /// Returns the metadata for the given spectrum ID.
     const SpectrumEntry& getSpectrumEntry(uint32_t id) const;

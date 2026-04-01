@@ -13,6 +13,10 @@
 #include <OpenMS/KERNEL/MSExperiment.h>
 #include <algorithm>
 #include <cmath>
+#include <unordered_map>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 namespace OpenMS
 {
@@ -418,6 +422,106 @@ namespace OpenMS
     }
 
     return results;
+  }
+
+  std::vector<DiaWeaverAlign::ScoreTrace>
+  DiaWeaverAlign::matchExperiment(const MSExperiment& experiment, uint32_t min_matched_peaks) const
+  {
+    // Collect pointers to MS2 spectra in load order (ascending RT).
+    std::vector<const MSSpectrum*> query_spectra;
+    for (const auto& spec : experiment)
+    {
+      if (spec.getMSLevel() == 2 && !spec.empty())
+        query_spectra.push_back(&spec);
+    }
+
+    if (query_spectra.empty()) return {};
+
+    // Validate IM consistency once before the parallel region.
+    // matchSpectrum() would also catch this per call, but exceptions thrown
+    // inside an OpenMP parallel region do not propagate reliably to the caller.
+    const bool query_has_im = query_spectra.front()->containsIMData();
+    if (query_has_im != hasIM())
+    {
+      throw Exception::MissingInformation(
+        __FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+        "Ion mobility mismatch: the fragment index was built " +
+        String(hasIM() ? "with" : "without") +
+        " IM data but the query experiment spectra " +
+        (query_has_im ? "have" : "have no") + " per-peak ion mobility.");
+    }
+
+    // Per-thread accumulator: spectrum_id -> (rts, scores).
+    // schedule(static) assigns contiguous RT chunks to threads, so entries
+    // within each thread's map are already in ascending RT order.
+    struct LocalEntry
+    {
+      std::vector<double>   rts;
+      std::vector<uint32_t> scores;
+    };
+    using LocalTraceMap = std::unordered_map<uint32_t, LocalEntry>;
+    std::vector<LocalTraceMap> thread_traces;
+
+    auto process_query = [&](int q, LocalTraceMap& local_map)
+    {
+      const double rt = query_spectra[q]->getRT();
+      for (const MatchResult& r : matchSpectrum(*query_spectra[q]))
+      {
+        if (r.matched_peaks < min_matched_peaks) continue;
+        auto& entry = local_map[r.spectrum_id];
+        entry.rts.push_back(rt);
+        entry.scores.push_back(r.matched_peaks);
+      }
+    };
+
+#ifdef _OPENMP
+    // thread_traces is sized inside the parallel region from omp_get_num_threads()
+    // (the actual spawned count) so no OpenMP query is needed before the region.
+    // omp single has an implicit barrier, ensuring the resize is visible to all
+    // threads before any of them calls omp_get_thread_num() to index into it.
+    #pragma omp parallel
+    {
+      #pragma omp single
+      thread_traces.resize(static_cast<Size>(omp_get_num_threads()));
+
+      auto& local = thread_traces[omp_get_thread_num()];
+
+      #pragma omp for schedule(static)
+      for (int q = 0; q < static_cast<int>(query_spectra.size()); ++q)
+        process_query(q, local);
+    }
+#else
+    thread_traces.resize(1);
+    for (int q = 0; q < static_cast<int>(query_spectra.size()); ++q)
+      process_query(q, thread_traces[0]);
+#endif
+
+    // Merge per-thread traces. Iterating in ascending thread-index order
+    // preserves RT ordering: thread 0 holds the lowest RTs, thread 1 the next, etc.
+    std::unordered_map<uint32_t, ScoreTrace> merged;
+    for (Size t = 0; t < thread_traces.size(); ++t)
+    {
+      for (auto& [sid, local_entry] : thread_traces[t])
+      {
+        ScoreTrace& trace = merged[sid];
+        trace.spectrum_id = sid;
+        trace.rts.insert(trace.rts.end(),
+                         local_entry.rts.begin(), local_entry.rts.end());
+        trace.scores.insert(trace.scores.end(),
+                            local_entry.scores.begin(), local_entry.scores.end());
+      }
+    }
+
+    std::vector<ScoreTrace> result;
+    result.reserve(merged.size());
+    for (auto& [sid, trace] : merged)
+      result.push_back(std::move(trace));
+
+    std::sort(result.begin(), result.end(),
+      [](const ScoreTrace& a, const ScoreTrace& b)
+      { return a.spectrum_id < b.spectrum_id; });
+
+    return result;
   }
 
   // -------------------------------------------------------------------------
