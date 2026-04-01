@@ -238,6 +238,11 @@ void DiaWeaver::extractMS2Windows(
       MSSpectrum frag_spec;
       frag_spec.setRT(orig_spec.getRT());
       frag_spec.setMSLevel(1);  // required by downstream tools
+      frag_spec.setPrecursors(orig_spec.getPrecursors());
+      if (orig_spec.metaValueExists("ion mobility lower limit"))
+        frag_spec.setMetaValue("ion mobility lower limit", orig_spec.getMetaValue("ion mobility lower limit"));
+      if (orig_spec.metaValueExists("ion mobility upper limit"))
+        frag_spec.setMetaValue("ion mobility upper limit", orig_spec.getMetaValue("ion mobility upper limit"));
 
       // Precursor spectrum (peaks inside precursor window)
       MSSpectrum prec_spec;
@@ -245,6 +250,11 @@ void DiaWeaver::extractMS2Windows(
       {
         prec_spec.setRT(orig_spec.getRT());
         prec_spec.setMSLevel(1);
+        prec_spec.setPrecursors(orig_spec.getPrecursors());
+        if (orig_spec.metaValueExists("ion mobility lower limit"))
+          prec_spec.setMetaValue("ion mobility lower limit", orig_spec.getMetaValue("ion mobility lower limit"));
+        if (orig_spec.metaValueExists("ion mobility upper limit"))
+          prec_spec.setMetaValue("ion mobility upper limit", orig_spec.getMetaValue("ion mobility upper limit"));
       }
 
       // Prepare IM arrays if available
@@ -638,6 +648,11 @@ void DiaWeaver::extractMS2Windows(
       MSSpectrum frag_spec;
       frag_spec.setRT(orig_spec.getRT());
       frag_spec.setMSLevel(1);  // required by downstream tools
+      frag_spec.setPrecursors(orig_spec.getPrecursors());
+      if (orig_spec.metaValueExists("ion mobility lower limit"))
+        frag_spec.setMetaValue("ion mobility lower limit", orig_spec.getMetaValue("ion mobility lower limit"));
+      if (orig_spec.metaValueExists("ion mobility upper limit"))
+        frag_spec.setMetaValue("ion mobility upper limit", orig_spec.getMetaValue("ion mobility upper limit"));
 
       // Precursor spectrum (peaks inside precursor window)
       MSSpectrum prec_spec;
@@ -645,6 +660,11 @@ void DiaWeaver::extractMS2Windows(
       {
         prec_spec.setRT(orig_spec.getRT());
         prec_spec.setMSLevel(1);
+        prec_spec.setPrecursors(orig_spec.getPrecursors());
+        if (orig_spec.metaValueExists("ion mobility lower limit"))
+          prec_spec.setMetaValue("ion mobility lower limit", orig_spec.getMetaValue("ion mobility lower limit"));
+        if (orig_spec.metaValueExists("ion mobility upper limit"))
+          prec_spec.setMetaValue("ion mobility upper limit", orig_spec.getMetaValue("ion mobility upper limit"));
       }
 
       // Prepare IM arrays if available
@@ -853,6 +873,11 @@ void DiaWeaver::extractSingleMS2Window(
     MSSpectrum frag_spec;
     frag_spec.setRT(orig_spec.getRT());
     frag_spec.setMSLevel(1);  // required by downstream tools
+    frag_spec.setPrecursors(orig_spec.getPrecursors());
+    if (orig_spec.metaValueExists("ion mobility lower limit"))
+      frag_spec.setMetaValue("ion mobility lower limit", orig_spec.getMetaValue("ion mobility lower limit"));
+    if (orig_spec.metaValueExists("ion mobility upper limit"))
+      frag_spec.setMetaValue("ion mobility upper limit", orig_spec.getMetaValue("ion mobility upper limit"));
 
     // Precursor spectrum (peaks inside precursor window)
     MSSpectrum prec_spec;
@@ -860,6 +885,11 @@ void DiaWeaver::extractSingleMS2Window(
     {
       prec_spec.setRT(orig_spec.getRT());
       prec_spec.setMSLevel(1);
+      prec_spec.setPrecursors(orig_spec.getPrecursors());
+      if (orig_spec.metaValueExists("ion mobility lower limit"))
+        prec_spec.setMetaValue("ion mobility lower limit", orig_spec.getMetaValue("ion mobility lower limit"));
+      if (orig_spec.metaValueExists("ion mobility upper limit"))
+        prec_spec.setMetaValue("ion mobility upper limit", orig_spec.getMetaValue("ion mobility upper limit"));
     }
 
     // Prepare IM arrays if available
@@ -1148,6 +1178,11 @@ void DiaWeaver::extractSingleMS2Window(
     MSSpectrum frag_spec;
     frag_spec.setRT(orig_spec.getRT());
     frag_spec.setMSLevel(1);  // required by downstream tools
+    frag_spec.setPrecursors(orig_spec.getPrecursors());
+    if (orig_spec.metaValueExists("ion mobility lower limit"))
+      frag_spec.setMetaValue("ion mobility lower limit", orig_spec.getMetaValue("ion mobility lower limit"));
+    if (orig_spec.metaValueExists("ion mobility upper limit"))
+      frag_spec.setMetaValue("ion mobility upper limit", orig_spec.getMetaValue("ion mobility upper limit"));
 
     // Precursor spectrum (peaks inside precursor window)
     MSSpectrum prec_spec;
@@ -1155,6 +1190,11 @@ void DiaWeaver::extractSingleMS2Window(
     {
       prec_spec.setRT(orig_spec.getRT());
       prec_spec.setMSLevel(1);
+      prec_spec.setPrecursors(orig_spec.getPrecursors());
+      if (orig_spec.metaValueExists("ion mobility lower limit"))
+        prec_spec.setMetaValue("ion mobility lower limit", orig_spec.getMetaValue("ion mobility lower limit"));
+      if (orig_spec.metaValueExists("ion mobility upper limit"))
+        prec_spec.setMetaValue("ion mobility upper limit", orig_spec.getMetaValue("ion mobility upper limit"));
     }
 
     // Prepare IM arrays if available

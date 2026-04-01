@@ -153,8 +153,8 @@ protected:
 
     registerFlag_(
       "output_picked_MS2",
-      "If set, write peak-picked MS2 spectra for each DIA window to individual mzML files "
-      "in a subfolder named after the input file inside the output directory.");
+      "If set, write all peak-picked MS2 spectra to a single mzML file 'picked_ms2.mzML' "
+      "in the output directory.");
 
     registerSubsection_("PeakPickerIM", "Parameters for ion mobility peak picking (used when input has IM data)");
 
@@ -549,15 +549,6 @@ protected:
     }
     File::makeDir(out);
 
-    String picked_ms2_dir;
-    if (output_picked_ms2)
-    {
-      String base = File::basename(in);
-      auto dot_pos = base.rfind('.');
-      if (dot_pos != String::npos) base = base.substr(0, dot_pos);
-      picked_ms2_dir = out + "/" + base;
-      File::makeDir(picked_ms2_dir);
-    }
 
     // ------------------------------
     // Step 1: Use OnDiscMSExperiment for memory-efficient metadata access
@@ -648,6 +639,16 @@ protected:
     ExperimentalSettings exp_settings;
     exp_settings.setSourceFiles({source_file});
     consumer.setExperimentalSettings(exp_settings);
+
+    std::unique_ptr<PlainMSDataWritingConsumer> ms2_consumer;
+    if (output_picked_ms2)
+    {
+      String ms2_filepath = out + "/picked_ms2.mzML";
+      OPENMS_LOG_INFO << "Picked MS2 output: " << ms2_filepath << std::endl;
+      ms2_consumer = std::make_unique<PlainMSDataWritingConsumer>(ms2_filepath);
+      ms2_consumer->setExpectedSize(0, 0);
+      ms2_consumer->setExperimentalSettings(exp_settings);
+    }
 
     // Shared counter for unique spectrum native IDs (protected by critical section)
     Size spectrum_index = 0;
@@ -759,18 +760,16 @@ protected:
         }
       }
 
-      // Write peak-picked MS2 to a per-window mzML file if requested
+      // Write peak-picked MS2 to the single output file if requested
       if (output_picked_ms2 && !ms2_exp.empty())
       {
-        String ms2_fname = picked_ms2_dir + "/ms2_mz"
-          + formatWindowVal(w.lower_mz) + "_" + formatWindowVal(w.upper_mz);
-        if (w.hasIonMobility())
+#ifdef _OPENMP
+#pragma omp critical (write_ms2)
+#endif
         {
-          ms2_fname += "_im" + formatWindowVal(w.lower_im) + "_" + formatWindowVal(w.upper_im);
+          for (auto& spectrum : ms2_exp)
+            ms2_consumer->consumeSpectrum(spectrum);
         }
-        ms2_fname += ".mzML";
-        MzMLFile ms2_writer;
-        ms2_writer.store(ms2_fname, ms2_exp);
       }
 
       // Run MassTraceExtractor on MS2 data to get fragment traces for clustering
