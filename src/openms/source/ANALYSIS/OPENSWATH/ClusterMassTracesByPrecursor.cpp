@@ -91,9 +91,9 @@ namespace OpenMS
       "If true, precursor-fragment assignments are ranked by a weighted combination of Pearson correlation, delta RT and delta IM. If false, ranking uses Pearson correlation only.");
     defaults_.setValidStrings("use_combined_scores", {"false", "true"});
 
-    defaults_.setValue("output_fragment_scores", "false",
-      "If true, output per-fragment scores (pearson_score, xcorr_lag, xcorr_lag_intensity, fragment_rt, fragment_ion_mobility, combined_score) as FloatDataArrays in the output spectra.");
-    defaults_.setValidStrings("output_fragment_scores", {"false", "true"});
+    defaults_.setValue("output_fragment_ims", "false",
+      "If true, output fragment ion mobility values as a FloatDataArray named 'ion_mobility' in the output spectra.");
+    defaults_.setValidStrings("output_fragment_ims", {"false", "true"});
 
     defaultsToParam_();
   }
@@ -115,7 +115,7 @@ namespace OpenMS
     delta_im_weight_ = param_.getValue("delta_im_weight");
     max_nr_ions_ = static_cast<Size>(static_cast<int>(param_.getValue("max_nr_ions")));
     use_combined_scores_ = param_.getValue("use_combined_scores").toBool();
-    output_fragment_scores_ = param_.getValue("output_fragment_scores").toBool();
+    output_fragment_ims_ = param_.getValue("output_fragment_ims").toBool();
   }
 
   void ClusterMassTracesByPrecursor::run(
@@ -172,7 +172,7 @@ namespace OpenMS
 
     // Check if IM data exists in the input maps
     bool has_im_data = false;
-    if (!ms1_traces.empty() && ms1_traces[0].metaValueExists("Ion Mobility Centroid"))
+    if (!ms1_traces.empty() && ms1_traces[0].metaValueExists(Constants::UserParam::ION_MOBILITY_CENTROID))
     {
       has_im_data = true;
     }
@@ -191,7 +191,7 @@ namespace OpenMS
 
       if (has_im_data)
       {
-        precursor_im.push_back(ms1_traces[i].getMetaValue("Ion Mobility Centroid"));
+        precursor_im.push_back(ms1_traces[i].getMetaValue(Constants::UserParam::ION_MOBILITY_CENTROID));
       }
       else
       {
@@ -211,7 +211,7 @@ namespace OpenMS
 
       if (has_im_data)
       {
-        fragment_im.push_back(ms2_traces[i].getMetaValue("Ion Mobility Centroid"));
+        fragment_im.push_back(ms2_traces[i].getMetaValue(Constants::UserParam::ION_MOBILITY_CENTROID));
       }
       else
       {
@@ -646,17 +646,13 @@ namespace OpenMS
         assignments.resize(max_nr_ions_);
       }
 
-      if (output_fragment_scores_)
+      if (output_fragment_ims_)
       {
-        spectrum.getFloatDataArrays().resize(5);
-        spectrum.getFloatDataArrays()[0].setName("pearson_score");
-        spectrum.getFloatDataArrays()[1].setName("xcorr_lag");
-        spectrum.getFloatDataArrays()[2].setName("xcorr_lag_intensity");
-        spectrum.getFloatDataArrays()[3].setName("delta_rt");
-        spectrum.getFloatDataArrays()[4].setName("delta_im");
+        spectrum.getFloatDataArrays().resize(1);
+        spectrum.getFloatDataArrays()[0].setName(Constants::UserParam::ION_MOBILITY_CENTROID);
       }
 
-      // Add fragment ions with their scores, RT, and ion mobility
+      // Add fragment ions with their ion mobility values
       for (const auto& hs : assignments)
       {
         Peak1D peak;
@@ -664,13 +660,9 @@ namespace OpenMS
         peak.setIntensity(fragment_intensity[hs.index]);
         spectrum.push_back(peak);
 
-        if (output_fragment_scores_)
+        if (output_fragment_ims_)
         {
-          spectrum.getFloatDataArrays()[0].push_back(hs.pearson);
-          spectrum.getFloatDataArrays()[1].push_back(static_cast<float>(hs.lag));
-          spectrum.getFloatDataArrays()[2].push_back(hs.lag_intensity);
-          spectrum.getFloatDataArrays()[3].push_back(hs.delta_rt);
-          spectrum.getFloatDataArrays()[4].push_back(hs.delta_im);
+          spectrum.getFloatDataArrays()[0].push_back(static_cast<float>(fragment_im[hs.index]));
         }
       }
 

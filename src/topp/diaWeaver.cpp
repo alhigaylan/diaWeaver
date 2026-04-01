@@ -327,6 +327,8 @@ protected:
       p.setValue("pearson_weight", 1.0, "Weight for the Pearson correlation component in the combined score used to rank precursor-fragment assignments.");
       p.setValue("delta_rt_weight", 1.0, "Weight for the delta RT component in the combined score used to rank precursor-fragment assignments.");
       p.setValue("delta_im_weight", 1.0, "Weight for the delta ion mobility component in the combined score used to rank precursor-fragment assignments.");
+      p.setValue("output_fragment_ims", "false", "If true, output fragment ion mobility values as a FloatDataArray in the output spectra.");
+      p.setValidStrings("output_fragment_ims", {"false", "true"});
       return p;
     }
     return Param();

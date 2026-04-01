@@ -180,8 +180,8 @@ namespace OpenMS
     /// Whether to rank assignments by combined score (true) or Pearson only (false)
     bool use_combined_scores_;
 
-    /// Whether to output per-fragment scores as FloatDataArrays
-    bool output_fragment_scores_;
+    /// Whether to output fragment ion mobility values as a FloatDataArray
+    bool output_fragment_ims_;
   };
 
 } // namespace OpenMS
