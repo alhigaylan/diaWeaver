@@ -21,22 +21,26 @@ namespace OpenMS
     @brief Builds a fragment index from diaWeaver pseudo MS2 spectra.
 
     Reads MS2 spectra from a set of mzML files and maps every fragment peak
-    onto a fixed-width Da bin axis defined by a user-specified m/z range and
-    bin width. The index is stored in CSR format for efficient column access.
+    onto a 2D bin grid (m/z × ion mobility) or a 1D m/z bin axis when no IM
+    data is present. The index is stored in flat CSR format for O(1) bin access.
 
-    **Bin axis**
+    **Bin axes**
 
-      bin_idx(mz) = floor((mz - lower_mz) / bin_width)
-      n_bins      = ceil((upper_mz - lower_mz) / bin_width)
+      mz_bin(mz) = floor((mz  - lower_mz)  / bin_width)
+      im_bin(im) = floor((im  - lower_im)  / bin_width_im)
+      n_mz_bins  = ceil((upper_mz - lower_mz) / bin_width)
+      n_im_bins  = ceil((upper_im - lower_im) / bin_width_im)
 
-    Peaks outside [lower_mz, upper_mz] are ignored.
+    Peaks outside [lower_mz, upper_mz] or [lower_im, upper_im] are ignored.
 
-    **CSR storage**
+    **Flat 2D CSR storage**
 
-      bin_offsets_[b]     → first entry in fragment_entries_ for bin b
-      bin_offsets_[b + 1] → one past the last entry for bin b
+      flat_idx               = mz_bin * n_im_bins + im_bin
+      bin_offsets_[flat_idx]     → first entry in fragment_entries_ for that cell
+      bin_offsets_[flat_idx + 1] → one past the last entry
 
-    Within each bin, entries are in load order (file order, then within-file order).
+    When IM data is absent the index degenerates to 1D (flat_idx = mz_bin).
+    Within each cell, entries are in load order (file order, then within-file order).
   */
   class OPENMS_DLLAPI DiaWeaverAlign : public DefaultParamHandler
   {
@@ -97,19 +101,28 @@ namespace OpenMS
     /// Returns the source mzML file path for the given file index.
     const String& getSourceFile(Size idx) const;
 
-    /// Returns the fragment entries for a given bin (contiguous span in fragment_entries_).
-    /// The returned pointers are valid until the next call to buildIndex().
-    std::pair<const FragmentEntry*, const FragmentEntry*> getBinEntries(uint32_t bin_idx) const;
+    /**
+      @brief Returns the fragment entries for a given (m/z bin, IM bin) cell.
+
+      When hasIM() is false, @p im_bin must be 0 (the index is 1D).
+      The returned pointers are valid until the next call to buildIndex().
+    */
+    std::pair<const FragmentEntry*, const FragmentEntry*>
+      getBinEntries(uint32_t mz_bin, uint32_t im_bin = 0) const;
 
     Size   getSpectrumCount()        const;
     Size   getTotalFragmentEntries() const;
-    Size   getBinCount()             const;
+    Size   getMZBinCount()           const;
+    Size   getIMBinCount()           const;
     double getBinWidth()             const;
+    double getBinWidthIM()           const;
     double getLowerMz()              const;
     double getUpperMz()              const;
+    double getLowerIM()              const;
+    double getUpperIM()              const;
 
-    /// Returns true if ion mobility drift times were detected (and are valid for all spectra).
-    bool   hasPrecursorIM()          const;
+    /// Returns true if ion mobility data was detected for both precursor and fragments (valid for all spectra).
+    bool   hasIM()                   const;
 
 
   protected:
@@ -119,9 +132,9 @@ namespace OpenMS
 
   private:
 
-    std::vector<FragmentEntry> fragment_entries_;  ///< All entries, sorted by (bin, spectrum_id)
-    std::vector<uint32_t>      bin_offsets_;        ///< CSR offsets, size = n_bins_ + 1
-    std::vector<SpectrumEntry> spectrum_entries_;   ///< Spectrum metadata, RT-sorted
+    std::vector<FragmentEntry> fragment_entries_;  ///< All entries, sorted by (flat_idx, spectrum_id)
+    std::vector<uint32_t>      bin_offsets_;        ///< CSR offsets, size = n_mz_bins_*n_im_bins_ + 1
+    std::vector<SpectrumEntry> spectrum_entries_;   ///< Spectrum metadata, in load order
     std::vector<String>        source_files_;       ///< Source file paths
 
     // Derived from parameters in updateMembers_
@@ -129,9 +142,14 @@ namespace OpenMS
     double   upper_mz_{2000.0};
     double   bin_width_{0.1};
     uint32_t n_bins_{0};
-    bool     precursor_im_detected_{false};
+    double   lower_im_{0.60};
+    double   upper_im_{1.70};
+    double   bin_width_im_{0.01};
+    uint32_t n_im_bins_{0};
+    bool     im_detected_{false};
 
     uint32_t toBinIdx_(double mz) const;
+    uint32_t toBinIdx_im_(double im) const;
     uint16_t toMassOffset_(double mz, uint32_t bin_idx) const;
   };
 
