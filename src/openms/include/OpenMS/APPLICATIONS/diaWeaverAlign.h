@@ -17,12 +17,16 @@
 
 namespace OpenMS
 {
+  class MSSpectrum; // full definition in MSSpectrum.h, included by diaWeaverAlign.cpp
+
   /**
     @brief Builds a fragment index from diaWeaver pseudo MS2 spectra.
 
     Reads MS2 spectra from a set of mzML files and maps every fragment peak
     onto a 2D bin grid (m/z × ion mobility) or a 1D m/z bin axis when no IM
-    data is present. The index is stored in flat CSR format for O(1) bin access.
+    data is present. The index is stored in flat Compressed Sparse Row (CSR) format
+    for O(1) bin access. In CSR, a one-dimensional offset array encodes where each bin's
+    entries begin and end inside a contiguous entry array, avoiding per-bin dynamic allocation.
 
     **Bin axes**
 
@@ -35,7 +39,7 @@ namespace OpenMS
 
     **Flat 2D CSR storage**
 
-      flat_idx               = mz_bin * n_im_bins + im_bin
+      flat_idx                   = mz_bin * n_im_bins + im_bin
       bin_offsets_[flat_idx]     → first entry in fragment_entries_ for that cell
       bin_offsets_[flat_idx + 1] → one past the last entry
 
@@ -73,10 +77,22 @@ namespace OpenMS
     {
       double retention_time{-1.0};   ///< Retention time in seconds
       double precursor_mz{-1.0};     ///< Precursor m/z (-1 if unknown)
-      double drift_time{};            ///< Ion mobility drift time. Only valid when hasPrecursorIM() is true.
+      double drift_time{};            ///< Ion mobility drift time. Only valid when hasIM() is true.
       String native_id;              ///< Native ID from the source mzML
       Size   source_file_idx{0};     ///< Index into the source file list
       int    precursor_charge{0};    ///< Precursor charge (0 = unknown)
+    };
+
+    /**
+      @brief Score of one pseudo-MS2 spectrum against an experimental query spectrum.
+
+      @c matched_peaks is the number of query peaks whose (m/z, IM) bin contained
+      at least one fragment entry for this spectrum in the index.
+    */
+    struct MatchResult
+    {
+      uint32_t spectrum_id{0};     ///< Index into spectrum_entries_
+      uint32_t matched_peaks{0};   ///< Number of query peaks that hit this spectrum's bins
     };
 
 
@@ -94,6 +110,23 @@ namespace OpenMS
       @param mzml_files  Paths to centroided pseudo MS2 mzML files.
     */
     void buildIndex(const std::vector<String>& mzml_files);
+
+    /**
+      @brief Score an experimental peak-picked MS2 spectrum against the fragment index.
+
+      For each query peak, all spectrum_ids stored in the matching (m/z, IM) bin are
+      collected into a flat list. That list is sorted and scanned once to count how many
+      query peaks mapped to each spectrum_id — the matched_peaks score.
+
+      If the index was built with IM data the query spectrum must also carry per-peak IM
+      (containsIMData()); a mismatch throws Exception::MissingInformation. If the index
+      is 1D, IM on the query is ignored.
+
+      @param query  Centroided experimental MS2 spectrum.
+      @return       One MatchResult per pseudo-MS2 spectrum that shared at least one bin
+                    with the query, in ascending spectrum_id order.
+    */
+    std::vector<MatchResult> matchSpectrum(const MSSpectrum& query) const;
 
     /// Returns the metadata for the given spectrum ID.
     const SpectrumEntry& getSpectrumEntry(uint32_t id) const;
@@ -121,7 +154,7 @@ namespace OpenMS
     double getLowerIM()              const;
     double getUpperIM()              const;
 
-    /// Returns true if ion mobility data was detected for both precursor and fragments (valid for all spectra).
+    /// Returns true if the index was built with ion mobility data (derived from the index structure, not a stored flag).
     bool   hasIM()                   const;
 
 
@@ -146,7 +179,6 @@ namespace OpenMS
     double   upper_im_{1.70};
     double   bin_width_im_{0.01};
     uint32_t n_im_bins_{0};
-    bool     im_detected_{false};
 
     uint32_t toBinIdx_(double mz) const;
     uint32_t toBinIdx_im_(double im) const;

@@ -6,11 +6,11 @@
 // $Authors: Mohammed Alhigaylan $
 // --------------------------------------------------------------------------
 
+#include "OpenMS/CONCEPT/LogStream.h"
 #include <OpenMS/APPLICATIONS/diaWeaverAlign.h>
 #include <OpenMS/FORMAT/MzMLFile.h>
 #include <OpenMS/IONMOBILITY/IMTypes.h>
 #include <OpenMS/KERNEL/MSExperiment.h>
-
 #include <algorithm>
 #include <cmath>
 
@@ -72,7 +72,8 @@ namespace OpenMS
     spectrum_entries_.clear();
     fragment_entries_.clear();
     bin_offsets_.clear();
-    im_detected_ = false;
+
+    bool im_detected = false;
 
     OPENMS_LOG_INFO << "[DiaWeaverAlign] Building fragment index  "
                     << "mz=[" << lower_mz_ << ", " << upper_mz_ << "] Da  "
@@ -110,8 +111,8 @@ namespace OpenMS
 
         if (raw_spectra.empty())  // first MS2 spectrum sets the IM expectation
         {
-          im_detected_ = (spec.getDriftTime() != IMTypes::DRIFTTIME_NOT_SET);
-          if (im_detected_ != spec.containsIMData())
+          im_detected = (spec.getDriftTime() != IMTypes::DRIFTTIME_NOT_SET);
+          if (im_detected != spec.containsIMData())
           {
             throw Exception::MissingInformation(
               __FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
@@ -119,9 +120,9 @@ namespace OpenMS
               "': precursor drift time and fragment-level IM data are inconsistent.");
           }
           OPENMS_LOG_INFO << "[DiaWeaverAlign] Ion mobility: "
-                          << (im_detected_ ? "detected" : "not detected") << std::endl;
+                          << (im_detected ? "detected" : "not detected") << std::endl;
         }
-        else if (im_detected_ &&
+        else if (im_detected &&
                  (spec.getDriftTime() == IMTypes::DRIFTTIME_NOT_SET || !spec.containsIMData()))
         {
           throw Exception::MissingInformation(
@@ -132,7 +133,7 @@ namespace OpenMS
 
         RawSpecEntry entry;
         entry.retention_time = spec.getRT();
-        if (im_detected_)
+        if (im_detected)
           entry.drift_time = spec.getDriftTime();
         entry.charge         = spec.getPrecursors()[0].getCharge();
         entry.precursor_mz   = spec.getPrecursors()[0].getMZ();
@@ -183,7 +184,7 @@ namespace OpenMS
     /// TODO: diaWeaver by default outputs 500 peaks per spectrum maximum. Is there a better way?
     all_entries.reserve(raw_spectra.size() * 500);
 
-    if (im_detected_)
+    if (im_detected)
     {
       // Per-IM-bin accumulators — allocated once, reused across all spectra.
       std::vector<float>         im_best_intensity(n_im_bins_, -1.0f);
@@ -301,7 +302,7 @@ namespace OpenMS
                     << " fragment entries." << std::endl;
 
     // -----------------------------------------------------------------------
-    // Phase 4: Sort by (bin_idx, spectrum_id) and build CSR offsets.
+    // Phase 4: Sort by (flat_idx, spectrum_id) and build Compressed Sparse Row (CSR) offsets.
     //
     // Entries within each bin are in load order (ascending spectrum_id).
     // -----------------------------------------------------------------------
@@ -313,7 +314,7 @@ namespace OpenMS
         return a.second.spectrum_id < b.second.spectrum_id;
       });
 
-    const Size n_flat_bins = im_detected_
+    const Size n_flat_bins = im_detected
       ? static_cast<Size>(n_bins_) * n_im_bins_
       : n_bins_;
 
@@ -333,6 +334,93 @@ namespace OpenMS
   }
 
   // -------------------------------------------------------------------------
+  // Spectrum matching
+  // -------------------------------------------------------------------------
+
+  std::vector<DiaWeaverAlign::MatchResult>
+  DiaWeaverAlign::matchSpectrum(const MSSpectrum& query) const
+  {
+    // -----------------------------------------------------------------------
+    // Step 1: Collect raw spectrum_id hits.
+    //
+    // For every query peak that falls within the index bounds, look up its
+    // (mz_bin, im_bin) cell and append every spectrum_id found there.
+    // The same spectrum_id is appended once per query peak that hits it —
+    // that repetition is intentional: it allows us to count matched peaks per spectrum.
+    // -----------------------------------------------------------------------
+    
+    const bool query_has_im = query.containsIMData();
+
+    if (query_has_im != hasIM())
+    {
+      throw Exception::MissingInformation(
+        __FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+        "Ion mobility mismatch: the fragment index was built " +
+        String(hasIM() ? "with" : "without") +
+        " IM data but the query spectrum '" + query.getNativeID() +
+        "' " + (query_has_im ? "has" : "has no") + " per-peak ion mobility.");
+    }
+
+    std::vector<uint32_t> hits;
+
+    Size im_array_idx = 0;
+    if (query_has_im)
+      im_array_idx = query.getIMData().first;
+
+    for (Size i = 0; i < query.size(); ++i)
+    {
+      const double mz = query[i].getMZ();
+      if (mz < lower_mz_ || mz >= upper_mz_) continue;
+
+      const uint32_t mz_bin = toBinIdx_(mz);
+
+      if (query_has_im)
+      {
+        const float im = query.getFloatDataArrays()[im_array_idx][i];
+        if (im < lower_im_ || im >= upper_im_) continue;
+
+        const uint32_t im_bin = toBinIdx_im_(im);
+        auto [begin, end] = getBinEntries(mz_bin, im_bin);
+        for (const FragmentEntry* fe = begin; fe != end; ++fe)
+          hits.push_back(fe->spectrum_id);
+      }
+      else
+      {
+        auto [begin, end] = getBinEntries(mz_bin);
+        for (const FragmentEntry* fe = begin; fe != end; ++fe)
+          hits.push_back(fe->spectrum_id);
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Step 2: Sort hits so identical spectrum_ids are adjacent.
+    // -----------------------------------------------------------------------
+
+    std::sort(hits.begin(), hits.end());
+
+    // -----------------------------------------------------------------------
+    // Step 3: Single linear scan — count runs of the same spectrum_id.
+    // -----------------------------------------------------------------------
+
+    std::vector<MatchResult> results;
+
+    Size i = 0;
+    while (i < hits.size())
+    {
+      const uint32_t spec_id = hits[i];
+      uint32_t count = 0;
+      while (i < hits.size() && hits[i] == spec_id)
+      {
+        ++count;
+        ++i;
+      }
+      results.push_back({spec_id, count});
+    }
+
+    return results;
+  }
+
+  // -------------------------------------------------------------------------
   // Accessors
   // -------------------------------------------------------------------------
 
@@ -349,7 +437,7 @@ namespace OpenMS
   std::pair<const DiaWeaverAlign::FragmentEntry*, const DiaWeaverAlign::FragmentEntry*>
   DiaWeaverAlign::getBinEntries(uint32_t mz_bin, uint32_t im_bin) const
   {
-    const uint32_t flat_idx = im_detected_
+    const uint32_t flat_idx = hasIM()
       ? mz_bin * n_im_bins_ + im_bin
       : mz_bin;
     const FragmentEntry* base = fragment_entries_.data();
@@ -366,6 +454,10 @@ namespace OpenMS
   double DiaWeaverAlign::getUpperMz()              const { return upper_mz_; }
   double DiaWeaverAlign::getLowerIM()              const { return lower_im_; }
   double DiaWeaverAlign::getUpperIM()              const { return upper_im_; }
-  bool   DiaWeaverAlign::hasIM()                   const { return im_detected_; }
+  bool   DiaWeaverAlign::hasIM() const
+  {
+    return !bin_offsets_.empty() &&
+           bin_offsets_.size() == static_cast<Size>(n_bins_) * n_im_bins_ + 1;
+  }
 
 } // namespace OpenMS
