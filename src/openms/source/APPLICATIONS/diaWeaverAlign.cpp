@@ -24,31 +24,41 @@ namespace OpenMS
   DiaWeaverAlign::DiaWeaverAlign() :
     DefaultParamHandler("DiaWeaverAlign")
   {
-    defaults_.setValue("lower_mz",      400.0, "Lower m/z bound of the fragment index.");
-    defaults_.setValue("upper_mz",     2000.0, "Upper m/z bound of the fragment index.");
-    defaults_.setValue("bin_width",       0.1, "m/z bin width in Daltons.");
-    defaults_.setValue("lower_im",       0.60, "Lower ion mobility bound (Vs/cm^2).");
-    defaults_.setValue("upper_im",       1.70, "Upper ion mobility bound (Vs/cm^2).");
-    defaults_.setValue("bin_width_im",   0.01, "Ion mobility bin width (Vs/cm^2).");
-    defaults_.setMinFloat("lower_mz",     1.0);
-    defaults_.setMinFloat("upper_mz",     1.0);
-    defaults_.setMinFloat("bin_width",   1e-3);
-    defaults_.setMinFloat("lower_im",     0.0);
-    defaults_.setMinFloat("upper_im",     0.0);
-    defaults_.setMinFloat("bin_width_im", 1e-4);
+    defaults_.setValue("lower_mz",                400.0, "Lower m/z bound of the fragment index.");
+    defaults_.setValue("upper_mz",               2000.0, "Upper m/z bound of the fragment index.");
+    defaults_.setValue("bin_width",                 0.1, "Fragment m/z bin width in Daltons.");
+    defaults_.setValue("lower_im",                 0.60, "Lower ion mobility bound (Vs/cm^2).");
+    defaults_.setValue("upper_im",                 1.70, "Upper ion mobility bound (Vs/cm^2).");
+    defaults_.setValue("bin_width_im",             0.01, "Ion mobility bin width (Vs/cm^2).");
+    defaults_.setValue("lower_precursor_mz",      400.0, "Lower m/z bound of the precursor index.");
+    defaults_.setValue("upper_precursor_mz",     1200.0, "Upper m/z bound of the precursor index.");
+    defaults_.setValue("precursor_bin_width",      0.02, "Precursor m/z bin width in Daltons.");
+    defaults_.setMinFloat("lower_mz",               1.0);
+    defaults_.setMinFloat("upper_mz",               1.0);
+    defaults_.setMinFloat("bin_width",             1e-3);
+    defaults_.setMinFloat("lower_im",               0.0);
+    defaults_.setMinFloat("upper_im",               0.0);
+    defaults_.setMinFloat("bin_width_im",          1e-4);
+    defaults_.setMinFloat("lower_precursor_mz",     1.0);
+    defaults_.setMinFloat("upper_precursor_mz",     1.0);
+    defaults_.setMinFloat("precursor_bin_width",   1e-4);
     defaultsToParam_();
   }
 
   void DiaWeaverAlign::updateMembers_()
   {
-    lower_mz_      = (double)param_.getValue("lower_mz");
-    upper_mz_      = (double)param_.getValue("upper_mz");
-    bin_width_     = (double)param_.getValue("bin_width");
-    n_bins_        = static_cast<uint32_t>(std::ceil((upper_mz_ - lower_mz_) / bin_width_));
-    lower_im_      = (double)param_.getValue("lower_im");
-    upper_im_      = (double)param_.getValue("upper_im");
-    bin_width_im_  = (double)param_.getValue("bin_width_im");
-    n_im_bins_     = static_cast<uint32_t>(std::ceil((upper_im_ - lower_im_) / bin_width_im_));
+    lower_mz_             = (double)param_.getValue("lower_mz");
+    upper_mz_             = (double)param_.getValue("upper_mz");
+    bin_width_            = (double)param_.getValue("bin_width");
+    n_bins_               = static_cast<uint32_t>(std::ceil((upper_mz_ - lower_mz_) / bin_width_));
+    lower_im_             = (double)param_.getValue("lower_im");
+    upper_im_             = (double)param_.getValue("upper_im");
+    bin_width_im_         = (double)param_.getValue("bin_width_im");
+    n_im_bins_            = static_cast<uint32_t>(std::ceil((upper_im_ - lower_im_) / bin_width_im_));
+    lower_precursor_mz_   = (double)param_.getValue("lower_precursor_mz");
+    upper_precursor_mz_   = (double)param_.getValue("upper_precursor_mz");
+    precursor_bin_width_  = (double)param_.getValue("precursor_bin_width");
+    n_precursor_bins_     = static_cast<uint32_t>(std::ceil((upper_precursor_mz_ - lower_precursor_mz_) / precursor_bin_width_));
   }
 
   uint32_t DiaWeaverAlign::toBinIdx_(double mz) const
@@ -66,6 +76,72 @@ namespace OpenMS
     const double bin_start = lower_mz_ + bin_idx * bin_width_;
     const double frac      = (mz - bin_start) / bin_width_;
     return static_cast<uint16_t>(std::max(0.0, std::min(1.0, frac)) * 65535.0);
+  }
+
+  uint32_t DiaWeaverAlign::toPrecursorBinIdx_(double mz) const
+  {
+    return static_cast<uint32_t>((mz - lower_precursor_mz_) / precursor_bin_width_);
+  }
+
+  void DiaWeaverAlign::buildPrecursorIndex()
+  {
+    updateMembers_();
+
+    precursor_entries_.clear();
+    precursor_offsets_.clear();
+
+    if (spectrum_entries_.empty()) return;
+
+    const bool use_im  = hasIM();
+    const Size n_flat  = use_im
+      ? static_cast<Size>(n_precursor_bins_) * n_im_bins_
+      : n_precursor_bins_;
+
+    OPENMS_LOG_INFO << "[DiaWeaverAlign] Building precursor index  "
+                    << "mz=[" << lower_precursor_mz_ << ", " << upper_precursor_mz_ << "] Da  "
+                    << "precursor_bin_width=" << precursor_bin_width_ << " Da  "
+                    << "n_precursor_bins=" << n_precursor_bins_ << std::endl;
+
+    // Build (flat_idx, spectrum_id) pairs from spectrum metadata.
+    std::vector<std::pair<uint32_t, uint32_t>> entries;
+    entries.reserve(spectrum_entries_.size());
+
+    for (Size i = 0; i < spectrum_entries_.size(); ++i)
+    {
+      const SpectrumEntry& se = spectrum_entries_[i];
+      if (se.precursor_mz < lower_precursor_mz_ || se.precursor_mz >= upper_precursor_mz_) continue;
+
+      const uint32_t mz_bin = toPrecursorBinIdx_(se.precursor_mz);
+
+      uint32_t flat_idx;
+      if (use_im)
+      {
+        if (se.drift_time < lower_im_ || se.drift_time >= upper_im_) continue;
+        const uint32_t im_bin = toBinIdx_im_(se.drift_time);
+        flat_idx = mz_bin * n_im_bins_ + im_bin;
+      }
+      else
+      {
+        flat_idx = mz_bin;
+      }
+
+      entries.emplace_back(flat_idx, static_cast<uint32_t>(i));
+    }
+
+    std::sort(entries.begin(), entries.end());
+
+    precursor_offsets_.assign(n_flat + 1, 0);
+    for (const auto& [flat_idx, _] : entries)
+      ++precursor_offsets_[flat_idx + 1];
+    for (Size b = 1; b <= n_flat; ++b)
+      precursor_offsets_[b] += precursor_offsets_[b - 1];
+
+    precursor_entries_.resize(entries.size());
+    for (Size i = 0; i < entries.size(); ++i)
+      precursor_entries_[i] = entries[i].second;
+
+    OPENMS_LOG_INFO << "[DiaWeaverAlign] Precursor index complete: "
+                    << precursor_entries_.size() << " entries." << std::endl;
   }
 
   void DiaWeaverAlign::buildIndex(const std::vector<String>& mzml_files)
@@ -451,13 +527,20 @@ namespace OpenMS
         (query_has_im ? "have" : "have no") + " per-peak ion mobility.");
     }
 
-    // Per-thread accumulator: spectrum_id -> (rts, scores).
-    // schedule(static) assigns contiguous RT chunks to threads, so entries
-    // within each thread's map are already in ascending RT order.
+    // -----------------------------------------------------------------------
+    // First pass: parallel fragment scoring.
+    //
+    // Each thread accumulates into its own private map to avoid contention.
+    // LocalEntry also records the query spectrum index alongside rt and score
+    // so the apex query spectrum can be identified during merge without a
+    // separate RT-to-index lookup.
+    // -----------------------------------------------------------------------
+
     struct LocalEntry
     {
       std::vector<double>   rts;
       std::vector<uint32_t> scores;
+      std::vector<int>      query_indices; ///< index into query_spectra parallel to rts/scores
     };
     using LocalTraceMap = std::unordered_map<uint32_t, LocalEntry>;
     std::vector<LocalTraceMap> thread_traces;
@@ -471,14 +554,11 @@ namespace OpenMS
         auto& entry = local_map[r.spectrum_id];
         entry.rts.push_back(rt);
         entry.scores.push_back(r.matched_peaks);
+        entry.query_indices.push_back(q);
       }
     };
 
 #ifdef _OPENMP
-    // thread_traces is sized inside the parallel region from omp_get_num_threads()
-    // (the actual spawned count) so no OpenMP query is needed before the region.
-    // omp single has an implicit barrier, ensuring the resize is visible to all
-    // threads before any of them calls omp_get_thread_num() to index into it.
     #pragma omp parallel
     {
       #pragma omp single
@@ -496,9 +576,23 @@ namespace OpenMS
       process_query(q, thread_traces[0]);
 #endif
 
-    // Merge per-thread traces. Iterating in ascending thread-index order
-    // preserves RT ordering: thread 0 holds the lowest RTs, thread 1 the next, etc.
+    // -----------------------------------------------------------------------
+    // Merge per-thread traces and track apex (best score) for each spectrum_id.
+    //
+    // Threads processed contiguous RT chunks in ascending order, so appending
+    // in thread-index order preserves RT ordering within each trace.
+    // -----------------------------------------------------------------------
+
+    struct ApexInfo
+    {
+      uint32_t score{0};
+      double   rt{-1.0};
+      int      query_idx{-1};
+    };
+
     std::unordered_map<uint32_t, ScoreTrace> merged;
+    std::unordered_map<uint32_t, ApexInfo>   apex_info;
+
     for (Size t = 0; t < thread_traces.size(); ++t)
     {
       for (auto& [sid, local_entry] : thread_traces[t])
@@ -509,6 +603,17 @@ namespace OpenMS
                          local_entry.rts.begin(), local_entry.rts.end());
         trace.scores.insert(trace.scores.end(),
                             local_entry.scores.begin(), local_entry.scores.end());
+
+        ApexInfo& best = apex_info[sid];
+        for (Size j = 0; j < local_entry.scores.size(); ++j)
+        {
+          if (local_entry.scores[j] > best.score)
+          {
+            best.score     = local_entry.scores[j];
+            best.rt        = local_entry.rts[j];
+            best.query_idx = local_entry.query_indices[j];
+          }
+        }
       }
     }
 
@@ -520,6 +625,82 @@ namespace OpenMS
     std::sort(result.begin(), result.end(),
       [](const ScoreTrace& a, const ScoreTrace& b)
       { return a.spectrum_id < b.spectrum_id; });
+
+    // Populate apex fields and group spectrum_ids by their apex query spectrum index.
+    std::vector<std::vector<uint32_t>> apex_groups(query_spectra.size());
+    for (ScoreTrace& trace : result)
+    {
+      const ApexInfo& best = apex_info[trace.spectrum_id];
+      trace.apex_score = best.score;
+      trace.apex_rt    = best.rt;
+      apex_groups[best.query_idx].push_back(trace.spectrum_id);
+    }
+
+    // -----------------------------------------------------------------------
+    // Second pass: collect apex fingerprints.
+    //
+    // For each query spectrum that is the apex for at least one spectrum_id,
+    // re-scan its peaks and record (flat_bin_idx, experimental_intensity) for
+    // every fragment index hit that belongs to a target spectrum_id.
+    //
+    // is_target uses uint8_t (not bool) to avoid std::vector<bool> bit-packing,
+    // which would prevent safe per-element writes from the inner loop.
+    // spec_to_result_idx maps spectrum_id -> index in result for direct access.
+    // Both arrays are O(N_index) and reset via target_list to avoid O(N_index) scans.
+    // -----------------------------------------------------------------------
+
+    std::vector<int>     spec_to_result_idx(spectrum_entries_.size(), -1);
+    std::vector<uint8_t> is_target(spectrum_entries_.size(), 0);
+    std::vector<uint32_t> target_list;
+
+    for (int r = 0; r < static_cast<int>(result.size()); ++r)
+      spec_to_result_idx[result[r].spectrum_id] = r;
+
+    for (int q = 0; q < static_cast<int>(query_spectra.size()); ++q)
+    {
+      if (apex_groups[q].empty()) continue;
+
+      for (uint32_t sid : apex_groups[q])
+      {
+        is_target[sid] = 1;
+        target_list.push_back(sid);
+      }
+
+      const MSSpectrum& apex_spec = *query_spectra[q];
+      Size im_array_idx = 0;
+      if (query_has_im)
+        im_array_idx = apex_spec.getIMData().first;
+
+      for (Size i = 0; i < apex_spec.size(); ++i)
+      {
+        const double mz = apex_spec[i].getMZ();
+        if (mz < lower_mz_ || mz >= upper_mz_) continue;
+        const float    intensity = apex_spec[i].getIntensity();
+        const uint32_t mz_bin   = toBinIdx_(mz);
+
+        uint32_t im_bin = 0;
+        if (query_has_im)
+        {
+          const float im = apex_spec.getFloatDataArrays()[im_array_idx][i];
+          if (im < lower_im_ || im >= upper_im_) continue;
+          im_bin = toBinIdx_im_(im);
+        }
+
+        const uint32_t flat_idx = query_has_im
+          ? mz_bin * n_im_bins_ + im_bin
+          : mz_bin;
+
+        auto [begin, end] = getBinEntries(mz_bin, im_bin);
+        for (const FragmentEntry* fe = begin; fe != end; ++fe)
+        {
+          if (is_target[fe->spectrum_id])
+            result[spec_to_result_idx[fe->spectrum_id]].apex_fingerprint.push_back({flat_idx, intensity});
+        }
+      }
+
+      for (uint32_t sid : target_list) is_target[sid] = 0;
+      target_list.clear();
+    }
 
     return result;
   }
@@ -547,6 +728,21 @@ namespace OpenMS
     const FragmentEntry* base = fragment_entries_.data();
     return { base + bin_offsets_[flat_idx], base + bin_offsets_[flat_idx + 1] };
   }
+
+  std::pair<const uint32_t*, const uint32_t*>
+  DiaWeaverAlign::getPrecursorBinEntries(uint32_t mz_bin, uint32_t im_bin) const
+  {
+    const uint32_t flat_idx = hasIM()
+      ? mz_bin * n_im_bins_ + im_bin
+      : mz_bin;
+    const uint32_t* base = precursor_entries_.data();
+    return { base + precursor_offsets_[flat_idx], base + precursor_offsets_[flat_idx + 1] };
+  }
+
+  Size   DiaWeaverAlign::getPrecursorBinCount()  const { return n_precursor_bins_; }
+  double DiaWeaverAlign::getPrecursorBinWidth()  const { return precursor_bin_width_; }
+  double DiaWeaverAlign::getLowerPrecursorMz()   const { return lower_precursor_mz_; }
+  double DiaWeaverAlign::getUpperPrecursorMz()   const { return upper_precursor_mz_; }
 
   Size   DiaWeaverAlign::getSpectrumCount()        const { return spectrum_entries_.size(); }
   Size   DiaWeaverAlign::getTotalFragmentEntries() const { return fragment_entries_.size(); }

@@ -97,17 +97,35 @@ namespace OpenMS
     };
 
     /**
+      @brief One fragment hit recorded at the apex query spectrum for a spectrum_id.
+
+      Stores the flat 2D bin index and the experimental query peak intensity that
+      produced the hit. Used for fragment-level similarity comparison between
+      spectrum_ids that share the same precursor identity bucket.
+    */
+    struct ApexFragment
+    {
+      uint32_t flat_bin_idx{0};          ///< Flat 2D fragment bin (mz_bin * n_im_bins + im_bin)
+      float    experimental_intensity{0}; ///< Intensity of the query peak that produced this hit
+    };
+
+    /**
       @brief Per-spectrum-id score trace across an MSExperiment of query spectra.
 
       @c rts and @c scores are parallel vectors in ascending RT order.
       Only query spectra whose matched_peaks count met the threshold passed to
-      matchExperiment() contribute an entry.
+      matchExperiment() contribute an entry. @c apex_rt and @c apex_score identify
+      the single highest-scoring query RT. @c apex_fingerprint holds the fragment
+      hits recorded at that apex query spectrum, used for isobaric disambiguation.
     */
     struct ScoreTrace
     {
       uint32_t             spectrum_id{0}; ///< Index into spectrum_entries_
       std::vector<double>   rts;           ///< Query spectrum RTs at which score >= threshold, ascending
       std::vector<uint32_t> scores;        ///< matched_peaks count at each RT, parallel to rts
+      double   apex_rt{-1.0};             ///< Query RT at which matched_peaks was highest
+      uint32_t apex_score{0};             ///< Highest matched_peaks count across all query RTs
+      std::vector<ApexFragment> apex_fingerprint; ///< Fragment hits at the apex query spectrum
     };
 
 
@@ -166,6 +184,33 @@ namespace OpenMS
     std::vector<ScoreTrace> matchExperiment(const MSExperiment& experiment,
                                              uint32_t min_matched_peaks = 2) const;
 
+    /**
+      @brief Build the precursor index from the loaded spectrum metadata.
+
+      Maps every spectrum_id onto a 2D bin (precursor m/z × ion mobility) or a
+      1D m/z bin when no IM data is present, using the same CSR layout as the
+      fragment index. Must be called after buildIndex().
+
+      Spectrum_ids whose precursor_mz falls outside [lower_mz, upper_mz] are skipped.
+      The precursor bin width is controlled by the @c precursor_bin_width parameter
+      (default 0.02 Da), which is independent of the fragment @c bin_width.
+    */
+    void buildPrecursorIndex();
+
+    /**
+      @brief Returns the spectrum_ids stored in a given precursor (m/z bin, IM bin) cell.
+
+      When hasIM() is false, @p im_bin must be 0 (the index is 1D).
+      The returned pointers are valid until the next call to buildIndex() or buildPrecursorIndex().
+    */
+    std::pair<const uint32_t*, const uint32_t*>
+      getPrecursorBinEntries(uint32_t mz_bin, uint32_t im_bin = 0) const;
+
+    Size   getPrecursorBinCount()  const;
+    double getPrecursorBinWidth()  const;
+    double getLowerPrecursorMz()   const;
+    double getUpperPrecursorMz()   const;
+
     /// Returns the metadata for the given spectrum ID.
     const SpectrumEntry& getSpectrumEntry(uint32_t id) const;
 
@@ -203,10 +248,12 @@ namespace OpenMS
 
   private:
 
-    std::vector<FragmentEntry> fragment_entries_;  ///< All entries, sorted by (flat_idx, spectrum_id)
-    std::vector<uint32_t>      bin_offsets_;        ///< CSR offsets, size = n_mz_bins_*n_im_bins_ + 1
-    std::vector<SpectrumEntry> spectrum_entries_;   ///< Spectrum metadata, in load order
-    std::vector<String>        source_files_;       ///< Source file paths
+    std::vector<FragmentEntry> fragment_entries_;   ///< All entries, sorted by (flat_idx, spectrum_id)
+    std::vector<uint32_t>      bin_offsets_;         ///< CSR offsets, size = n_bins_*n_im_bins_ + 1
+    std::vector<uint32_t>      precursor_entries_;   ///< spectrum_ids sorted by precursor flat_idx
+    std::vector<uint32_t>      precursor_offsets_;   ///< CSR offsets, size = n_precursor_bins_*n_im_bins_ + 1
+    std::vector<SpectrumEntry> spectrum_entries_;    ///< Spectrum metadata, in load order
+    std::vector<String>        source_files_;        ///< Source file paths
 
     // Derived from parameters in updateMembers_
     double   lower_mz_{400.0};
@@ -217,10 +264,15 @@ namespace OpenMS
     double   upper_im_{1.70};
     double   bin_width_im_{0.01};
     uint32_t n_im_bins_{0};
+    double   lower_precursor_mz_{400.0};
+    double   upper_precursor_mz_{1200.0};
+    double   precursor_bin_width_{0.02};
+    uint32_t n_precursor_bins_{0};
 
     uint32_t toBinIdx_(double mz) const;
     uint32_t toBinIdx_im_(double im) const;
     uint16_t toMassOffset_(double mz, uint32_t bin_idx) const;
+    uint32_t toPrecursorBinIdx_(double mz) const;
   };
 
 } // namespace OpenMS
