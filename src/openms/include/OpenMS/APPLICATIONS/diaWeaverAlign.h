@@ -10,6 +10,8 @@
 
 #include <OpenMS/DATASTRUCTURES/DefaultParamHandler.h>
 #include <OpenMS/DATASTRUCTURES/String.h>
+#include <OpenMS/KERNEL/MSExperiment.h>
+#include <OpenMS/KERNEL/MSSpectrum.h>
 #include <OpenMS/OpenMSConfig.h>
 
 #include <cstdint>
@@ -17,8 +19,6 @@
 
 namespace OpenMS
 {
-  class MSSpectrum;   // full definition in MSSpectrum.h, included by diaWeaverAlign.cpp
-  class MSExperiment; // full definition in MSExperiment.h, included by diaWeaverAlign.cpp
 
   /**
     @brief Builds a fragment index from diaWeaver pseudo MS2 spectra.
@@ -110,6 +110,32 @@ namespace OpenMS
     };
 
     /**
+      @brief One shared fragment entry in a FeatureGroup.
+
+      Represents a fragment bin seen in at least two grouped spectrum_ids, carrying
+      the maximum experimental intensity observed across all group members at that bin.
+    */
+    struct SharedFragment
+    {
+      uint32_t flat_bin_idx{0};   ///< Flat 2D fragment bin (mz_bin * n_im_bins + im_bin)
+      float    max_intensity{0};  ///< Max experimental intensity across all group members
+    };
+
+    /**
+      @brief A group of spectrum_ids aligned to the same compound across source files.
+
+      Members share the same precursor bin, have close apex RTs in the query experiment,
+      and have sufficient fragment overlap. @c shared_fragments lists every fragment bin
+      seen in at least two members, with the maximum intensity across the group.
+    */
+    struct FeatureGroup
+    {
+      std::vector<uint32_t>       spectrum_ids;     ///< Grouped spectrum_ids, one per source file ideally
+      std::vector<SharedFragment> shared_fragments; ///< Fragment bins shared by >=2 members, sorted by flat_bin_idx
+      double                      mean_apex_rt{-1.0}; ///< Mean apex RT across all members (seconds)
+    };
+
+    /**
       @brief Per-spectrum-id score trace across an MSExperiment of query spectra.
 
       @c rts and @c scores are parallel vectors in ascending RT order.
@@ -143,6 +169,24 @@ namespace OpenMS
       @param mzml_files  Paths to centroided pseudo MS2 mzML files.
     */
     void buildIndex(const std::vector<String>& mzml_files);
+
+    /**
+      @brief Build the fragment index from pre-loaded MSExperiment objects.
+
+      Same as the file-path overload but accepts experiments already in memory,
+      avoiding a second round of disk I/O when the caller has already loaded the
+      data (e.g. after window-based partitioning). Each element of @p experiments
+      corresponds to one logical source file; @p source_names provides the display
+      name stored in the source-file list (may be empty strings).
+
+      Spectra without precursors or with empty peak lists are skipped.
+
+      @param experiments   Pre-loaded pseudo-MS2 experiments, one per source file.
+      @param source_names  Display names parallel to @p experiments (may be shorter;
+                           missing entries default to an empty string).
+    */
+    void buildIndex(const std::vector<MSExperiment>& experiments,
+                    const std::vector<String>& source_names = {});
 
     /**
       @brief Score an experimental peak-picked MS2 spectrum against the fragment index.
@@ -196,6 +240,31 @@ namespace OpenMS
       (default 0.02 Da), which is independent of the fragment @c bin_width.
     */
     void buildPrecursorIndex();
+
+    /**
+      @brief Group aligned spectrum_ids into feature groups across source files.
+
+      Operates on the output of matchExperiment(). For each ScoreTrace, queries
+      the precursor index in a ±1 bin neighborhood to find candidate spectrum_ids
+      with a similar precursor identity. Candidate pairs are validated against three
+      criteria: different source files, apex RT within @p rt_tolerance, and at least
+      @p min_fragment_overlap shared flat_bin_idx values in their apex fingerprints.
+      Valid pairs are merged with Union-Find; the final connected components become
+      FeatureGroups.
+
+      For each FeatureGroup, shared_fragments lists every flat_bin_idx seen in >=2
+      members, carrying the maximum experimental intensity across the group.
+
+      Must be called after buildPrecursorIndex().
+
+      @param traces               Output of matchExperiment().
+      @param rt_tolerance         Maximum apex RT difference in seconds (default 10.0).
+      @param min_fragment_overlap Minimum shared flat_bin_idx count for a valid pair (default 5).
+      @return                     FeatureGroups with >=2 members, sorted by mean_apex_rt.
+    */
+    std::vector<FeatureGroup> groupFeatures(const std::vector<ScoreTrace>& traces,
+                                             double   rt_tolerance        = 10.0,
+                                             uint32_t min_fragment_overlap = 5) const;
 
     /**
       @brief Returns the spectrum_ids stored in a given precursor (m/z bin, IM bin) cell.
@@ -268,6 +337,32 @@ namespace OpenMS
     double   upper_precursor_mz_{1200.0};
     double   precursor_bin_width_{0.02};
     uint32_t n_precursor_bins_{0};
+
+    /// Internal per-spectrum record used during index construction.
+    struct RawSpecEntry_
+    {
+      MSSpectrum spectrum;
+      double     retention_time{-1.0};
+      double     precursor_mz{-1.0};
+      double     drift_time{-1.0};
+      int        charge{0};
+      String     native_id;
+      Size       source_idx{0};
+    };
+
+    /// Shared phases 2-4 of index construction (spectrum-ID assignment,
+    /// fragment binning, CSR build). Called by both buildIndex overloads.
+    void buildIndexCore_(std::vector<RawSpecEntry_>& raw_spectra);
+
+    /// Append spectra from one MSExperiment to @p raw_spectra.
+    /// Returns the updated @p im_initialised flag.
+    static bool collectSpectraFromExperiment_(
+      const MSExperiment& exp,
+      Size                file_idx,
+      const String&       file_label,
+      bool&               im_detected,
+      bool                im_initialised,
+      std::vector<RawSpecEntry_>& raw_spectra);
 
     uint32_t toBinIdx_(double mz) const;
     uint32_t toBinIdx_im_(double im) const;

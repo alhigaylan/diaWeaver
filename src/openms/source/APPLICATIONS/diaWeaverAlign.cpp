@@ -13,6 +13,7 @@
 #include <OpenMS/KERNEL/MSExperiment.h>
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 #include <unordered_map>
 #ifdef _OPENMP
 #include <omp.h>
@@ -144,6 +145,64 @@ namespace OpenMS
                     << precursor_entries_.size() << " entries." << std::endl;
   }
 
+  // ---------------------------------------------------------------------------
+  // Private helper: populate RawSpecEntry_ from a single MSExperiment.
+  // Accepts pseudo-MS2 spectra regardless of MS level (diaWeaver emits them
+  // as MS level 1). A spectrum is accepted when it is non-empty and carries
+  // at least one precursor.
+  // ---------------------------------------------------------------------------
+  bool DiaWeaverAlign::collectSpectraFromExperiment_(
+    const MSExperiment& exp,
+    Size file_idx,
+    const String& file_label,
+    bool& im_detected,
+    bool im_initialised,
+    std::vector<RawSpecEntry_>& raw_spectra)
+  {
+    for (const MSSpectrum& spec_ref : exp)
+    {
+      // Accept any spectrum that is non-empty and has a precursor.
+      if (spec_ref.empty() || spec_ref.getPrecursors().empty()) continue;
+
+      MSSpectrum spec = spec_ref; // need a mutable copy for std::move below
+
+      if (!im_initialised)
+      {
+        im_detected = (spec.getDriftTime() != IMTypes::DRIFTTIME_NOT_SET);
+        if (im_detected != spec.containsIMData())
+        {
+          throw Exception::MissingInformation(
+            __FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+            "Spectrum '" + spec.getNativeID() + "' in '" + file_label +
+            "': precursor drift time and fragment-level IM data are inconsistent.");
+        }
+        OPENMS_LOG_INFO << "[DiaWeaverAlign] Ion mobility: "
+                        << (im_detected ? "detected" : "not detected") << std::endl;
+        im_initialised = true;
+      }
+      else if (im_detected &&
+               (spec.getDriftTime() == IMTypes::DRIFTTIME_NOT_SET || !spec.containsIMData()))
+      {
+        throw Exception::MissingInformation(
+          __FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+          "Ion mobility was detected in earlier spectra but spectrum '" +
+          spec.getNativeID() + "' in '" + file_label + "' has incomplete IM data.");
+      }
+
+      DiaWeaverAlign::RawSpecEntry_ entry;
+      entry.retention_time = spec.getRT();
+      if (im_detected)
+        entry.drift_time = spec.getDriftTime();
+      entry.charge       = spec.getPrecursors()[0].getCharge();
+      entry.precursor_mz = spec.getPrecursors()[0].getMZ();
+      entry.native_id    = spec.getNativeID();
+      entry.source_idx   = file_idx;
+      entry.spectrum     = std::move(spec);
+      raw_spectra.push_back(std::move(entry));
+    }
+    return im_initialised;
+  }
+
   void DiaWeaverAlign::buildIndex(const std::vector<String>& mzml_files)
   {
     updateMembers_();
@@ -153,7 +212,8 @@ namespace OpenMS
     fragment_entries_.clear();
     bin_offsets_.clear();
 
-    bool im_detected = false;
+    bool im_detected     = false;
+    bool im_initialised  = false;
 
     OPENMS_LOG_INFO << "[DiaWeaverAlign] Building fragment index  "
                     << "mz=[" << lower_mz_ << ", " << upper_mz_ << "] Da  "
@@ -162,21 +222,10 @@ namespace OpenMS
                     << "bin_width_im=" << bin_width_im_ << "  n_im_bins=" << n_im_bins_ << std::endl;
 
     // -----------------------------------------------------------------------
-    // Phase 1: Load all MS2 spectra.
+    // Phase 1: Load all pseudo-MS2 spectra.
     // -----------------------------------------------------------------------
 
-    struct RawSpecEntry
-    {
-      MSSpectrum spectrum;
-      double     retention_time{-1.0};
-      double     precursor_mz{-1.0};
-      double     drift_time{-1.0};
-      int        charge{0};
-      String     native_id;
-      Size       source_idx{0};
-    };
-
-    std::vector<RawSpecEntry> raw_spectra;
+    std::vector<RawSpecEntry_> raw_spectra;
 
     for (Size file_idx = 0; file_idx < mzml_files.size(); ++file_idx)
     {
@@ -185,49 +234,70 @@ namespace OpenMS
       MSExperiment exp;
       MzMLFile().load(mzml_files[file_idx], exp);
 
-      for (auto& spec : exp)
-      {
-        if (spec.getMSLevel() != 2 || spec.empty()) continue;
-
-        if (raw_spectra.empty())  // first MS2 spectrum sets the IM expectation
-        {
-          im_detected = (spec.getDriftTime() != IMTypes::DRIFTTIME_NOT_SET);
-          if (im_detected != spec.containsIMData())
-          {
-            throw Exception::MissingInformation(
-              __FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-              "Spectrum '" + spec.getNativeID() + "' in '" + mzml_files[file_idx] +
-              "': precursor drift time and fragment-level IM data are inconsistent.");
-          }
-          OPENMS_LOG_INFO << "[DiaWeaverAlign] Ion mobility: "
-                          << (im_detected ? "detected" : "not detected") << std::endl;
-        }
-        else if (im_detected &&
-                 (spec.getDriftTime() == IMTypes::DRIFTTIME_NOT_SET || !spec.containsIMData()))
-        {
-          throw Exception::MissingInformation(
-            __FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-            "Ion mobility was detected in earlier spectra but spectrum '" +
-            spec.getNativeID() + "' in '" + mzml_files[file_idx] + "' has incomplete IM data.");
-        }
-
-        RawSpecEntry entry;
-        entry.retention_time = spec.getRT();
-        if (im_detected)
-          entry.drift_time = spec.getDriftTime();
-        entry.charge         = spec.getPrecursors()[0].getCharge();
-        entry.precursor_mz   = spec.getPrecursors()[0].getMZ();
-        entry.native_id      = spec.getNativeID();
-        entry.source_idx     = file_idx;
-        entry.spectrum       = std::move(spec);
-        raw_spectra.push_back(std::move(entry));
-      }
+      im_initialised = collectSpectraFromExperiment_(
+        exp, file_idx, mzml_files[file_idx], im_detected, im_initialised, raw_spectra);
     }
 
     OPENMS_LOG_INFO << "[DiaWeaverAlign] Loaded " << raw_spectra.size()
-                    << " MS2 spectra." << std::endl;
+                    << " pseudo-MS2 spectra." << std::endl;
 
     if (raw_spectra.empty()) return;
+
+    buildIndexCore_(raw_spectra);
+  }
+
+  void DiaWeaverAlign::buildIndex(const std::vector<MSExperiment>& experiments,
+                                   const std::vector<String>& source_names)
+  {
+    updateMembers_();
+
+    source_files_.clear();
+    spectrum_entries_.clear();
+    fragment_entries_.clear();
+    bin_offsets_.clear();
+
+    bool im_detected    = false;
+    bool im_initialised = false;
+
+    OPENMS_LOG_INFO << "[DiaWeaverAlign] Building fragment index (in-memory)  "
+                    << "mz=[" << lower_mz_ << ", " << upper_mz_ << "] Da  "
+                    << "bin_width=" << bin_width_ << " Da  n_mz_bins=" << n_bins_ << "  "
+                    << "im=[" << lower_im_ << ", " << upper_im_ << "] Vs/cm^2  "
+                    << "bin_width_im=" << bin_width_im_ << "  n_im_bins=" << n_im_bins_ << std::endl;
+
+    std::vector<RawSpecEntry_> raw_spectra;
+
+    for (Size exp_idx = 0; exp_idx < experiments.size(); ++exp_idx)
+    {
+      const String& label = (exp_idx < source_names.size())
+        ? source_names[exp_idx]
+        : String("experiment[") + String(exp_idx) + "]";
+      source_files_.push_back(label);
+
+      im_initialised = collectSpectraFromExperiment_(
+        experiments[exp_idx], exp_idx, label, im_detected, im_initialised, raw_spectra);
+    }
+
+    OPENMS_LOG_INFO << "[DiaWeaverAlign] Loaded " << raw_spectra.size()
+                    << " pseudo-MS2 spectra from " << experiments.size() << " experiment(s)." << std::endl;
+
+    if (raw_spectra.empty()) return;
+
+    buildIndexCore_(raw_spectra);
+  }
+
+  // -----------------------------------------------------------------------
+  // Phase 2-4: Shared index construction.
+  // Assigns spectrum IDs, bins fragments, builds CSR.
+  // Called by both buildIndex overloads after they populate raw_spectra.
+  // -----------------------------------------------------------------------
+  void DiaWeaverAlign::buildIndexCore_(std::vector<RawSpecEntry_>& raw_spectra)
+  {
+    // Determine IM presence from the loaded data. hasIM() cannot be used here
+    // because bin_offsets_ is still empty at this point in construction.
+    const bool im_detected =
+      !raw_spectra.empty() &&
+      raw_spectra.front().spectrum.getDriftTime() != IMTypes::DRIFTTIME_NOT_SET;
 
     // -----------------------------------------------------------------------
     // Phase 2: Assign contiguous spectrum IDs in load order
@@ -701,6 +771,186 @@ namespace OpenMS
       for (uint32_t sid : target_list) is_target[sid] = 0;
       target_list.clear();
     }
+
+    return result;
+  }
+
+  std::vector<DiaWeaverAlign::FeatureGroup>
+  DiaWeaverAlign::groupFeatures(const std::vector<ScoreTrace>& traces,
+                                 double   rt_tolerance,
+                                 uint32_t min_fragment_overlap) const
+  {
+    if (traces.empty() || precursor_offsets_.empty()) return {};
+
+    // -----------------------------------------------------------------------
+    // Pre-computation
+    //
+    // spec_to_trace_idx: direct-address lookup from spectrum_id to index in traces.
+    // fingerprint_bins:  per-trace sorted, deduplicated flat_bin_idx vector for
+    //                    O(F_A + F_B) two-pointer overlap counting.
+    // -----------------------------------------------------------------------
+
+    std::vector<int> spec_to_trace_idx(spectrum_entries_.size(), -1);
+    for (int i = 0; i < static_cast<int>(traces.size()); ++i)
+      spec_to_trace_idx[traces[i].spectrum_id] = i;
+
+    std::vector<std::vector<uint32_t>> fingerprint_bins(traces.size());
+    for (Size i = 0; i < traces.size(); ++i)
+    {
+      auto& bins = fingerprint_bins[i];
+      bins.reserve(traces[i].apex_fingerprint.size());
+      for (const ApexFragment& af : traces[i].apex_fingerprint)
+        bins.push_back(af.flat_bin_idx);
+      std::sort(bins.begin(), bins.end());
+      bins.erase(std::unique(bins.begin(), bins.end()), bins.end());
+    }
+
+    // Two-pointer overlap count on sorted flat_bin_idx vectors.
+    auto count_overlap = [](const std::vector<uint32_t>& a,
+                            const std::vector<uint32_t>& b) -> uint32_t
+    {
+      uint32_t count = 0;
+      Size i = 0, j = 0;
+      while (i < a.size() && j < b.size())
+      {
+        if      (a[i] < b[j]) ++i;
+        else if (b[j] < a[i]) ++j;
+        else { ++count; ++i; ++j; }
+      }
+      return count;
+    };
+
+    // -----------------------------------------------------------------------
+    // Union-Find with path-halving and union by rank.
+    // -----------------------------------------------------------------------
+
+    std::vector<int> parent(traces.size());
+    std::vector<int> uf_rank(traces.size(), 0);
+    std::iota(parent.begin(), parent.end(), 0);
+
+    auto find = [&](int x) -> int
+    {
+      while (parent[x] != x)
+      {
+        parent[x] = parent[parent[x]]; // path halving
+        x = parent[x];
+      }
+      return x;
+    };
+
+    auto unite = [&](int x, int y)
+    {
+      x = find(x); y = find(y);
+      if (x == y) return;
+      if (uf_rank[x] < uf_rank[y]) std::swap(x, y);
+      parent[y] = x;
+      if (uf_rank[x] == uf_rank[y]) ++uf_rank[x];
+    };
+
+    // -----------------------------------------------------------------------
+    // Pair validation.
+    //
+    // For each trace i, query the ±1 precursor bin neighborhood to find
+    // candidate spectrum_ids. Pairs are only processed when tj > ti to avoid
+    // double-counting. Three criteria must all pass: different source file,
+    // apex RT within tolerance, and sufficient fragment overlap.
+    // -----------------------------------------------------------------------
+
+    const bool use_im = hasIM();
+
+    for (Size ti = 0; ti < traces.size(); ++ti)
+    {
+      const SpectrumEntry& se_i = getSpectrumEntry(traces[ti].spectrum_id);
+      if (se_i.precursor_mz < lower_precursor_mz_ || se_i.precursor_mz >= upper_precursor_mz_) continue;
+
+      const uint32_t mz_bin_i = toPrecursorBinIdx_(se_i.precursor_mz);
+      const uint32_t im_bin_i = use_im ? toBinIdx_im_(se_i.drift_time) : 0;
+
+      const int mz_lo = std::max(0, static_cast<int>(mz_bin_i) - 1);
+      const int mz_hi = std::min(static_cast<int>(n_precursor_bins_) - 1, static_cast<int>(mz_bin_i) + 1);
+      const int im_lo = use_im ? std::max(0, static_cast<int>(im_bin_i) - 1) : 0;
+      const int im_hi = use_im ? std::min(static_cast<int>(n_im_bins_) - 1, static_cast<int>(im_bin_i) + 1) : 0;
+
+      for (int mb = mz_lo; mb <= mz_hi; ++mb)
+      {
+        for (int ib = im_lo; ib <= im_hi; ++ib)
+        {
+          auto [begin, end] = getPrecursorBinEntries(
+            static_cast<uint32_t>(mb), static_cast<uint32_t>(ib));
+
+          for (const uint32_t* sid_ptr = begin; sid_ptr != end; ++sid_ptr)
+          {
+            const int tj = spec_to_trace_idx[*sid_ptr];
+            if (tj <= static_cast<int>(ti)) continue; // process each pair once only
+
+            const SpectrumEntry& se_j = getSpectrumEntry(*sid_ptr);
+            if (se_i.source_file_idx == se_j.source_file_idx) continue;
+            if (std::abs(traces[ti].apex_rt - traces[tj].apex_rt) > rt_tolerance) continue;
+            if (count_overlap(fingerprint_bins[ti], fingerprint_bins[tj]) < min_fragment_overlap) continue;
+
+            unite(static_cast<int>(ti), tj);
+          }
+        }
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Collect Union-Find components into FeatureGroups.
+    //
+    // Singletons (no valid pair was found) are discarded.
+    // For each group, accumulate per-fragment (count, max_intensity) to
+    // identify shared fragments (count >= 2) and their best intensity.
+    // -----------------------------------------------------------------------
+
+    std::unordered_map<int, std::vector<int>> components;
+    for (Size i = 0; i < traces.size(); ++i)
+      components[find(static_cast<int>(i))].push_back(static_cast<int>(i));
+
+    std::vector<FeatureGroup> result;
+    result.reserve(components.size());
+
+    for (auto& [root, members] : components)
+    {
+      if (members.size() < 2) continue;
+
+      FeatureGroup group;
+      group.spectrum_ids.reserve(members.size());
+
+      double rt_sum = 0.0;
+      std::unordered_map<uint32_t, std::pair<uint32_t, float>> frag_acc; // flat_idx -> (count, max_intensity)
+
+      for (int mi : members)
+      {
+        group.spectrum_ids.push_back(traces[mi].spectrum_id);
+        rt_sum += traces[mi].apex_rt;
+
+        for (const ApexFragment& af : traces[mi].apex_fingerprint)
+        {
+          auto& acc = frag_acc[af.flat_bin_idx];
+          ++acc.first;
+          if (af.experimental_intensity > acc.second)
+            acc.second = af.experimental_intensity;
+        }
+      }
+
+      group.mean_apex_rt = rt_sum / static_cast<double>(members.size());
+
+      for (const auto& [flat_idx, acc] : frag_acc)
+      {
+        if (acc.first >= 2)
+          group.shared_fragments.push_back({flat_idx, acc.second});
+      }
+
+      std::sort(group.shared_fragments.begin(), group.shared_fragments.end(),
+        [](const SharedFragment& a, const SharedFragment& b)
+        { return a.flat_bin_idx < b.flat_bin_idx; });
+
+      result.push_back(std::move(group));
+    }
+
+    std::sort(result.begin(), result.end(),
+      [](const FeatureGroup& a, const FeatureGroup& b)
+      { return a.mean_apex_rt < b.mean_apex_rt; });
 
     return result;
   }
