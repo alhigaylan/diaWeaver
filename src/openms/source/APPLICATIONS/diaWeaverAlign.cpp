@@ -8,11 +8,13 @@
 
 #include "OpenMS/CONCEPT/LogStream.h"
 #include <OpenMS/APPLICATIONS/diaWeaverAlign.h>
+#include <OpenMS/CONCEPT/Exception.h>
 #include <OpenMS/FORMAT/MzMLFile.h>
 #include <OpenMS/IONMOBILITY/IMTypes.h>
 #include <OpenMS/KERNEL/MSExperiment.h>
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <numeric>
 #include <unordered_map>
 #ifdef _OPENMP
@@ -44,6 +46,13 @@ namespace OpenMS
     defaults_.setMinFloat("upper_precursor_mz",     1.0);
     defaults_.setMinFloat("precursor_bin_width",   1e-4);
     defaultsToParam_();
+  }
+
+  DiaWeaverAlign::~DiaWeaverAlign()
+  {
+    // Close any streaming FILE handles that may be open (e.g. after an exception).
+    if (stream_frags_fp_) { std::fclose(stream_frags_fp_); stream_frags_fp_ = nullptr; }
+    if (stream_meta_fp_)  { std::fclose(stream_meta_fp_);  stream_meta_fp_  = nullptr; }
   }
 
   void DiaWeaverAlign::updateMembers_()
@@ -286,6 +295,144 @@ namespace OpenMS
     buildIndexCore_(raw_spectra);
   }
 
+  // -------------------------------------------------------------------------
+  // binSingleSpectrum_: bin fragment peaks of one spectrum.
+  // Used by appendSpectrumToStream; buildIndexCore_ has its own optimised loop.
+  // -------------------------------------------------------------------------
+  void DiaWeaverAlign::binSingleSpectrum_(
+    const MSSpectrum&                                spec,
+    uint32_t                                         spec_id,
+    uint8_t                                          charge_byte,
+    bool                                             im_detected,
+    std::vector<std::pair<uint32_t, FragmentEntry>>& out_entries) const
+  {
+    if (im_detected)
+    {
+      const auto& im_array = spec.getFloatDataArrays()[spec.getIMData().first];
+
+      std::vector<float>         im_best_intensity(n_im_bins_, -1.0f);
+      std::vector<FragmentEntry> im_best_fe(n_im_bins_);
+      std::vector<uint32_t>      occupied_im_bins;
+      occupied_im_bins.reserve(32);
+
+      uint32_t current_mz_bin = std::numeric_limits<uint32_t>::max();
+
+      auto flush_mz_bin = [&]()
+      {
+        for (uint32_t im_b : occupied_im_bins)
+        {
+          out_entries.emplace_back(current_mz_bin * n_im_bins_ + im_b, im_best_fe[im_b]);
+          im_best_intensity[im_b] = -1.0f;
+        }
+        occupied_im_bins.clear();
+      };
+
+      for (Size i = 0; i < spec.size(); ++i)
+      {
+        const double mz        = spec[i].getMZ();
+        const float  intensity = spec[i].getIntensity();
+        const float  im        = im_array[i];
+
+        if (mz < lower_mz_ || mz >= upper_mz_) continue;
+        if (im < lower_im_ || im >= upper_im_) continue;
+
+        const uint32_t mz_bin = toBinIdx_(mz);
+        const uint32_t im_bin = toBinIdx_im_(im);
+
+        if (mz_bin != current_mz_bin)
+        {
+          if (current_mz_bin != std::numeric_limits<uint32_t>::max())
+            flush_mz_bin();
+          current_mz_bin = mz_bin;
+        }
+
+        if (im_best_intensity[im_bin] < 0.0f)
+        {
+          occupied_im_bins.push_back(im_bin);
+          im_best_intensity[im_bin] = intensity;
+          im_best_fe[im_bin] = {spec_id, toMassOffset_(mz, mz_bin), charge_byte, 0};
+        }
+        else if (intensity > im_best_intensity[im_bin])
+        {
+          im_best_intensity[im_bin]     = intensity;
+          im_best_fe[im_bin].mass_offset = toMassOffset_(mz, mz_bin);
+        }
+      }
+
+      if (current_mz_bin != std::numeric_limits<uint32_t>::max())
+        flush_mz_bin();
+    }
+    else
+    {
+      uint32_t      current_bin    = std::numeric_limits<uint32_t>::max();
+      float         best_intensity = 0.0f;
+      FragmentEntry best_fe{};
+
+      auto emit = [&]() {
+        if (current_bin != std::numeric_limits<uint32_t>::max())
+          out_entries.emplace_back(current_bin, best_fe);
+      };
+
+      for (Size i = 0; i < spec.size(); ++i)
+      {
+        const double mz        = spec[i].getMZ();
+        const float  intensity = spec[i].getIntensity();
+
+        if (mz < lower_mz_ || mz >= upper_mz_) continue;
+
+        const uint32_t bin_idx = toBinIdx_(mz);
+
+        if (bin_idx != current_bin)
+        {
+          emit();
+          current_bin         = bin_idx;
+          best_intensity      = intensity;
+          best_fe.spectrum_id = spec_id;
+          best_fe.mass_offset = toMassOffset_(mz, bin_idx);
+          best_fe.charge      = charge_byte;
+          best_fe.reserved    = 0;
+        }
+        else if (intensity > best_intensity)
+        {
+          best_intensity      = intensity;
+          best_fe.mass_offset = toMassOffset_(mz, bin_idx);
+        }
+      }
+
+      emit();
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // buildCSR_: sort entries and build bin_offsets_ / fragment_entries_.
+  // Called by buildIndexCore_ (phase 4) and finalizeFromStream.
+  // -------------------------------------------------------------------------
+  void DiaWeaverAlign::buildCSR_(
+    std::vector<std::pair<uint32_t, FragmentEntry>>& all_entries,
+    bool                                              im_detected)
+  {
+    std::sort(all_entries.begin(), all_entries.end(),
+      [](const std::pair<uint32_t, FragmentEntry>& a,
+         const std::pair<uint32_t, FragmentEntry>& b) {
+        if (a.first != b.first) return a.first < b.first;
+        return a.second.spectrum_id < b.second.spectrum_id;
+      });
+
+    const Size n_flat_bins = im_detected
+      ? static_cast<Size>(n_bins_) * n_im_bins_
+      : n_bins_;
+
+    bin_offsets_.assign(n_flat_bins + 1, 0);
+    for (const auto& [flat_idx, _] : all_entries)
+      ++bin_offsets_[flat_idx + 1];
+    for (Size b = 1; b <= n_flat_bins; ++b)
+      bin_offsets_[b] += bin_offsets_[b - 1];
+
+    fragment_entries_.resize(all_entries.size());
+    for (Size i = 0; i < all_entries.size(); ++i)
+      fragment_entries_[i] = all_entries[i].second;
+  }
+
   // -----------------------------------------------------------------------
   // Phase 2-4: Shared index construction.
   // Assigns spectrum IDs, bins fragments, builds CSR.
@@ -452,35 +599,467 @@ namespace OpenMS
                     << " fragment entries." << std::endl;
 
     // -----------------------------------------------------------------------
-    // Phase 4: Sort by (flat_idx, spectrum_id) and build Compressed Sparse Row (CSR) offsets.
-    //
-    // Entries within each bin are in load order (ascending spectrum_id).
+    // Phase 4: Sort and build CSR.
     // -----------------------------------------------------------------------
-
-    std::sort(all_entries.begin(), all_entries.end(),
-      [](const std::pair<uint32_t, FragmentEntry>& a,
-         const std::pair<uint32_t, FragmentEntry>& b) {
-        if (a.first != b.first) return a.first < b.first;
-        return a.second.spectrum_id < b.second.spectrum_id;
-      });
-
-    const Size n_flat_bins = im_detected
-      ? static_cast<Size>(n_bins_) * n_im_bins_
-      : n_bins_;
-
-    bin_offsets_.assign(n_flat_bins + 1, 0);
-    for (const auto& [flat_idx, _] : all_entries)
-      ++bin_offsets_[flat_idx + 1];
-    for (Size b = 1; b <= n_flat_bins; ++b)
-      bin_offsets_[b] += bin_offsets_[b - 1];
-
-    fragment_entries_.resize(all_entries.size());
-    for (Size i = 0; i < all_entries.size(); ++i)
-      fragment_entries_[i] = all_entries[i].second;
+    buildCSR_(all_entries, im_detected);
 
     OPENMS_LOG_INFO << "[DiaWeaverAlign] Index complete: "
                     << spectrum_entries_.size() << " spectra, "
                     << fragment_entries_.size() << " fragment entries." << std::endl;
+  }
+
+  // -------------------------------------------------------------------------
+  // Streaming index construction
+  // -------------------------------------------------------------------------
+
+  void DiaWeaverAlign::openStream(const String& frags_path, const String& meta_path)
+  {
+    updateMembers_();
+
+    // Reset index state
+    source_files_.clear();
+    spectrum_entries_.clear();
+    fragment_entries_.clear();
+    bin_offsets_.clear();
+    precursor_entries_.clear();
+    precursor_offsets_.clear();
+
+    // Reset streaming counters
+    stream_next_spec_id_   = 0;
+    stream_im_detected_    = false;
+    stream_im_initialised_ = false;
+
+    // Open raw fragment file
+    stream_frags_fp_ = std::fopen(frags_path.c_str(), "wb");
+    if (!stream_frags_fp_)
+      throw Exception::FileNotFound(
+        __FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, frags_path);
+
+    // Write frags header: magic (4) + n_spectra placeholder (4) + has_im placeholder (4)
+    const char frags_magic[4] = {'D', 'W', 'A', 'F'};
+    uint32_t   placeholder    = 0;
+    std::fwrite(frags_magic, 1, 4, stream_frags_fp_);
+    std::fwrite(&placeholder, 4, 1, stream_frags_fp_);  // n_spectra — filled by closeStream
+    std::fwrite(&placeholder, 4, 1, stream_frags_fp_);  // has_im    — filled by closeStream
+
+    // Open raw metadata file
+    stream_meta_fp_ = std::fopen(meta_path.c_str(), "wb");
+    if (!stream_meta_fp_)
+    {
+      std::fclose(stream_frags_fp_);
+      stream_frags_fp_ = nullptr;
+      throw Exception::FileNotFound(
+        __FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, meta_path);
+    }
+
+    // Write meta header: magic (4) + n_spectra placeholder (4)
+    const char meta_magic[4] = {'D', 'W', 'A', 'M'};
+    std::fwrite(meta_magic, 1, 4, stream_meta_fp_);
+    std::fwrite(&placeholder, 4, 1, stream_meta_fp_);   // n_spectra — filled by closeStream
+  }
+
+  void DiaWeaverAlign::appendSpectrumToStream(const MSSpectrum& spec, Size source_file_idx)
+  {
+    if (spec.getMSLevel() != 2 || spec.empty() || spec.getPrecursors().empty()) return;
+
+    if (!stream_frags_fp_ || !stream_meta_fp_)
+      throw Exception::MissingInformation(
+        __FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+        "appendSpectrumToStream() called without a prior openStream().");
+
+    // Detect IM on first spectrum seen
+    if (!stream_im_initialised_)
+    {
+      stream_im_detected_    = (spec.getDriftTime() != IMTypes::DRIFTTIME_NOT_SET);
+      stream_im_initialised_ = true;
+      OPENMS_LOG_INFO << "[DiaWeaverAlign] Streaming IM: "
+                      << (stream_im_detected_ ? "detected" : "not detected") << std::endl;
+    }
+
+    const uint32_t spec_id     = stream_next_spec_id_++;
+    const uint8_t  charge_byte = static_cast<uint8_t>(spec.getPrecursors()[0].getCharge());
+
+    // Bin fragment peaks and write records: uint32_t flat_idx (4) + FragmentEntry (8) = 12 bytes each
+    std::vector<std::pair<uint32_t, FragmentEntry>> entries;
+    binSingleSpectrum_(spec, spec_id, charge_byte, stream_im_detected_, entries);
+
+    for (const auto& [flat_idx, fe] : entries)
+    {
+      std::fwrite(&flat_idx, 4, 1, stream_frags_fp_);
+      std::fwrite(&fe,       8, 1, stream_frags_fp_);
+    }
+
+    // Write metadata record to meta file
+    const double   rt      = spec.getRT();
+    const double   prec_mz = spec.getPrecursors()[0].getMZ();
+    const double   dt      = stream_im_detected_ ? spec.getDriftTime() : -1.0;
+    const int32_t  charge  = static_cast<int32_t>(spec.getPrecursors()[0].getCharge());
+    const uint32_t src     = static_cast<uint32_t>(source_file_idx);
+
+    std::fwrite(&rt,      8, 1, stream_meta_fp_);
+    std::fwrite(&prec_mz, 8, 1, stream_meta_fp_);
+    std::fwrite(&dt,      8, 1, stream_meta_fp_);
+    std::fwrite(&charge,  4, 1, stream_meta_fp_);
+    std::fwrite(&src,     4, 1, stream_meta_fp_);
+
+    const String&  native_id = spec.getNativeID();
+    const uint32_t id_len    = static_cast<uint32_t>(native_id.size());
+    std::fwrite(&id_len, 4, 1, stream_meta_fp_);
+    if (id_len > 0)
+      std::fwrite(native_id.c_str(), 1, id_len, stream_meta_fp_);
+  }
+
+  void DiaWeaverAlign::closeStream()
+  {
+    if (!stream_frags_fp_ && !stream_meta_fp_) return;
+
+    const uint32_t n_spectra = stream_next_spec_id_;
+    const uint32_t has_im    = stream_im_detected_ ? 1u : 0u;
+
+    if (stream_frags_fp_)
+    {
+      // Seek back to header offsets 4..11 and write actual n_spectra and has_im
+      std::fseek(stream_frags_fp_, 4, SEEK_SET);
+      std::fwrite(&n_spectra, 4, 1, stream_frags_fp_);
+      std::fwrite(&has_im,    4, 1, stream_frags_fp_);
+      std::fclose(stream_frags_fp_);
+      stream_frags_fp_ = nullptr;
+    }
+
+    if (stream_meta_fp_)
+    {
+      // Seek back to header offset 4 and write actual n_spectra
+      std::fseek(stream_meta_fp_, 4, SEEK_SET);
+      std::fwrite(&n_spectra, 4, 1, stream_meta_fp_);
+      std::fclose(stream_meta_fp_);
+      stream_meta_fp_ = nullptr;
+    }
+
+    stream_next_spec_id_   = 0;
+    stream_im_initialised_ = false;
+    stream_im_detected_    = false;
+  }
+
+  void DiaWeaverAlign::finalizeFromStream(
+    const String&              frags_path,
+    const String&              meta_path,
+    const std::vector<String>& source_file_names)
+  {
+    source_files_ = source_file_names;
+
+    // -----------------------------------------------------------------------
+    // Read raw fragment entries file
+    // -----------------------------------------------------------------------
+    FILE* fp = std::fopen(frags_path.c_str(), "rb");
+    if (!fp)
+      throw Exception::FileNotFound(
+        __FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, frags_path);
+
+    char     magic_f[4];
+    uint32_t n_spectra_f, has_im_flag;
+    std::fread(magic_f, 1, 4, fp);
+    if (magic_f[0] != 'D' || magic_f[1] != 'W' || magic_f[2] != 'A' || magic_f[3] != 'F')
+    {
+      std::fclose(fp);
+      throw Exception::ParseError(
+        __FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+        frags_path, "Bad magic number; expected DWAF.");
+    }
+    std::fread(&n_spectra_f, 4, 1, fp);
+    std::fread(&has_im_flag, 4, 1, fp);
+
+    const bool im_detected = (has_im_flag != 0);
+
+    // Derive record count from file size (each record is 12 bytes: 4+8)
+    std::fseek(fp, 0, SEEK_END);
+    const long file_size = std::ftell(fp);
+    std::fseek(fp, 12, SEEK_SET);   // rewind to first record
+
+    const uint64_t n_records = (file_size > 12)
+      ? static_cast<uint64_t>(file_size - 12) / 12
+      : 0;
+
+    OPENMS_LOG_INFO << "[DiaWeaverAlign] Finalizing: reading " << n_records
+                    << " fragment records, im=" << im_detected
+                    << ", from " << frags_path << std::endl;
+
+    std::vector<std::pair<uint32_t, FragmentEntry>> all_entries(n_records);
+    for (uint64_t i = 0; i < n_records; ++i)
+    {
+      uint32_t     flat_idx;
+      FragmentEntry fe;
+      std::fread(&flat_idx, 4, 1, fp);
+      std::fread(&fe,       8, 1, fp);
+      all_entries[i] = {flat_idx, fe};
+    }
+    std::fclose(fp);
+
+    // -----------------------------------------------------------------------
+    // Read spectrum metadata file
+    // -----------------------------------------------------------------------
+    FILE* fpm = std::fopen(meta_path.c_str(), "rb");
+    if (!fpm)
+      throw Exception::FileNotFound(
+        __FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, meta_path);
+
+    char     magic_m[4];
+    uint32_t n_spectra_m;
+    std::fread(magic_m, 1, 4, fpm);
+    if (magic_m[0] != 'D' || magic_m[1] != 'W' || magic_m[2] != 'A' || magic_m[3] != 'M')
+    {
+      std::fclose(fpm);
+      throw Exception::ParseError(
+        __FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+        meta_path, "Bad magic number; expected DWAM.");
+    }
+    std::fread(&n_spectra_m, 4, 1, fpm);
+
+    OPENMS_LOG_INFO << "[DiaWeaverAlign] Reading " << n_spectra_m
+                    << " spectrum metadata entries." << std::endl;
+
+    spectrum_entries_.resize(n_spectra_m);
+    for (uint32_t i = 0; i < n_spectra_m; ++i)
+    {
+      SpectrumEntry& se = spectrum_entries_[i];
+      int32_t  charge;
+      uint32_t src_idx, id_len;
+
+      std::fread(&se.retention_time, 8, 1, fpm);
+      std::fread(&se.precursor_mz,   8, 1, fpm);
+      std::fread(&se.drift_time,     8, 1, fpm);
+      std::fread(&charge,            4, 1, fpm);
+      std::fread(&src_idx,           4, 1, fpm);
+      std::fread(&id_len,            4, 1, fpm);
+
+      se.precursor_charge = static_cast<int>(charge);
+      se.source_file_idx  = static_cast<Size>(src_idx);
+
+      if (id_len > 0)
+      {
+        std::string buf(id_len, '\0');
+        std::fread(&buf[0], 1, id_len, fpm);
+        se.native_id = buf;
+      }
+    }
+    std::fclose(fpm);
+
+    // -----------------------------------------------------------------------
+    // Sort entries and build CSR fragment index
+    // -----------------------------------------------------------------------
+    OPENMS_LOG_INFO << "[DiaWeaverAlign] Building CSR from "
+                    << all_entries.size() << " entries..." << std::endl;
+
+    buildCSR_(all_entries, im_detected);
+
+    OPENMS_LOG_INFO << "[DiaWeaverAlign] Finalization complete: "
+                    << spectrum_entries_.size() << " spectra, "
+                    << fragment_entries_.size() << " fragment entries." << std::endl;
+  }
+
+  // -------------------------------------------------------------------------
+  // Index serialization / deserialization
+  //
+  // File format (.dwaindex):
+  //   magic[4]  "DWAI"
+  //   doubles/uint32_ts for all bin-axis scalars + has_im flag
+  //   source_files_   (count + length-prefixed strings)
+  //   spectrum_entries_  (count + per-entry fixed+variable data)
+  //   fragment_entries_  (count uint64 + raw array)
+  //   bin_offsets_       (count uint64 + raw array)
+  //   precursor_entries_ (count uint64 + raw array)
+  //   precursor_offsets_ (count uint64 + raw array)
+  // -------------------------------------------------------------------------
+
+  void DiaWeaverAlign::saveIndex(const String& path) const
+  {
+    FILE* fp = std::fopen(path.c_str(), "wb");
+    if (!fp)
+      throw Exception::FileNotFound(
+        __FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, path);
+
+    // Magic
+    const char magic[4] = {'D', 'W', 'A', 'I'};
+    std::fwrite(magic, 1, 4, fp);
+
+    // Bin-axis scalars
+    std::fwrite(&lower_mz_,            8, 1, fp);
+    std::fwrite(&upper_mz_,            8, 1, fp);
+    std::fwrite(&bin_width_,           8, 1, fp);
+    std::fwrite(&n_bins_,              4, 1, fp);
+    std::fwrite(&lower_im_,            8, 1, fp);
+    std::fwrite(&upper_im_,            8, 1, fp);
+    std::fwrite(&bin_width_im_,        8, 1, fp);
+    std::fwrite(&n_im_bins_,           4, 1, fp);
+    std::fwrite(&lower_precursor_mz_,  8, 1, fp);
+    std::fwrite(&upper_precursor_mz_,  8, 1, fp);
+    std::fwrite(&precursor_bin_width_, 8, 1, fp);
+    std::fwrite(&n_precursor_bins_,    4, 1, fp);
+    const uint32_t has_im = hasIM() ? 1u : 0u;
+    std::fwrite(&has_im, 4, 1, fp);
+
+    // Source files
+    const uint32_t n_src = static_cast<uint32_t>(source_files_.size());
+    std::fwrite(&n_src, 4, 1, fp);
+    for (const String& sf : source_files_)
+    {
+      const uint32_t len = static_cast<uint32_t>(sf.size());
+      std::fwrite(&len,        4,   1,   fp);
+      std::fwrite(sf.c_str(), 1,   len, fp);
+    }
+
+    // Spectrum entries
+    const uint32_t n_spec = static_cast<uint32_t>(spectrum_entries_.size());
+    std::fwrite(&n_spec, 4, 1, fp);
+    for (const SpectrumEntry& se : spectrum_entries_)
+    {
+      const int32_t  charge  = static_cast<int32_t>(se.precursor_charge);
+      const uint32_t src_idx = static_cast<uint32_t>(se.source_file_idx);
+      const uint32_t id_len  = static_cast<uint32_t>(se.native_id.size());
+      std::fwrite(&se.retention_time, 8, 1, fp);
+      std::fwrite(&se.precursor_mz,   8, 1, fp);
+      std::fwrite(&se.drift_time,     8, 1, fp);
+      std::fwrite(&charge,            4, 1, fp);
+      std::fwrite(&src_idx,           4, 1, fp);
+      std::fwrite(&id_len,            4, 1, fp);
+      if (id_len > 0)
+        std::fwrite(se.native_id.c_str(), 1, id_len, fp);
+    }
+
+    // Fragment entries (8 bytes each)
+    const uint64_t n_frag = static_cast<uint64_t>(fragment_entries_.size());
+    std::fwrite(&n_frag, 8, 1, fp);
+    if (n_frag > 0)
+      std::fwrite(fragment_entries_.data(), 8, n_frag, fp);
+
+    // Bin offsets (4 bytes each)
+    const uint64_t n_bin_off = static_cast<uint64_t>(bin_offsets_.size());
+    std::fwrite(&n_bin_off, 8, 1, fp);
+    if (n_bin_off > 0)
+      std::fwrite(bin_offsets_.data(), 4, n_bin_off, fp);
+
+    // Precursor entries (4 bytes each)
+    const uint64_t n_prec = static_cast<uint64_t>(precursor_entries_.size());
+    std::fwrite(&n_prec, 8, 1, fp);
+    if (n_prec > 0)
+      std::fwrite(precursor_entries_.data(), 4, n_prec, fp);
+
+    // Precursor offsets (4 bytes each)
+    const uint64_t n_prec_off = static_cast<uint64_t>(precursor_offsets_.size());
+    std::fwrite(&n_prec_off, 8, 1, fp);
+    if (n_prec_off > 0)
+      std::fwrite(precursor_offsets_.data(), 4, n_prec_off, fp);
+
+    std::fclose(fp);
+    OPENMS_LOG_INFO << "[DiaWeaverAlign] Index saved to " << path << std::endl;
+  }
+
+  void DiaWeaverAlign::loadIndex(const String& path)
+  {
+    FILE* fp = std::fopen(path.c_str(), "rb");
+    if (!fp)
+      throw Exception::FileNotFound(
+        __FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, path);
+
+    // Magic
+    char magic[4];
+    std::fread(magic, 1, 4, fp);
+    if (magic[0] != 'D' || magic[1] != 'W' || magic[2] != 'A' || magic[3] != 'I')
+    {
+      std::fclose(fp);
+      throw Exception::ParseError(
+        __FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+        path, "Bad magic number; expected DWAI.");
+    }
+
+    // Bin-axis scalars — restore directly (bypasses updateMembers_)
+    std::fread(&lower_mz_,            8, 1, fp);
+    std::fread(&upper_mz_,            8, 1, fp);
+    std::fread(&bin_width_,           8, 1, fp);
+    std::fread(&n_bins_,              4, 1, fp);
+    std::fread(&lower_im_,            8, 1, fp);
+    std::fread(&upper_im_,            8, 1, fp);
+    std::fread(&bin_width_im_,        8, 1, fp);
+    std::fread(&n_im_bins_,           4, 1, fp);
+    std::fread(&lower_precursor_mz_,  8, 1, fp);
+    std::fread(&upper_precursor_mz_,  8, 1, fp);
+    std::fread(&precursor_bin_width_, 8, 1, fp);
+    std::fread(&n_precursor_bins_,    4, 1, fp);
+    uint32_t has_im_flag;
+    std::fread(&has_im_flag, 4, 1, fp);
+
+    // Source files
+    uint32_t n_src;
+    std::fread(&n_src, 4, 1, fp);
+    source_files_.resize(n_src);
+    for (uint32_t i = 0; i < n_src; ++i)
+    {
+      uint32_t len;
+      std::fread(&len, 4, 1, fp);
+      if (len > 0)
+      {
+        std::string buf(len, '\0');
+        std::fread(&buf[0], 1, len, fp);
+        source_files_[i] = buf;
+      }
+    }
+
+    // Spectrum entries
+    uint32_t n_spec;
+    std::fread(&n_spec, 4, 1, fp);
+    spectrum_entries_.resize(n_spec);
+    for (uint32_t i = 0; i < n_spec; ++i)
+    {
+      SpectrumEntry& se = spectrum_entries_[i];
+      int32_t  charge;
+      uint32_t src_idx, id_len;
+      std::fread(&se.retention_time, 8, 1, fp);
+      std::fread(&se.precursor_mz,   8, 1, fp);
+      std::fread(&se.drift_time,     8, 1, fp);
+      std::fread(&charge,            4, 1, fp);
+      std::fread(&src_idx,           4, 1, fp);
+      std::fread(&id_len,            4, 1, fp);
+      se.precursor_charge = static_cast<int>(charge);
+      se.source_file_idx  = static_cast<Size>(src_idx);
+      if (id_len > 0)
+      {
+        std::string buf(id_len, '\0');
+        std::fread(&buf[0], 1, id_len, fp);
+        se.native_id = buf;
+      }
+    }
+
+    // Fragment entries
+    uint64_t n_frag;
+    std::fread(&n_frag, 8, 1, fp);
+    fragment_entries_.resize(n_frag);
+    if (n_frag > 0)
+      std::fread(fragment_entries_.data(), 8, n_frag, fp);
+
+    // Bin offsets
+    uint64_t n_bin_off;
+    std::fread(&n_bin_off, 8, 1, fp);
+    bin_offsets_.resize(n_bin_off);
+    if (n_bin_off > 0)
+      std::fread(bin_offsets_.data(), 4, n_bin_off, fp);
+
+    // Precursor entries
+    uint64_t n_prec;
+    std::fread(&n_prec, 8, 1, fp);
+    precursor_entries_.resize(n_prec);
+    if (n_prec > 0)
+      std::fread(precursor_entries_.data(), 4, n_prec, fp);
+
+    // Precursor offsets
+    uint64_t n_prec_off;
+    std::fread(&n_prec_off, 8, 1, fp);
+    precursor_offsets_.resize(n_prec_off);
+    if (n_prec_off > 0)
+      std::fread(precursor_offsets_.data(), 4, n_prec_off, fp);
+
+    std::fclose(fp);
+    OPENMS_LOG_INFO << "[DiaWeaverAlign] Index loaded from " << path
+                    << "  spectra=" << spectrum_entries_.size()
+                    << "  frags=" << fragment_entries_.size() << std::endl;
   }
 
   // -------------------------------------------------------------------------

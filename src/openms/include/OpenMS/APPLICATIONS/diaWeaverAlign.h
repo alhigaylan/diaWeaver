@@ -15,6 +15,7 @@
 #include <OpenMS/OpenMSConfig.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <vector>
 
 namespace OpenMS
@@ -157,7 +158,7 @@ namespace OpenMS
 
     DiaWeaverAlign();
 
-    ~DiaWeaverAlign() override = default;
+    ~DiaWeaverAlign() override;
 
     /**
       @brief Build the fragment index from a list of pseudo MS2 mzML files.
@@ -187,6 +188,79 @@ namespace OpenMS
     */
     void buildIndex(const std::vector<MSExperiment>& experiments,
                     const std::vector<String>& source_names = {});
+
+    /**
+      @brief Open a streaming session for incremental index construction.
+
+      Initialises the m/z and IM axis parameters, opens binary raw files for
+      writing, and resets all streaming counters. Must be called before any
+      calls to appendSpectrumToStream().
+
+      @param frags_path  Path to the raw fragment entries file to create/overwrite.
+      @param meta_path   Path to the raw spectrum metadata file to create/overwrite.
+    */
+    void openStream(const String& frags_path, const String& meta_path);
+
+    /**
+      @brief Append one pseudo-MS2 spectrum to the open streaming session.
+
+      Bins every fragment peak of @p spec and writes the resulting (flat_idx,
+      FragmentEntry) pairs to the raw fragment file. Spectrum metadata is written
+      to the raw meta file. Must be called after openStream().
+
+      Spectra with MS level != 2, empty peak lists, or missing precursors are
+      silently skipped.
+
+      @param spec             Pseudo-MS2 spectrum to index.
+      @param source_file_idx  Index of the source file in the final source-file list.
+    */
+    void appendSpectrumToStream(const MSSpectrum& spec, Size source_file_idx);
+
+    /**
+      @brief Finalise the open streaming session.
+
+      Seeks back to the raw file headers and writes the actual spectrum count and
+      IM flag, then closes both FILE* handles. After this call the raw files are
+      complete and ready for finalizeFromStream().
+    */
+    void closeStream();
+
+    /**
+      @brief Build the in-memory fragment index from raw streaming files.
+
+      Reads the raw fragment and metadata files produced by openStream /
+      appendSpectrumToStream / closeStream, sorts the entries, and constructs
+      the full CSR index and spectrum_entries_. The precursor index is NOT built
+      here; call buildPrecursorIndex() afterwards.
+
+      @param frags_path        Path to the raw fragment entries file (.dwaf).
+      @param meta_path         Path to the raw spectrum metadata file (.dwam).
+      @param source_file_names Source file display names (one per logical source file).
+    */
+    void finalizeFromStream(const String& frags_path,
+                            const String& meta_path,
+                            const std::vector<String>& source_file_names);
+
+    /**
+      @brief Serialize the complete index (fragment + precursor + metadata) to a binary file.
+
+      Must be called after buildIndex() (or finalizeFromStream() + buildPrecursorIndex()).
+      The resulting file can be reloaded with loadIndex() without re-building.
+
+      @param path  Output file path (conventionally .dwaindex).
+    */
+    void saveIndex(const String& path) const;
+
+    /**
+      @brief Deserialize a previously saved index from a binary file.
+
+      Restores all private data members, making the object immediately usable
+      for matchSpectrum(), matchExperiment(), and groupFeatures() without calling
+      buildIndex() or buildPrecursorIndex().
+
+      @param path  Input file path produced by saveIndex().
+    */
+    void loadIndex(const String& path);
 
     /**
       @brief Score an experimental peak-picked MS2 spectrum against the fragment index.
@@ -368,6 +442,42 @@ namespace OpenMS
     uint32_t toBinIdx_im_(double im) const;
     uint16_t toMassOffset_(double mz, uint32_t bin_idx) const;
     uint32_t toPrecursorBinIdx_(double mz) const;
+
+    /**
+      @brief Bin one spectrum's fragment peaks into (flat_idx, FragmentEntry) pairs.
+
+      Applies intensity-max-per-(mz_bin, im_bin) deduplication. Results are
+      appended to @p out_entries. Used by appendSpectrumToStream(); buildIndexCore_()
+      uses its own optimised batch loop.
+
+      @param spec         Centroided pseudo-MS2 spectrum.
+      @param spec_id      Spectrum ID to store in each FragmentEntry.
+      @param charge_byte  Precursor charge truncated to uint8_t.
+      @param im_detected  True if the index is being built with ion mobility data.
+      @param out_entries  Output vector; entries are appended (not cleared).
+    */
+    void binSingleSpectrum_(const MSSpectrum&                              spec,
+                            uint32_t                                       spec_id,
+                            uint8_t                                        charge_byte,
+                            bool                                           im_detected,
+                            std::vector<std::pair<uint32_t, FragmentEntry>>& out_entries) const;
+
+    /**
+      @brief Sort @p all_entries and build the CSR fragment index arrays.
+
+      Sorts by (flat_idx, spectrum_id) then populates fragment_entries_ and
+      bin_offsets_. The @p im_detected flag determines whether a 2D or 1D flat
+      index is used for the offset array size.
+    */
+    void buildCSR_(std::vector<std::pair<uint32_t, FragmentEntry>>& all_entries,
+                   bool                                              im_detected);
+
+    // --- Streaming state ---
+    FILE*    stream_frags_fp_{nullptr};      ///< Raw fragment entries file (write, open between openStream/closeStream)
+    FILE*    stream_meta_fp_{nullptr};       ///< Raw spectrum metadata file (write, open between openStream/closeStream)
+    uint32_t stream_next_spec_id_{0};        ///< Running spectrum_id counter
+    bool     stream_im_detected_{false};     ///< IM detected in first streamed spectrum
+    bool     stream_im_initialised_{false};  ///< True once the first spectrum has been processed
   };
 
 } // namespace OpenMS
