@@ -160,8 +160,11 @@ protected:
     MSExperiment query_exp;
     MzMLFile().load(in_query, query_exp);
 
+    // The query peak-picked file has MS level 1 (set by PeakPickerIM), so we
+    // use the local helper rather than DiaWeaver::determineWindows which
+    // would skip all spectra with getMSLevel() != 2.
     DiaWeaver::WindowMap query_windows;
-    DiaWeaver::determineWindows(query_exp, query_windows);
+    determineWindowsPeakPicked_(query_exp, query_windows);
     OPENMS_LOG_INFO << "Detected " << query_windows.size()
                     << " DIA window(s) in query." << std::endl;
 
@@ -227,13 +230,13 @@ protected:
       OPENMS_LOG_INFO << "Window m/z [" << window.lower_mz << ", " << window.upper_mz << "]"
                       << "  query spectra: " << q_indices.size() << std::endl;
 
-      // ---- Collect query MS2 spectra for this window ----
+      // ---- Collect query spectra for this window ----
+      // q_indices already contains only spectra belonging to this window
+      // (as determined by determineWindowsPeakPicked_). They are MS level 1
+      // peak-picked MS2 spectra; no additional MS-level filter is needed.
       MSExperiment window_query;
       for (Size idx : q_indices)
-      {
-        if (query_exp[idx].getMSLevel() == 2)
-          window_query.addSpectrum(query_exp[idx]);
-      }
+        window_query.addSpectrum(query_exp[idx]);
 
       if (window_query.empty())
       {
@@ -291,6 +294,55 @@ protected:
   }
 
 private:
+
+  /// Detect DIA windows from a peak-picked DIA experiment whose spectra carry
+  /// MS level 1 (set by PeakPickerIM).  Works identically to
+  /// DiaWeaver::determineWindows() but accepts any MS level and selects
+  /// spectra by precursor presence instead.
+  static void determineWindowsPeakPicked_(
+    const MSExperiment& exp,
+    DiaWeaver::WindowMap& window_map)
+  {
+    window_map.clear();
+    std::vector<DiaWeaver::DIAWindow> known_windows;
+
+    for (Size i = 0; i < exp.size(); ++i)
+    {
+      const MSSpectrum& spec = exp[i];
+      if (spec.getPrecursors().empty()) continue;   // skip genuine MS1 scans
+
+      const Precursor& p = spec.getPrecursors()[0];
+      if (p.getIsolationWindowLowerOffset() == 0 &&
+          p.getIsolationWindowUpperOffset() == 0)
+        continue;   // no isolation window info — not a DIA spectrum
+
+      DiaWeaver::DIAWindow candidate;
+      candidate.center_mz = p.getMZ();
+      candidate.lower_mz  = p.getMZ() - p.getIsolationWindowLowerOffset();
+      candidate.upper_mz  = p.getMZ() + p.getIsolationWindowUpperOffset();
+
+      if (spec.metaValueExists("ion mobility lower limit"))
+        candidate.lower_im = (double)spec.getMetaValue("ion mobility lower limit");
+      if (spec.metaValueExists("ion mobility upper limit"))
+        candidate.upper_im = (double)spec.getMetaValue("ion mobility upper limit");
+
+      bool found = false;
+      for (const DiaWeaver::DIAWindow& known : known_windows)
+      {
+        if (candidate.isEqual(known))
+        {
+          window_map[known].push_back(i);
+          found = true;
+          break;
+        }
+      }
+      if (!found)
+      {
+        known_windows.push_back(candidate);
+        window_map[candidate].push_back(i);
+      }
+    }
+  }
 
   /// Write feature groups for one window to the TSV.
   static void writeGroups_(

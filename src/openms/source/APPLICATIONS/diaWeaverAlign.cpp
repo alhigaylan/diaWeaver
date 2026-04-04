@@ -161,8 +161,8 @@ namespace OpenMS
   {
     for (const MSSpectrum& spec_ref : exp)
     {
-      // Accept any spectrum that is non-empty and has a precursor.
-      if (spec_ref.empty() || spec_ref.getPrecursors().empty()) continue;
+      // Pseudo-MS2 spectra from diaWeaver are MS level 2. Skip anything else.
+      if (spec_ref.getMSLevel() != 2 || spec_ref.empty()) continue;
 
       MSSpectrum spec = spec_ref; // need a mutable copy for std::move below
 
@@ -573,11 +573,17 @@ namespace OpenMS
   std::vector<DiaWeaverAlign::ScoreTrace>
   DiaWeaverAlign::matchExperiment(const MSExperiment& experiment, uint32_t min_matched_peaks) const
   {
-    // Collect pointers to MS2 spectra in load order (ascending RT).
+    // Collect pointers to query spectra in load order (ascending RT).
+    //
+    // Peak-picked DIA MS2 data produced by diaWeaver's PeakPickerIM pipeline
+    // carries MS level 1 (the DIA extraction step sets it so that downstream
+    // mass-trace tools see "MS1" data). This is not clean but it works for now.
+    // every peak-picked MS2 spectrum has a
+    // precursor (isolation window)
     std::vector<const MSSpectrum*> query_spectra;
     for (const auto& spec : experiment)
     {
-      if (spec.getMSLevel() == 2 && !spec.empty())
+      if (!spec.empty() && !spec.getPrecursors().empty())
         query_spectra.push_back(&spec);
     }
 
