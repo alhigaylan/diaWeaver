@@ -293,7 +293,7 @@ protected:
 
           // If both the window and the spectrum carry ion mobility data,
           // the precursor drift time must also fall within the window's IM range.
-          if (windows[w].hasIM() && spec_has_im)
+          if (windows[w].hasIonMobility() && spec_has_im)
           {
             if (drift_t < windows[w].lower_im || drift_t > windows[w].upper_im) continue;
           }
