@@ -10,6 +10,7 @@
 #include <OpenMS/APPLICATIONS/diaWeaver.h>
 #include <OpenMS/APPLICATIONS/diaWeaverAlign.h>
 #include <OpenMS/FORMAT/MzMLFile.h>
+#include <OpenMS/IONMOBILITY/IMTypes.h>
 #include <OpenMS/KERNEL/MSExperiment.h>
 
 #include <cstdio>
@@ -225,27 +226,17 @@ protected:
     Param aligner_param = getParam_().copy("DiaWeaverAlign:", true);
 
     // ------------------------------------------------------------------
-    // No-window fallback: process all spectra globally using in-memory index.
-    // This covers non-DIA or single-window query files.
+    // Require DIA windows. Without them we cannot verify that query precursors
+    // belong to the correct isolation window, making any score meaningless.
     // ------------------------------------------------------------------
     if (query_windows_map.empty())
     {
-      OPENMS_LOG_WARN << "No DIA windows detected; processing all spectra globally." << std::endl;
-
-      OPENMS_LOG_INFO << "Loading " << in_files.size() << " pseudo-MS2 file(s)..." << std::endl;
-      std::vector<MSExperiment> pseudo_exps(in_files.size());
-      for (Size i = 0; i < in_files.size(); ++i)
-        MzMLFile().load(in_files[i], pseudo_exps[i]);
-
-      DiaWeaverAlign aligner;
-      aligner.setParameters(aligner_param);
-      aligner.buildIndex(pseudo_exps, in_files);
-      aligner.buildPrecursorIndex();
-
-      const auto traces = aligner.matchExperiment(query_exp, min_peaks);
-      const auto groups = aligner.groupFeatures(traces, rt_tol, min_frags);
-      writeGroups_(tsv, groups, traces, aligner, global_group_id, 0.0, 0.0);
-      return EXECUTION_OK;
+      OPENMS_LOG_ERROR << "No DIA isolation windows detected in '" << in_query << "'.\n"
+                       << "Every MS2 spectrum in the query file must carry a precursor "
+                       << "with non-zero isolation window offsets. "
+                       << "Ensure the file was produced by PeakPickerIM and retains "
+                       << "the original isolation window metadata." << std::endl;
+      return ILLEGAL_PARAMETERS;
     }
 
     // Build parallel window / query-index vectors from the map
@@ -290,15 +281,25 @@ protected:
       for (const MSSpectrum& spec : pseudo_exp)
       {
         if (spec.getMSLevel() != 2 || spec.empty() || spec.getPrecursors().empty()) continue;
+
         const double prec_mz = spec.getPrecursors()[0].getMZ();
+        const double drift_t = spec.getDriftTime();
+        const bool   spec_has_im = (drift_t != IMTypes::DRIFTTIME_NOT_SET);
 
         for (Size w = 0; w < n_windows; ++w)
         {
-          if (prec_mz >= windows[w].lower_mz && prec_mz <= windows[w].upper_mz)
+          // Precursor m/z must fall within the window's isolation range.
+          if (prec_mz < windows[w].lower_mz || prec_mz > windows[w].upper_mz) continue;
+
+          // If both the window and the spectrum carry ion mobility data,
+          // the precursor drift time must also fall within the window's IM range.
+          if (windows[w].hasIM() && spec_has_im)
           {
-            aligners[w].appendSpectrumToStream(spec, file_idx);
-            break;
+            if (drift_t < windows[w].lower_im || drift_t > windows[w].upper_im) continue;
           }
+
+          aligners[w].appendSpectrumToStream(spec, file_idx);
+          break;
         }
       }
       // pseudo_exp destructs here, freeing peak data
