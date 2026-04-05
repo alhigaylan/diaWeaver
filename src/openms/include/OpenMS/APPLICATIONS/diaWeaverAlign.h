@@ -333,9 +333,9 @@ namespace OpenMS
       1D m/z bin when no IM data is present, using the same CSR layout as the
       fragment index. Must be called after buildIndex().
 
-      Spectrum_ids whose precursor_mz falls outside [lower_mz, upper_mz] are skipped.
-      The precursor bin width is controlled by the @c precursor_bin_width parameter
-      (default 0.02 Da), which is independent of the fragment @c bin_width.
+      Spectrum_ids whose precursor_mz falls outside [lower_precursor_mz, upper_precursor_mz] are skipped.
+      The precursor bin width uses logarithmic ppm binning, controlled by the
+      @c precursor_ppm_tolerance parameter (default 20 ppm), independent of fragment binning.
     */
     void buildPrecursorIndex();
 
@@ -374,7 +374,7 @@ namespace OpenMS
       getPrecursorBinEntries(uint32_t mz_bin, uint32_t im_bin = 0) const;
 
     Size   getPrecursorBinCount()  const;
-    double getPrecursorBinWidth()  const;
+    double getPrecursorPPMTolerance() const;
     double getLowerPrecursorMz()   const;
     double getUpperPrecursorMz()   const;
 
@@ -434,7 +434,8 @@ namespace OpenMS
     uint32_t n_im_bins_{0};
     double   lower_precursor_mz_{400.0};
     double   upper_precursor_mz_{1200.0};
-    double   precursor_bin_width_{0.02};
+    double   precursor_ppm_tolerance_{20.0};
+    double   log_precursor_bin_ratio_{0.0};  ///< Pre-computed log(1 + precursor_ppm_tolerance_/1e6)
     uint32_t n_precursor_bins_{0};
 
     /// Internal per-spectrum record used during index construction.

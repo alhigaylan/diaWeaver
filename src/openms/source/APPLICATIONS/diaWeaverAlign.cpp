@@ -35,16 +35,16 @@ namespace OpenMS
     defaults_.setValue("bin_width_im",             0.01, "Ion mobility bin width (Vs/cm^2).");
     defaults_.setValue("lower_precursor_mz",      400.0, "Lower m/z bound of the precursor index.");
     defaults_.setValue("upper_precursor_mz",     1200.0, "Upper m/z bound of the precursor index.");
-    defaults_.setValue("precursor_bin_width",      0.02, "Precursor m/z bin width in Daltons.");
+    defaults_.setValue("precursor_ppm_tolerance",  20.0, "Precursor m/z bin width in ppm (logarithmic binning).");
     defaults_.setMinFloat("lower_mz",               1.0);
     defaults_.setMinFloat("upper_mz",               1.0);
     defaults_.setMinFloat("fragment_ppm_tolerance", 0.1);
     defaults_.setMinFloat("lower_im",               0.0);
     defaults_.setMinFloat("upper_im",               0.0);
     defaults_.setMinFloat("bin_width_im",          1e-4);
-    defaults_.setMinFloat("lower_precursor_mz",     1.0);
-    defaults_.setMinFloat("upper_precursor_mz",     1.0);
-    defaults_.setMinFloat("precursor_bin_width",   1e-4);
+    defaults_.setMinFloat("lower_precursor_mz",        1.0);
+    defaults_.setMinFloat("upper_precursor_mz",        1.0);
+    defaults_.setMinFloat("precursor_ppm_tolerance",   0.1);
     defaultsToParam_();
   }
 
@@ -66,10 +66,11 @@ namespace OpenMS
     upper_im_             = (double)param_.getValue("upper_im");
     bin_width_im_         = (double)param_.getValue("bin_width_im");
     n_im_bins_            = static_cast<uint32_t>(std::ceil((upper_im_ - lower_im_) / bin_width_im_));
-    lower_precursor_mz_   = (double)param_.getValue("lower_precursor_mz");
-    upper_precursor_mz_   = (double)param_.getValue("upper_precursor_mz");
-    precursor_bin_width_  = (double)param_.getValue("precursor_bin_width");
-    n_precursor_bins_     = static_cast<uint32_t>(std::ceil((upper_precursor_mz_ - lower_precursor_mz_) / precursor_bin_width_));
+    lower_precursor_mz_         = (double)param_.getValue("lower_precursor_mz");
+    upper_precursor_mz_         = (double)param_.getValue("upper_precursor_mz");
+    precursor_ppm_tolerance_    = (double)param_.getValue("precursor_ppm_tolerance");
+    log_precursor_bin_ratio_    = std::log(1.0 + precursor_ppm_tolerance_ / 1e6);
+    n_precursor_bins_           = static_cast<uint32_t>(std::log(upper_precursor_mz_ / lower_precursor_mz_) / log_precursor_bin_ratio_) + 1;
   }
 
   uint32_t DiaWeaverAlign::toBinIdx_(double mz) const
@@ -93,7 +94,8 @@ namespace OpenMS
 
   uint32_t DiaWeaverAlign::toPrecursorBinIdx_(double mz) const
   {
-    return static_cast<uint32_t>((mz - lower_precursor_mz_) / precursor_bin_width_);
+    const auto bin = static_cast<uint32_t>(std::log(mz / lower_precursor_mz_) / log_precursor_bin_ratio_);
+    return std::min(bin, n_precursor_bins_ - 1u);
   }
 
   void DiaWeaverAlign::buildPrecursorIndex()
@@ -112,8 +114,8 @@ namespace OpenMS
 
     OPENMS_LOG_INFO << "[DiaWeaverAlign] Building precursor index  "
                     << "mz=[" << lower_precursor_mz_ << ", " << upper_precursor_mz_ << "] Da  "
-                    << "precursor_bin_width=" << precursor_bin_width_ << " Da  "
-                    << "n_precursor_bins=" << n_precursor_bins_ << std::endl;
+                    << "precursor_ppm=" << precursor_ppm_tolerance_
+                    << "  n_precursor_bins=" << n_precursor_bins_ << std::endl;
 
     // Build (flat_idx, spectrum_id) pairs from spectrum metadata.
     std::vector<std::pair<uint32_t, uint32_t>> entries;
@@ -962,10 +964,10 @@ namespace OpenMS
     std::fwrite(&upper_im_,            8, 1, fp);
     std::fwrite(&bin_width_im_,        8, 1, fp);
     std::fwrite(&n_im_bins_,           4, 1, fp);
-    std::fwrite(&lower_precursor_mz_,  8, 1, fp);
-    std::fwrite(&upper_precursor_mz_,  8, 1, fp);
-    std::fwrite(&precursor_bin_width_, 8, 1, fp);
-    std::fwrite(&n_precursor_bins_,    4, 1, fp);
+    std::fwrite(&lower_precursor_mz_,       8, 1, fp);
+    std::fwrite(&upper_precursor_mz_,       8, 1, fp);
+    std::fwrite(&precursor_ppm_tolerance_,  8, 1, fp);
+    std::fwrite(&n_precursor_bins_,         4, 1, fp);
     const uint32_t has_im = hasIM() ? 1u : 0u;
     std::fwrite(&has_im, 4, 1, fp);
 
@@ -1060,10 +1062,11 @@ namespace OpenMS
     std::fread(&upper_im_,            8, 1, fp);
     std::fread(&bin_width_im_,        8, 1, fp);
     std::fread(&n_im_bins_,           4, 1, fp);
-    std::fread(&lower_precursor_mz_,  8, 1, fp);
-    std::fread(&upper_precursor_mz_,  8, 1, fp);
-    std::fread(&precursor_bin_width_, 8, 1, fp);
-    std::fread(&n_precursor_bins_,    4, 1, fp);
+    std::fread(&lower_precursor_mz_,       8, 1, fp);
+    std::fread(&upper_precursor_mz_,       8, 1, fp);
+    std::fread(&precursor_ppm_tolerance_,  8, 1, fp);
+    log_precursor_bin_ratio_ = std::log(1.0 + precursor_ppm_tolerance_ / 1e6);
+    std::fread(&n_precursor_bins_,         4, 1, fp);
     uint32_t has_im_flag;
     std::fread(&has_im_flag, 4, 1, fp);
 
@@ -1757,7 +1760,7 @@ namespace OpenMS
   }
 
   Size   DiaWeaverAlign::getPrecursorBinCount()  const { return n_precursor_bins_; }
-  double DiaWeaverAlign::getPrecursorBinWidth()  const { return precursor_bin_width_; }
+  double DiaWeaverAlign::getPrecursorPPMTolerance() const { return precursor_ppm_tolerance_; }
   double DiaWeaverAlign::getLowerPrecursorMz()   const { return lower_precursor_mz_; }
   double DiaWeaverAlign::getUpperPrecursorMz()   const { return upper_precursor_mz_; }
 
