@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <string>
 #include <unordered_map>
 
@@ -240,7 +241,7 @@ protected:
         << "\twindow_lower_mz\twindow_upper_mz"
         << "\tspectrum_id\tsource_file\tnative_id"
         << "\tprecursor_mz\tprecursor_charge\tprecursor_drift_time"
-        << "\tpseudo_rt_s\tquery_apex_rt_s\tapex_matched_peaks\n";
+        << "\tpseudo_rt_s\tquery_apex_rt_s\tapex_matched_peaks\tbest_decoy\n";
 
     uint32_t global_group_id = 0;
 
@@ -363,6 +364,40 @@ protected:
     }
 
     // ================================================================
+    // Pre-compute decoy window pairings.
+    //
+    // For each target window, find the non-adjacent window with the most
+    // similar mean peak count (busyness).  This pairing is used in Phase 3
+    // to estimate a per-spectrum-id FDR proxy ("best_decoy").
+    // ================================================================
+    std::vector<double> mean_peak_counts(n_windows);
+    for (Size w = 0; w < n_windows; ++w)
+      mean_peak_counts[w] = computeMeanPeakCount_(query_exp, window_q_indices[w]);
+
+    std::vector<Size> decoy_window_idx(n_windows);
+    OPENMS_LOG_INFO << "Decoy window pairings:" << std::endl;
+    for (Size w = 0; w < n_windows; ++w)
+    {
+      decoy_window_idx[w] = findDecoyWindow_(windows, mean_peak_counts, w);
+      if (decoy_window_idx[w] == std::numeric_limits<Size>::max())
+      {
+        OPENMS_LOG_WARN << "  Window " << w
+                        << " [" << windows[w].lower_mz << ", " << windows[w].upper_mz << "]"
+                        << ": no valid (non-adjacent) decoy window found." << std::endl;
+      }
+      else
+      {
+        const Size d = decoy_window_idx[w];
+        OPENMS_LOG_INFO << "  Window " << w
+                        << " [" << windows[w].lower_mz << ", " << windows[w].upper_mz << "]"
+                        << " -> decoy window " << d
+                        << " [" << windows[d].lower_mz << ", " << windows[d].upper_mz << "]"
+                        << "  (mean_peaks: " << mean_peak_counts[w]
+                        << " vs " << mean_peak_counts[d] << ")" << std::endl;
+      }
+    }
+
+    // ================================================================
     // PHASE 3: Load each index, score query spectra, group, write TSV.
     //
     // Only one .dwaindex is in RAM at a time.
@@ -411,10 +446,34 @@ protected:
       const auto traces = aligner.matchExperiment(window_query, min_peaks);
       OPENMS_LOG_INFO << "    Score traces: " << traces.size() << std::endl;
 
+      // ------------------------------------------------------------------
+      // Decoy scoring: run the same target index against query spectra from
+      // a non-adjacent window with similar busyness.  Any match is a false
+      // positive by construction because the query precursors do not belong
+      // to this isolation window.
+      // ------------------------------------------------------------------
+      std::unordered_map<uint32_t, uint32_t> decoy_apex_map;
+      const Size d_idx = decoy_window_idx[w];
+      if (d_idx != std::numeric_limits<Size>::max())
+      {
+        MSExperiment decoy_query;
+        for (Size idx : window_q_indices[d_idx])
+          decoy_query.addSpectrum(query_exp[idx]);
+
+        if (!decoy_query.empty())
+        {
+          // min_matched_peaks=1 to capture every non-zero decoy hit
+          const auto decoy_traces = aligner.matchExperiment(decoy_query, 1);
+          for (const DiaWeaverAlign::ScoreTrace& dt : decoy_traces)
+            decoy_apex_map[dt.spectrum_id] = dt.apex_score;
+          OPENMS_LOG_INFO << "    Decoy traces: " << decoy_traces.size() << std::endl;
+        }
+      }
+
       const auto groups = aligner.groupFeatures(traces, rt_tol, min_frags, im_tol, prec_ppm);
       OPENMS_LOG_INFO << "    Feature groups (>=2 members): " << groups.size() << std::endl;
 
-      writeGroups_(tsv, groups, traces, aligner, global_group_id,
+      writeGroups_(tsv, groups, traces, decoy_apex_map, aligner, global_group_id,
                    window.lower_mz, window.upper_mz);
     }
 
@@ -480,6 +539,7 @@ private:
     std::ofstream& tsv,
     const std::vector<DiaWeaverAlign::FeatureGroup>& groups,
     const std::vector<DiaWeaverAlign::ScoreTrace>& traces,
+    const std::unordered_map<uint32_t, uint32_t>& decoy_apex_map,
     const DiaWeaverAlign& aligner,
     uint32_t& global_group_id,
     double window_lower_mz,
@@ -497,8 +557,11 @@ private:
       {
         const DiaWeaverAlign::SpectrumEntry& se = aligner.getSpectrumEntry(sid);
         const auto it = trace_map.find(sid);
-        const double   query_apex_rt     = (it != trace_map.end()) ? it->second->apex_rt    : -1.0;
+        const double   query_apex_rt      = (it != trace_map.end()) ? it->second->apex_rt    : -1.0;
         const uint32_t apex_matched_peaks = (it != trace_map.end()) ? it->second->apex_score : 0;
+
+        const auto decoy_it = decoy_apex_map.find(sid);
+        const uint32_t best_decoy = (decoy_it != decoy_apex_map.end()) ? decoy_it->second : 0;
 
         const bool has_im = (se.drift_time >= 0.0);
 
@@ -517,10 +580,58 @@ private:
             << '\t' << se.retention_time
             << '\t' << query_apex_rt
             << '\t' << apex_matched_peaks
+            << '\t' << best_decoy
             << '\n';
       }
       ++global_group_id;
     }
+  }
+
+  /// Compute mean number of peaks per spectrum for a set of query spectrum indices.
+  static double computeMeanPeakCount_(
+    const MSExperiment& exp,
+    const std::vector<Size>& q_idxs)
+  {
+    if (q_idxs.empty()) return 0.0;
+    double total = 0.0;
+    for (Size idx : q_idxs)
+      total += static_cast<double>(exp[idx].size());
+    return total / static_cast<double>(q_idxs.size());
+  }
+
+  /// Find the best decoy window for window target_w.
+  ///
+  /// A valid decoy must NOT overlap or be adjacent to the target (hard constraint).
+  /// Among valid candidates, returns the one with the closest mean peak count.
+  /// Returns std::numeric_limits<Size>::max() if no valid decoy window exists.
+  static Size findDecoyWindow_(
+    const std::vector<DiaWeaver::DIAWindow>& windows,
+    const std::vector<double>& mean_peak_counts,
+    Size target_w)
+  {
+    const DiaWeaver::DIAWindow& target = windows[target_w];
+    Size   best_idx  = std::numeric_limits<Size>::max();
+    double best_diff = std::numeric_limits<double>::max();
+
+    for (Size d = 0; d < windows.size(); ++d)
+    {
+      if (d == target_w) continue;
+
+      // Hard constraint: decoy must not overlap or be adjacent in m/z
+      const double d_lo = windows[d].lower_mz;
+      const double d_hi = windows[d].upper_mz;
+      const bool non_adjacent = (d_lo > target.upper_mz + 1e-6) ||
+                                (d_hi < target.lower_mz - 1e-6);
+      if (!non_adjacent) continue;
+
+      const double diff = std::abs(mean_peak_counts[d] - mean_peak_counts[target_w]);
+      if (diff < best_diff)
+      {
+        best_diff = diff;
+        best_idx  = d;
+      }
+    }
+    return best_idx;
   }
 };
 
