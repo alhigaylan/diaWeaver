@@ -249,18 +249,42 @@ namespace OpenMS
 
       @param path  Output file path (conventionally .dwaindex).
     */
+    /**
+      @brief Serialize the complete index (fragment + precursor + metadata) to a binary file.
+
+      Stores all bin parameters, the DIA window bounds set via setWindowBounds(),
+      source files, spectrum metadata, and all CSR arrays. The resulting file is
+      fully self-describing and can be reloaded with loadIndex().
+
+      @param path  Output file path (conventionally .dwaindex).
+    */
     void saveIndex(const String& path) const;
 
     /**
       @brief Deserialize a previously saved index from a binary file.
 
-      Restores all private data members, making the object immediately usable
-      for matchSpectrum(), matchExperiment(), and groupFeatures() without calling
-      buildIndex() or buildPrecursorIndex().
+      Restores all private data members including DIA window bounds, making the
+      object immediately usable for matchSpectrum(), matchExperiment(), and
+      groupFeatures() without calling buildIndex() or buildPrecursorIndex().
 
       @param path  Input file path produced by saveIndex().
     */
     void loadIndex(const String& path);
+
+    /**
+      @brief Store the DIA isolation window this index was built for.
+
+      Must be called before saveIndex() so the window bounds are embedded in the
+      binary file. The values are retrieved with getWindowLowerMz() etc. after
+      loadIndex().
+    */
+    void setWindowBounds(double lower_mz, double upper_mz,
+                         double lower_im = -1.0, double upper_im = -1.0);
+
+    double getWindowLowerMz() const;
+    double getWindowUpperMz() const;
+    double getWindowLowerIM() const;
+    double getWindowUpperIM() const;
 
     /**
       @brief Score an experimental peak-picked MS2 spectrum against the fragment index.
@@ -471,6 +495,12 @@ namespace OpenMS
     */
     void buildCSR_(std::vector<std::pair<uint32_t, FragmentEntry>>& all_entries,
                    bool                                              im_detected);
+
+    // --- DIA window bounds (stored in .dwaindex for self-describing files) ---
+    double window_lower_mz_{-1.0};
+    double window_upper_mz_{-1.0};
+    double window_lower_im_{-1.0};
+    double window_upper_im_{-1.0};
 
     // --- Streaming state ---
     FILE*    stream_frags_fp_{nullptr};      ///< Raw fragment entries file (write, open between openStream/closeStream)

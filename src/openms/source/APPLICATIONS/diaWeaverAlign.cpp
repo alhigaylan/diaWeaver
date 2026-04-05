@@ -897,6 +897,13 @@ namespace OpenMS
     const uint32_t has_im = hasIM() ? 1u : 0u;
     std::fwrite(&has_im, 4, 1, fp);
 
+    // DIA window bounds — makes the file self-describing about which precursor
+    // isolation window this index was built for (independent of fragment m/z range)
+    std::fwrite(&window_lower_mz_, 8, 1, fp);
+    std::fwrite(&window_upper_mz_, 8, 1, fp);
+    std::fwrite(&window_lower_im_, 8, 1, fp);
+    std::fwrite(&window_upper_im_, 8, 1, fp);
+
     // Source files
     const uint32_t n_src = static_cast<uint32_t>(source_files_.size());
     std::fwrite(&n_src, 4, 1, fp);
@@ -987,6 +994,12 @@ namespace OpenMS
     uint32_t has_im_flag;
     std::fread(&has_im_flag, 4, 1, fp);
 
+    // DIA window bounds
+    std::fread(&window_lower_mz_, 8, 1, fp);
+    std::fread(&window_upper_mz_, 8, 1, fp);
+    std::fread(&window_lower_im_, 8, 1, fp);
+    std::fread(&window_upper_im_, 8, 1, fp);
+
     // Source files
     uint32_t n_src;
     std::fread(&n_src, 4, 1, fp);
@@ -1061,6 +1074,25 @@ namespace OpenMS
                     << "  spectra=" << spectrum_entries_.size()
                     << "  frags=" << fragment_entries_.size() << std::endl;
   }
+
+  // -------------------------------------------------------------------------
+  // DIA window bounds
+  // -------------------------------------------------------------------------
+
+  void DiaWeaverAlign::setWindowBounds(
+    double lower_mz, double upper_mz,
+    double lower_im, double upper_im)
+  {
+    window_lower_mz_ = lower_mz;
+    window_upper_mz_ = upper_mz;
+    window_lower_im_ = lower_im;
+    window_upper_im_ = upper_im;
+  }
+
+  double DiaWeaverAlign::getWindowLowerMz() const { return window_lower_mz_; }
+  double DiaWeaverAlign::getWindowUpperMz() const { return window_upper_mz_; }
+  double DiaWeaverAlign::getWindowLowerIM() const { return window_lower_im_; }
+  double DiaWeaverAlign::getWindowUpperIM() const { return window_upper_im_; }
 
   // -------------------------------------------------------------------------
   // Spectrum matching

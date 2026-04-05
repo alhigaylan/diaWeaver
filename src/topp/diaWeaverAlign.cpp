@@ -327,6 +327,9 @@ protected:
 
       aligners[w].finalizeFromStream(frags_path, meta_path, in_files);
       aligners[w].buildPrecursorIndex();
+      aligners[w].setWindowBounds(
+        windows[w].lower_mz, windows[w].upper_mz,
+        windows[w].lower_im, windows[w].upper_im);
       aligners[w].saveIndex(index_path);
 
       // Delete raw streaming files immediately to free disk space
@@ -352,6 +355,20 @@ protected:
 
       DiaWeaverAlign aligner;
       aligner.loadIndex(index_path);
+
+      // Sanity-check: the loaded index should describe the same window we expect.
+      // A mismatch means the workdir contains stale files from a different run.
+      if (std::abs(aligner.getWindowLowerMz() - window.lower_mz) > 1e-6 ||
+          std::abs(aligner.getWindowUpperMz() - window.upper_mz) > 1e-6)
+      {
+        OPENMS_LOG_ERROR << "  Window " << w << ": index file '" << index_path
+                         << "' covers precursor range ["
+                         << aligner.getWindowLowerMz() << ", "
+                         << aligner.getWindowUpperMz() << "] but expected ["
+                         << window.lower_mz << ", " << window.upper_mz << "]. "
+                         << "Delete workdir and re-run." << std::endl;
+        return ILLEGAL_PARAMETERS;
+      }
 
       // Collect query spectra for this window
       MSExperiment window_query;
