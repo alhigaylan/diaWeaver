@@ -238,7 +238,8 @@ protected:
     }
 
     tsv << "group_id\tn_members\tmean_apex_rt_s\tn_shared_frags"
-        << "\twindow_lower_mz\twindow_upper_mz"
+        << "\twindow_lower_mz\twindow_upper_mz\twindow_lower_im\twindow_upper_im"
+        << "\tdecoy_window_lower_mz\tdecoy_window_upper_mz\tdecoy_window_lower_im\tdecoy_window_upper_im"
         << "\tspectrum_id\tsource_file\tnative_id"
         << "\tprecursor_mz\tprecursor_charge\tprecursor_drift_time"
         << "\tpseudo_rt_s\tquery_apex_rt_s\tapex_matched_peaks\tbest_decoy\n";
@@ -388,11 +389,17 @@ protected:
       else
       {
         const Size d = decoy_window_idx[w];
+        double im_overlap = 0.0;
+        if (windows[w].hasIonMobility() && windows[d].hasIonMobility())
+          im_overlap = std::max(0.0,
+            std::min(windows[w].upper_im, windows[d].upper_im) -
+            std::max(windows[w].lower_im, windows[d].lower_im));
         OPENMS_LOG_INFO << "  Window " << w
                         << " [" << windows[w].lower_mz << ", " << windows[w].upper_mz << "]"
                         << " -> decoy window " << d
                         << " [" << windows[d].lower_mz << ", " << windows[d].upper_mz << "]"
-                        << "  (mean_peaks: " << mean_peak_counts[w]
+                        << "  (im_overlap=" << im_overlap
+                        << "  mean_peaks: " << mean_peak_counts[w]
                         << " vs " << mean_peak_counts[d] << ")" << std::endl;
       }
     }
@@ -473,8 +480,10 @@ protected:
       const auto groups = aligner.groupFeatures(traces, rt_tol, min_frags, im_tol, prec_ppm);
       OPENMS_LOG_INFO << "    Feature groups (>=2 members): " << groups.size() << std::endl;
 
+      const DiaWeaver::DIAWindow* decoy_win =
+          (d_idx != std::numeric_limits<Size>::max()) ? &windows[d_idx] : nullptr;
       writeGroups_(tsv, groups, traces, decoy_apex_map, aligner, global_group_id,
-                   window.lower_mz, window.upper_mz);
+                   window, decoy_win);
     }
 
     OPENMS_LOG_INFO << "Written " << global_group_id
@@ -535,6 +544,7 @@ private:
   }
 
   /// Write feature groups for one window to the TSV.
+  /// @param decoy_win  Pointer to the chosen decoy DIAWindow; nullptr if none available.
   static void writeGroups_(
     std::ofstream& tsv,
     const std::vector<DiaWeaverAlign::FeatureGroup>& groups,
@@ -542,9 +552,23 @@ private:
     const std::unordered_map<uint32_t, uint32_t>& decoy_apex_map,
     const DiaWeaverAlign& aligner,
     uint32_t& global_group_id,
-    double window_lower_mz,
-    double window_upper_mz)
+    const DiaWeaver::DIAWindow& window,
+    const DiaWeaver::DIAWindow* decoy_win)
   {
+    // Helper: format an IM bound as string, or "NA" when not set.
+    auto im_str = [](double im) -> std::string {
+      return (im > DiaWeaver::IM_NOT_SET + 1e-9) ? std::to_string(im) : "NA";
+    };
+
+    // Pre-format window IM columns (same for every row in this window).
+    const std::string win_lo_im = im_str(window.lower_im);
+    const std::string win_hi_im = im_str(window.upper_im);
+
+    const std::string decoy_lo_mz = decoy_win ? std::to_string(decoy_win->lower_mz) : "NA";
+    const std::string decoy_hi_mz = decoy_win ? std::to_string(decoy_win->upper_mz) : "NA";
+    const std::string decoy_lo_im = decoy_win ? im_str(decoy_win->lower_im) : "NA";
+    const std::string decoy_hi_im = decoy_win ? im_str(decoy_win->upper_im) : "NA";
+
     // Build spectrum_id → ScoreTrace pointer lookup.
     std::unordered_map<uint32_t, const DiaWeaverAlign::ScoreTrace*> trace_map;
     trace_map.reserve(traces.size());
@@ -569,8 +593,14 @@ private:
             << '\t' << group.spectrum_ids.size()
             << '\t' << group.mean_apex_rt
             << '\t' << group.shared_fragments.size()
-            << '\t' << window_lower_mz
-            << '\t' << window_upper_mz
+            << '\t' << window.lower_mz
+            << '\t' << window.upper_mz
+            << '\t' << win_lo_im
+            << '\t' << win_hi_im
+            << '\t' << decoy_lo_mz
+            << '\t' << decoy_hi_mz
+            << '\t' << decoy_lo_im
+            << '\t' << decoy_hi_im
             << '\t' << sid
             << '\t' << aligner.getSourceFile(se.source_file_idx)
             << '\t' << se.native_id
@@ -601,8 +631,15 @@ private:
 
   /// Find the best decoy window for window target_w.
   ///
-  /// A valid decoy must NOT overlap or be adjacent to the target (hard constraint).
-  /// Among valid candidates, returns the one with the closest mean peak count.
+  /// Hard constraint: decoy must NOT overlap or be adjacent to the target in m/z.
+  ///
+  /// Ranking (two-level):
+  ///   1. Primary  — maximize IM overlap with the target window.
+  ///                 overlap = max(0, min(upper_im) - max(lower_im))
+  ///                 Windows without IM bounds contribute 0 overlap.
+  ///   2. Secondary — minimize |mean_peaks[decoy] - mean_peaks[target]|
+  ///                 (closest busyness, not highest).
+  ///
   /// Returns std::numeric_limits<Size>::max() if no valid decoy window exists.
   static Size findDecoyWindow_(
     const std::vector<DiaWeaver::DIAWindow>& windows,
@@ -610,8 +647,9 @@ private:
     Size target_w)
   {
     const DiaWeaver::DIAWindow& target = windows[target_w];
-    Size   best_idx  = std::numeric_limits<Size>::max();
-    double best_diff = std::numeric_limits<double>::max();
+    Size   best_idx         = std::numeric_limits<Size>::max();
+    double best_im_overlap  = -1.0;
+    double best_busy_diff   = std::numeric_limits<double>::max();
 
     for (Size d = 0; d < windows.size(); ++d)
     {
@@ -624,11 +662,25 @@ private:
                                 (d_hi < target.lower_mz - 1e-6);
       if (!non_adjacent) continue;
 
-      const double diff = std::abs(mean_peak_counts[d] - mean_peak_counts[target_w]);
-      if (diff < best_diff)
+      // Primary: IM overlap (0 when either window has no IM bounds)
+      double im_overlap = 0.0;
+      if (target.hasIonMobility() && windows[d].hasIonMobility())
       {
-        best_diff = diff;
-        best_idx  = d;
+        im_overlap = std::max(0.0,
+          std::min(target.upper_im, windows[d].upper_im) -
+          std::max(target.lower_im, windows[d].lower_im));
+      }
+
+      // Secondary: busyness closeness
+      const double busy_diff = std::abs(mean_peak_counts[d] - mean_peak_counts[target_w]);
+
+      // Accept if: more IM overlap, or equal IM overlap with closer busyness
+      if (im_overlap > best_im_overlap ||
+          (im_overlap == best_im_overlap && busy_diff < best_busy_diff))
+      {
+        best_im_overlap = im_overlap;
+        best_busy_diff  = busy_diff;
+        best_idx        = d;
       }
     }
     return best_idx;
