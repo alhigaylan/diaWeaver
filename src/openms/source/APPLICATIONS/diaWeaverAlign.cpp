@@ -128,10 +128,6 @@ namespace OpenMS
       if (se.precursor_mz < lower_precursor_mz_ || se.precursor_mz >= upper_precursor_mz_)
       {
         ++n_out_of_range;
-        OPENMS_LOG_DEBUG << "[DiaWeaverAlign::buildPrecursorIndex] spectrum_id=" << i
-                         << " skipped: prec_mz=" << se.precursor_mz
-                         << " outside [" << lower_precursor_mz_ << ", "
-                         << upper_precursor_mz_ << ")" << std::endl;
         continue;
       }
 
@@ -143,26 +139,14 @@ namespace OpenMS
         if (se.drift_time < lower_im_ || se.drift_time >= upper_im_)
         {
           ++n_out_of_range;
-          OPENMS_LOG_DEBUG << "[DiaWeaverAlign::buildPrecursorIndex] spectrum_id=" << i
-                           << " skipped: drift_time=" << se.drift_time
-                           << " outside [" << lower_im_ << ", " << upper_im_ << ")" << std::endl;
           continue;
         }
         const uint32_t im_bin = toBinIdx_im_(se.drift_time);
         flat_idx = mz_bin * n_im_bins_ + im_bin;
-        OPENMS_LOG_DEBUG << "[DiaWeaverAlign::buildPrecursorIndex] spectrum_id=" << i
-                         << "  prec_mz=" << se.precursor_mz
-                         << "  -> mz_bin=" << mz_bin
-                         << "  drift_time=" << se.drift_time
-                         << "  -> im_bin=" << im_bin
-                         << "  flat_idx=" << flat_idx << std::endl;
       }
       else
       {
         flat_idx = mz_bin;
-        OPENMS_LOG_DEBUG << "[DiaWeaverAlign::buildPrecursorIndex] spectrum_id=" << i
-                         << "  prec_mz=" << se.precursor_mz
-                         << "  -> mz_bin=" << mz_bin << std::endl;
       }
 
       entries.emplace_back(flat_idx, static_cast<uint32_t>(i));
@@ -907,13 +891,6 @@ namespace OpenMS
         se.native_id = buf;
       }
 
-      OPENMS_LOG_DEBUG << "[DiaWeaverAlign::finalizeFromStream] spectrum_id=" << i
-                       << "  RT=" << se.retention_time
-                       << "  prec_mz=" << se.precursor_mz
-                       << "  drift_time=" << se.drift_time
-                       << "  charge=" << se.precursor_charge
-                       << "  src_file=" << se.source_file_idx
-                       << "  native_id='" << se.native_id << "'" << std::endl;
     }
     std::fclose(fpm);
 
@@ -1252,9 +1229,6 @@ namespace OpenMS
         ++i;
       }
       results.push_back({spec_id, count});
-      OPENMS_LOG_DEBUG << "[DiaWeaverAlign::matchSpectrum] query='" << query.getNativeID()
-                       << "'  matched spectrum_id=" << spec_id
-                       << "  matched_peaks=" << count << std::endl;
     }
 
     OPENMS_LOG_DEBUG << "[DiaWeaverAlign::matchSpectrum] query='" << query.getNativeID()
@@ -1415,10 +1389,6 @@ namespace OpenMS
       trace.apex_rt    = best.rt;
       apex_groups[best.query_idx].push_back(trace.spectrum_id);
 
-      OPENMS_LOG_DEBUG << "[DiaWeaverAlign::matchExperiment] spectrum_id=" << trace.spectrum_id
-                       << "  apex_rt=" << trace.apex_rt
-                       << "  apex_score=" << trace.apex_score
-                       << "  n_query_hits=" << trace.rts.size() << std::endl;
     }
 
     // -----------------------------------------------------------------------
@@ -1485,14 +1455,6 @@ namespace OpenMS
 
       for (uint32_t sid : target_list) is_target[sid] = 0;
       target_list.clear();
-    }
-
-    for (const ScoreTrace& trace : result)
-    {
-      OPENMS_LOG_DEBUG << "[DiaWeaverAlign::matchExperiment] apex_fingerprint  spectrum_id="
-                       << trace.spectrum_id
-                       << "  n_apex_fragment_hits=" << trace.apex_fingerprint.size()
-                       << std::endl;
     }
 
     return result;
@@ -1608,40 +1570,13 @@ namespace OpenMS
 
             const SpectrumEntry& se_j = getSpectrumEntry(*sid_ptr);
 
-            if (se_i.source_file_idx == se_j.source_file_idx)
-            {
-              OPENMS_LOG_DEBUG << "[DiaWeaverAlign::groupFeatures] REJECT pair ("
-                               << traces[ti].spectrum_id << ", " << *sid_ptr
-                               << "): same source_file=" << se_i.source_file_idx << std::endl;
-              continue;
-            }
+            if (se_i.source_file_idx == se_j.source_file_idx) continue;
 
             const double rt_diff = std::abs(traces[ti].apex_rt - traces[tj].apex_rt);
-            if (rt_diff > rt_tolerance)
-            {
-              OPENMS_LOG_DEBUG << "[DiaWeaverAlign::groupFeatures] REJECT pair ("
-                               << traces[ti].spectrum_id << ", " << *sid_ptr
-                               << "): |RT_diff|=" << rt_diff
-                               << " > rt_tolerance=" << rt_tolerance << std::endl;
-              continue;
-            }
+            if (rt_diff > rt_tolerance) continue;
 
             const uint32_t overlap = count_overlap(fingerprint_bins[ti], fingerprint_bins[tj]);
-            if (overlap < min_fragment_overlap)
-            {
-              OPENMS_LOG_DEBUG << "[DiaWeaverAlign::groupFeatures] REJECT pair ("
-                               << traces[ti].spectrum_id << ", " << *sid_ptr
-                               << "): fragment_overlap=" << overlap
-                               << " < min=" << min_fragment_overlap << std::endl;
-              continue;
-            }
-
-            OPENMS_LOG_DEBUG << "[DiaWeaverAlign::groupFeatures] MERGE pair ("
-                             << traces[ti].spectrum_id << ", " << *sid_ptr
-                             << "): |RT_diff|=" << rt_diff
-                             << "  fragment_overlap=" << overlap
-                             << "  src_files=(" << se_i.source_file_idx
-                             << ", " << se_j.source_file_idx << ")" << std::endl;
+            if (overlap < min_fragment_overlap) continue;
 
             unite(static_cast<int>(ti), tj);
           }
