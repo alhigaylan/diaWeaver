@@ -355,14 +355,20 @@ namespace OpenMS
 
       Must be called after buildPrecursorIndex().
 
-      @param traces               Output of matchExperiment().
-      @param rt_tolerance         Maximum apex RT difference in seconds (default 10.0).
-      @param min_fragment_overlap Minimum shared flat_bin_idx count for a valid pair (default 5).
-      @return                     FeatureGroups with >=2 members, sorted by mean_apex_rt.
+      @param traces                  Output of matchExperiment().
+      @param rt_tolerance            Maximum apex RT difference in seconds (default 10.0).
+      @param min_fragment_overlap    Minimum shared flat_bin_idx count for a valid pair (default 5).
+      @param im_tolerance            Maximum drift time difference (Vs/cm^2) between two
+                                     spectrum-ids to be considered the same precursor identity
+                                     (default 0.01). Ignored when the index has no IM data.
+      @param precursor_ppm_tolerance Maximum precursor m/z difference in ppm (default 20.0).
+      @return                        FeatureGroups with >=2 members, sorted by mean_apex_rt.
     */
     std::vector<FeatureGroup> groupFeatures(const std::vector<ScoreTrace>& traces,
-                                             double   rt_tolerance        = 10.0,
-                                             uint32_t min_fragment_overlap = 5) const;
+                                             double   rt_tolerance            = 10.0,
+                                             uint32_t min_fragment_overlap    = 5,
+                                             double   im_tolerance            = 0.01,
+                                             double   precursor_ppm_tolerance = 20.0) const;
 
     /**
       @brief Returns the spectrum_ids stored in a given precursor (m/z bin, IM bin) cell.

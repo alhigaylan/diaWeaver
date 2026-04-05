@@ -121,6 +121,24 @@ protected:
       false);
     setMinFloat_("rt_tolerance", 0.0);
 
+    registerDoubleOption_(
+      "im_tolerance",
+      "<Vs/cm^2>",
+      0.01,
+      "Maximum drift time difference (Vs/cm^2) between two spectrum-ids to be "
+      "considered the same precursor identity. Only applied when IM data is present.",
+      false);
+    setMinFloat_("im_tolerance", 0.0);
+
+    registerDoubleOption_(
+      "precursor_ppm_tolerance",
+      "<ppm>",
+      20.0,
+      "Maximum precursor m/z difference (ppm) between two spectrum-ids to be "
+      "considered for grouping.",
+      false);
+    setMinFloat_("precursor_ppm_tolerance", 0.0);
+
     registerIntOption_(
       "min_fragment_overlap",
       "<n>",
@@ -170,6 +188,8 @@ protected:
     const String     out_file  = getStringOption_("out");
     const String     workdir   = getStringOption_("workdir");
     const double     rt_tol    = getDoubleOption_("rt_tolerance");
+    const double     im_tol    = getDoubleOption_("im_tolerance");
+    const double     prec_ppm  = getDoubleOption_("precursor_ppm_tolerance");
     const uint32_t   min_frags = static_cast<uint32_t>(getIntOption_("min_fragment_overlap"));
     const uint32_t   min_peaks = static_cast<uint32_t>(getIntOption_("min_matched_peaks"));
 
@@ -390,7 +410,7 @@ protected:
       const auto traces = aligner.matchExperiment(window_query, min_peaks);
       OPENMS_LOG_INFO << "    Score traces: " << traces.size() << std::endl;
 
-      const auto groups = aligner.groupFeatures(traces, rt_tol, min_frags);
+      const auto groups = aligner.groupFeatures(traces, rt_tol, min_frags, im_tol, prec_ppm);
       OPENMS_LOG_INFO << "    Feature groups (>=2 members): " << groups.size() << std::endl;
 
       writeGroups_(tsv, groups, traces, aligner, global_group_id,

@@ -1463,7 +1463,9 @@ namespace OpenMS
   std::vector<DiaWeaverAlign::FeatureGroup>
   DiaWeaverAlign::groupFeatures(const std::vector<ScoreTrace>& traces,
                                  double   rt_tolerance,
-                                 uint32_t min_fragment_overlap) const
+                                 uint32_t min_fragment_overlap,
+                                 double   im_tolerance,
+                                 double   precursor_ppm_tolerance) const
   {
     if (traces.empty() || precursor_offsets_.empty()) return {};
 
@@ -1574,6 +1576,16 @@ namespace OpenMS
 
             const double rt_diff = std::abs(traces[ti].apex_rt - traces[tj].apex_rt);
             if (rt_diff > rt_tolerance) continue;
+
+            if (use_im)
+            {
+              const double im_diff = std::abs(se_i.drift_time - se_j.drift_time);
+              if (im_diff > im_tolerance) continue;
+            }
+
+            const double mean_mz    = (se_i.precursor_mz + se_j.precursor_mz) * 0.5;
+            const double prec_ppm   = std::abs(se_i.precursor_mz - se_j.precursor_mz) / mean_mz * 1e6;
+            if (prec_ppm > precursor_ppm_tolerance) continue;
 
             const uint32_t overlap = count_overlap(fingerprint_bins[ti], fingerprint_bins[tj]);
             if (overlap < min_fragment_overlap) continue;
