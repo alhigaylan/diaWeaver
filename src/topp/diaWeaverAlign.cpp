@@ -16,6 +16,7 @@
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
+#include <string>
 #include <unordered_map>
 
 #ifdef _OPENMP
@@ -238,8 +239,8 @@ protected:
     tsv << "group_id\tn_members\tmean_apex_rt_s\tn_shared_frags"
         << "\twindow_lower_mz\twindow_upper_mz"
         << "\tspectrum_id\tsource_file\tnative_id"
-        << "\tprecursor_mz\tprecursor_charge"
-        << "\tpseudo_rt_s\tquery_apex_rt_s\n";
+        << "\tprecursor_mz\tprecursor_charge\tprecursor_drift_time"
+        << "\tpseudo_rt_s\tquery_apex_rt_s\tapex_matched_peaks\n";
 
     uint32_t global_group_id = 0;
 
@@ -484,19 +485,22 @@ private:
     double window_lower_mz,
     double window_upper_mz)
   {
-    // Build spectrum_id → apex_rt lookup from score traces.
-    std::unordered_map<uint32_t, double> apex_rt_map;
-    apex_rt_map.reserve(traces.size());
+    // Build spectrum_id → ScoreTrace pointer lookup.
+    std::unordered_map<uint32_t, const DiaWeaverAlign::ScoreTrace*> trace_map;
+    trace_map.reserve(traces.size());
     for (const DiaWeaverAlign::ScoreTrace& t : traces)
-      apex_rt_map[t.spectrum_id] = t.apex_rt;
+      trace_map[t.spectrum_id] = &t;
 
     for (const DiaWeaverAlign::FeatureGroup& group : groups)
     {
       for (uint32_t sid : group.spectrum_ids)
       {
         const DiaWeaverAlign::SpectrumEntry& se = aligner.getSpectrumEntry(sid);
-        const auto it = apex_rt_map.find(sid);
-        const double query_apex_rt = (it != apex_rt_map.end()) ? it->second : -1.0;
+        const auto it = trace_map.find(sid);
+        const double   query_apex_rt     = (it != trace_map.end()) ? it->second->apex_rt    : -1.0;
+        const uint32_t apex_matched_peaks = (it != trace_map.end()) ? it->second->apex_score : 0;
+
+        const bool has_im = (se.drift_time >= 0.0);
 
         tsv << global_group_id
             << '\t' << group.spectrum_ids.size()
@@ -509,8 +513,10 @@ private:
             << '\t' << se.native_id
             << '\t' << se.precursor_mz
             << '\t' << se.precursor_charge
+            << '\t' << (has_im ? std::to_string(se.drift_time) : "NA")
             << '\t' << se.retention_time
             << '\t' << query_apex_rt
+            << '\t' << apex_matched_peaks
             << '\n';
       }
       ++global_group_id;
