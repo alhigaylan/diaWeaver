@@ -29,7 +29,7 @@ namespace OpenMS
   {
     defaults_.setValue("lower_mz",                400.0, "Lower m/z bound of the fragment index.");
     defaults_.setValue("upper_mz",               2000.0, "Upper m/z bound of the fragment index.");
-    defaults_.setValue("bin_width",                 0.1, "Fragment m/z bin width in Daltons.");
+    defaults_.setValue("fragment_ppm_tolerance",    20.0, "Fragment m/z bin width in ppm (logarithmic binning).");
     defaults_.setValue("lower_im",                 0.60, "Lower ion mobility bound (Vs/cm^2).");
     defaults_.setValue("upper_im",                 1.70, "Upper ion mobility bound (Vs/cm^2).");
     defaults_.setValue("bin_width_im",             0.01, "Ion mobility bin width (Vs/cm^2).");
@@ -38,7 +38,7 @@ namespace OpenMS
     defaults_.setValue("precursor_bin_width",      0.02, "Precursor m/z bin width in Daltons.");
     defaults_.setMinFloat("lower_mz",               1.0);
     defaults_.setMinFloat("upper_mz",               1.0);
-    defaults_.setMinFloat("bin_width",             1e-3);
+    defaults_.setMinFloat("fragment_ppm_tolerance", 0.1);
     defaults_.setMinFloat("lower_im",               0.0);
     defaults_.setMinFloat("upper_im",               0.0);
     defaults_.setMinFloat("bin_width_im",          1e-4);
@@ -57,10 +57,11 @@ namespace OpenMS
 
   void DiaWeaverAlign::updateMembers_()
   {
-    lower_mz_             = (double)param_.getValue("lower_mz");
-    upper_mz_             = (double)param_.getValue("upper_mz");
-    bin_width_            = (double)param_.getValue("bin_width");
-    n_bins_               = static_cast<uint32_t>(std::ceil((upper_mz_ - lower_mz_) / bin_width_));
+    lower_mz_                 = (double)param_.getValue("lower_mz");
+    upper_mz_                 = (double)param_.getValue("upper_mz");
+    fragment_ppm_tolerance_   = (double)param_.getValue("fragment_ppm_tolerance");
+    log_bin_ratio_            = std::log(1.0 + fragment_ppm_tolerance_ / 1e6);
+    n_bins_                   = static_cast<uint32_t>(std::log(upper_mz_ / lower_mz_) / log_bin_ratio_) + 1;
     lower_im_             = (double)param_.getValue("lower_im");
     upper_im_             = (double)param_.getValue("upper_im");
     bin_width_im_         = (double)param_.getValue("bin_width_im");
@@ -73,7 +74,8 @@ namespace OpenMS
 
   uint32_t DiaWeaverAlign::toBinIdx_(double mz) const
   {
-    return static_cast<uint32_t>((mz - lower_mz_) / bin_width_);
+    const auto bin = static_cast<uint32_t>(std::log(mz / lower_mz_) / log_bin_ratio_);
+    return std::min(bin, n_bins_ - 1u);
   }
 
   uint32_t DiaWeaverAlign::toBinIdx_im_(double im) const
@@ -83,8 +85,9 @@ namespace OpenMS
 
   uint16_t DiaWeaverAlign::toMassOffset_(double mz, uint32_t bin_idx) const
   {
-    const double bin_start = lower_mz_ + bin_idx * bin_width_;
-    const double frac      = (mz - bin_start) / bin_width_;
+    const double bin_start = lower_mz_ * std::exp(static_cast<double>(bin_idx) * log_bin_ratio_);
+    const double bin_width = bin_start * (std::exp(log_bin_ratio_) - 1.0);
+    const double frac      = (mz - bin_start) / bin_width;
     return static_cast<uint16_t>(std::max(0.0, std::min(1.0, frac)) * 65535.0);
   }
 
@@ -254,7 +257,7 @@ namespace OpenMS
 
     OPENMS_LOG_INFO << "[DiaWeaverAlign] Building fragment index  "
                     << "mz=[" << lower_mz_ << ", " << upper_mz_ << "] Da  "
-                    << "bin_width=" << bin_width_ << " Da  n_mz_bins=" << n_bins_ << "  "
+                    << "fragment_ppm=" << fragment_ppm_tolerance_ << "  n_mz_bins=" << n_bins_ << "  "
                     << "im=[" << lower_im_ << ", " << upper_im_ << "] Vs/cm^2  "
                     << "bin_width_im=" << bin_width_im_ << "  n_im_bins=" << n_im_bins_ << std::endl;
 
@@ -298,7 +301,7 @@ namespace OpenMS
 
     OPENMS_LOG_INFO << "[DiaWeaverAlign] Building fragment index (in-memory)  "
                     << "mz=[" << lower_mz_ << ", " << upper_mz_ << "] Da  "
-                    << "bin_width=" << bin_width_ << " Da  n_mz_bins=" << n_bins_ << "  "
+                    << "fragment_ppm=" << fragment_ppm_tolerance_ << "  n_mz_bins=" << n_bins_ << "  "
                     << "im=[" << lower_im_ << ", " << upper_im_ << "] Vs/cm^2  "
                     << "bin_width_im=" << bin_width_im_ << "  n_im_bins=" << n_im_bins_ << std::endl;
 
@@ -658,7 +661,7 @@ namespace OpenMS
     OPENMS_LOG_DEBUG << "[DiaWeaverAlign::openStream] frags=" << frags_path
                      << "  meta=" << meta_path << std::endl;
     OPENMS_LOG_DEBUG << "[DiaWeaverAlign::openStream] fragment axis: mz=["
-                     << lower_mz_ << ", " << upper_mz_ << "] Da  bin_width=" << bin_width_
+                     << lower_mz_ << ", " << upper_mz_ << "] Da  fragment_ppm=" << fragment_ppm_tolerance_
                      << "  n_mz_bins=" << n_bins_ << std::endl;
     OPENMS_LOG_DEBUG << "[DiaWeaverAlign::openStream] IM axis: im=["
                      << lower_im_ << ", " << upper_im_ << "]  bin_width_im=" << bin_width_im_
@@ -951,10 +954,10 @@ namespace OpenMS
     std::fwrite(magic, 1, 4, fp);
 
     // Bin-axis scalars
-    std::fwrite(&lower_mz_,            8, 1, fp);
-    std::fwrite(&upper_mz_,            8, 1, fp);
-    std::fwrite(&bin_width_,           8, 1, fp);
-    std::fwrite(&n_bins_,              4, 1, fp);
+    std::fwrite(&lower_mz_,                8, 1, fp);
+    std::fwrite(&upper_mz_,                8, 1, fp);
+    std::fwrite(&fragment_ppm_tolerance_,  8, 1, fp);
+    std::fwrite(&n_bins_,                  4, 1, fp);
     std::fwrite(&lower_im_,            8, 1, fp);
     std::fwrite(&upper_im_,            8, 1, fp);
     std::fwrite(&bin_width_im_,        8, 1, fp);
@@ -1048,10 +1051,11 @@ namespace OpenMS
     }
 
     // Bin-axis scalars — restore directly (bypasses updateMembers_)
-    std::fread(&lower_mz_,            8, 1, fp);
-    std::fread(&upper_mz_,            8, 1, fp);
-    std::fread(&bin_width_,           8, 1, fp);
-    std::fread(&n_bins_,              4, 1, fp);
+    std::fread(&lower_mz_,                8, 1, fp);
+    std::fread(&upper_mz_,                8, 1, fp);
+    std::fread(&fragment_ppm_tolerance_,  8, 1, fp);
+    log_bin_ratio_ = std::log(1.0 + fragment_ppm_tolerance_ / 1e6);
+    std::fread(&n_bins_,                  4, 1, fp);
     std::fread(&lower_im_,            8, 1, fp);
     std::fread(&upper_im_,            8, 1, fp);
     std::fread(&bin_width_im_,        8, 1, fp);
@@ -1761,7 +1765,7 @@ namespace OpenMS
   Size   DiaWeaverAlign::getTotalFragmentEntries() const { return fragment_entries_.size(); }
   Size   DiaWeaverAlign::getMZBinCount()           const { return n_bins_; }
   Size   DiaWeaverAlign::getIMBinCount()           const { return n_im_bins_; }
-  double DiaWeaverAlign::getBinWidth()             const { return bin_width_; }
+  double DiaWeaverAlign::getFragmentPPMTolerance() const { return fragment_ppm_tolerance_; }
   double DiaWeaverAlign::getBinWidthIM()           const { return bin_width_im_; }
   double DiaWeaverAlign::getLowerMz()              const { return lower_mz_; }
   double DiaWeaverAlign::getUpperMz()              const { return upper_mz_; }

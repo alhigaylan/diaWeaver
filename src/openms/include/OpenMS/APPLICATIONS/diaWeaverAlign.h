@@ -32,9 +32,9 @@ namespace OpenMS
 
     **Bin axes**
 
-      mz_bin(mz) = floor((mz  - lower_mz)  / bin_width)
+      mz_bin(mz) = floor(log(mz / lower_mz) / log(1 + ppm/1e6))
       im_bin(im) = floor((im  - lower_im)  / bin_width_im)
-      n_mz_bins  = ceil((upper_mz - lower_mz) / bin_width)
+      n_mz_bins  = floor(log(upper_mz / lower_mz) / log(1 + ppm/1e6)) + 1
       n_im_bins  = ceil((upper_im - lower_im) / bin_width_im)
 
     Peaks outside [lower_mz, upper_mz] or [lower_im, upper_im] are ignored.
@@ -62,8 +62,8 @@ namespace OpenMS
     struct FragmentEntry
     {
       uint32_t spectrum_id; ///< RT-ordered index of the parent spectrum
-      uint16_t mass_offset; ///< Sub-bin Da offset scaled to [0, 65535]:
-                            ///  offset_da = (mass_offset / 65535.0) * bin_width
+      uint16_t mass_offset; ///< Fractional offset within the bin, scaled to [0, 65535]:
+                            ///  frac = mass_offset / 65535.0  (0 = bin start, 1 = bin end)
       uint8_t  charge;      ///< Precursor charge (0 = unknown)
       uint8_t  reserved{0}; ///< Reserved for future use
     };
@@ -397,7 +397,7 @@ namespace OpenMS
     Size   getTotalFragmentEntries() const;
     Size   getMZBinCount()           const;
     Size   getIMBinCount()           const;
-    double getBinWidth()             const;
+    double getFragmentPPMTolerance() const;
     double getBinWidthIM()           const;
     double getLowerMz()              const;
     double getUpperMz()              const;
@@ -425,7 +425,8 @@ namespace OpenMS
     // Derived from parameters in updateMembers_
     double   lower_mz_{400.0};
     double   upper_mz_{2000.0};
-    double   bin_width_{0.1};
+    double   fragment_ppm_tolerance_{20.0};
+    double   log_bin_ratio_{0.0};  ///< Pre-computed log(1 + fragment_ppm_tolerance_/1e6)
     uint32_t n_bins_{0};
     double   lower_im_{0.60};
     double   upper_im_{1.70};
