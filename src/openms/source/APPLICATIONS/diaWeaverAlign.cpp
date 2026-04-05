@@ -1231,11 +1231,6 @@ namespace OpenMS
       results.push_back({spec_id, count});
     }
 
-    OPENMS_LOG_DEBUG << "[DiaWeaverAlign::matchSpectrum] query='" << query.getNativeID()
-                     << "'  n_query_peaks=" << query.size()
-                     << "  total_raw_hits=" << hits.size()
-                     << "  distinct_spectra_hit=" << results.size() << std::endl;
-
     return results;
   }
 
@@ -1376,10 +1371,6 @@ namespace OpenMS
       [](const ScoreTrace& a, const ScoreTrace& b)
       { return a.spectrum_id < b.spectrum_id; });
 
-    OPENMS_LOG_DEBUG << "[DiaWeaverAlign::matchExperiment] merged "
-                     << result.size() << " spectrum_ids with at least one above-threshold query hit"
-                     << std::endl;
-
     // Populate apex fields and group spectrum_ids by their apex query spectrum index.
     std::vector<std::vector<uint32_t>> apex_groups(query_spectra.size());
     for (ScoreTrace& trace : result)
@@ -1388,7 +1379,33 @@ namespace OpenMS
       trace.apex_score = best.score;
       trace.apex_rt    = best.rt;
       apex_groups[best.query_idx].push_back(trace.spectrum_id);
+    }
 
+    if (!result.empty())
+    {
+      uint32_t min_apex = result[0].apex_score;
+      uint32_t max_apex = result[0].apex_score;
+      uint64_t sum_apex = 0;
+      for (const ScoreTrace& t : result)
+      {
+        if (t.apex_score < min_apex) min_apex = t.apex_score;
+        if (t.apex_score > max_apex) max_apex = t.apex_score;
+        sum_apex += t.apex_score;
+      }
+      const double mean_apex = static_cast<double>(sum_apex) / result.size();
+      OPENMS_LOG_DEBUG << "[DiaWeaverAlign::matchExperiment] "
+                       << query_spectra.size() << " query spectra  "
+                       << result.size() << " index spectrum_ids traced  "
+                       << "apex_matched_peaks: min=" << min_apex
+                       << " max=" << max_apex
+                       << " mean=" << mean_apex << std::endl;
+    }
+    else
+    {
+      OPENMS_LOG_DEBUG << "[DiaWeaverAlign::matchExperiment] "
+                       << query_spectra.size() << " query spectra  "
+                       << "no index spectrum_ids traced (threshold too high or empty index)"
+                       << std::endl;
     }
 
     // -----------------------------------------------------------------------
