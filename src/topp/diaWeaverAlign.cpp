@@ -390,10 +390,14 @@ protected:
       {
         const Size d = decoy_window_idx[w];
         double im_overlap = 0.0;
-        if (windows[w].hasIonMobility() && windows[d].hasIonMobility())
-          im_overlap = std::max(0.0,
+        const double target_im_width = windows[w].upper_im - windows[w].lower_im;
+        if (windows[w].hasIonMobility() && windows[d].hasIonMobility() && target_im_width > 0.0)
+        {
+          const double raw_overlap = std::max(0.0,
             std::min(windows[w].upper_im, windows[d].upper_im) -
             std::max(windows[w].lower_im, windows[d].lower_im));
+          im_overlap = raw_overlap / target_im_width;
+        }
         OPENMS_LOG_INFO << "  Window " << w
                         << " [" << windows[w].lower_mz << ", " << windows[w].upper_mz << "]"
                         << " -> decoy window " << d
@@ -662,13 +666,17 @@ private:
                                 (d_hi < target.lower_mz - 1e-6);
       if (!non_adjacent) continue;
 
-      // Primary: IM overlap (0 when either window has no IM bounds)
+      // Primary: IM overlap fraction in [0, 1] relative to the target window width.
+      // 1.0 = decoy fully covers the target IM range; 0.0 = no overlap.
+      // Falls back to 0.0 when either window has no IM bounds.
       double im_overlap = 0.0;
-      if (target.hasIonMobility() && windows[d].hasIonMobility())
+      const double target_im_width = target.upper_im - target.lower_im;
+      if (target.hasIonMobility() && windows[d].hasIonMobility() && target_im_width > 0.0)
       {
-        im_overlap = std::max(0.0,
+        const double raw_overlap = std::max(0.0,
           std::min(target.upper_im, windows[d].upper_im) -
           std::max(target.lower_im, windows[d].lower_im));
+        im_overlap = raw_overlap / target_im_width;
       }
 
       // Secondary: busyness closeness
