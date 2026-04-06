@@ -369,7 +369,8 @@ namespace OpenMS
                                              double   rt_tolerance            = 10.0,
                                              uint32_t min_fragment_overlap    = 5,
                                              double   im_tolerance            = 0.01,
-                                             double   precursor_ppm_tolerance = 20.0) const;
+                                             double   precursor_ppm_tolerance = 20.0,
+                                             uint32_t isotope_error_tol       = 3) const;
 
     /**
       @brief Returns the spectrum_ids stored in a given precursor (m/z bin, IM bin) cell.

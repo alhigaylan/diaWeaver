@@ -1492,7 +1492,8 @@ namespace OpenMS
                                  double   rt_tolerance,
                                  uint32_t min_fragment_overlap,
                                  double   im_tolerance,
-                                 double   precursor_ppm_tolerance) const
+                                 double   precursor_ppm_tolerance,
+                                 uint32_t isotope_error_tol) const
   {
     if (traces.empty() || precursor_offsets_.empty()) return {};
 
@@ -1570,6 +1571,9 @@ namespace OpenMS
     // apex RT within tolerance, and sufficient fragment overlap.
     // -----------------------------------------------------------------------
 
+    // Mass difference between adjacent isotope peaks (¹³C − ¹²C substitution).
+    static constexpr double NEUTRON_MASS = 1.003355;
+
     const bool use_im = hasIM();
 
     for (Size ti = 0; ti < traces.size(); ++ti)
@@ -1577,47 +1581,89 @@ namespace OpenMS
       const SpectrumEntry& se_i = getSpectrumEntry(traces[ti].spectrum_id);
       if (se_i.precursor_mz < lower_precursor_mz_ || se_i.precursor_mz >= upper_precursor_mz_) continue;
 
-      const uint32_t mz_bin_i = toPrecursorBinIdx_(se_i.precursor_mz);
       const uint32_t im_bin_i = use_im ? toBinIdx_im_(se_i.drift_time) : 0;
-
-      const int mz_lo = std::max(0, static_cast<int>(mz_bin_i) - 1);
-      const int mz_hi = std::min(static_cast<int>(n_precursor_bins_) - 1, static_cast<int>(mz_bin_i) + 1);
       const int im_lo = use_im ? std::max(0, static_cast<int>(im_bin_i) - 1) : 0;
       const int im_hi = use_im ? std::min(static_cast<int>(n_im_bins_) - 1, static_cast<int>(im_bin_i) + 1) : 0;
 
-      for (int mb = mz_lo; mb <= mz_hi; ++mb)
+      // Collect m/z bin ranges to search: k=0 (standard) plus one range per
+      // isotope offset in both directions.  Each range covers ±1 bin around
+      // the target bin to absorb rounding at bin boundaries.
+      // Isotope offset in m/z = k * NEUTRON_MASS / charge.
+      // Only added when the charge is known (> 0).
+      std::vector<std::pair<int,int>> mz_ranges;
+      mz_ranges.reserve(1 + 2 * isotope_error_tol);
+
+      auto add_mz_range = [&](double target_mz)
       {
-        for (int ib = im_lo; ib <= im_hi; ++ib)
+        if (target_mz < lower_precursor_mz_ || target_mz >= upper_precursor_mz_) return;
+        const uint32_t bin = toPrecursorBinIdx_(target_mz);
+        mz_ranges.push_back({
+          std::max(0,   static_cast<int>(bin) - 1),
+          std::min(static_cast<int>(n_precursor_bins_) - 1, static_cast<int>(bin) + 1)
+        });
+      };
+
+      add_mz_range(se_i.precursor_mz);  // k = 0
+
+      if (isotope_error_tol > 0 && se_i.precursor_charge > 0)
+      {
+        for (uint32_t k = 1; k <= isotope_error_tol; ++k)
         {
-          auto [begin, end] = getPrecursorBinEntries(
-            static_cast<uint32_t>(mb), static_cast<uint32_t>(ib));
+          const double offset = static_cast<double>(k) * NEUTRON_MASS / se_i.precursor_charge;
+          add_mz_range(se_i.precursor_mz + offset);  // se_i is the lighter isotope
+          add_mz_range(se_i.precursor_mz - offset);  // se_i is the heavier isotope
+        }
+      }
 
-          for (const uint32_t* sid_ptr = begin; sid_ptr != end; ++sid_ptr)
+      for (const auto& [mz_lo, mz_hi] : mz_ranges)
+      {
+        for (int mb = mz_lo; mb <= mz_hi; ++mb)
+        {
+          for (int ib = im_lo; ib <= im_hi; ++ib)
           {
-            const int tj = spec_to_trace_idx[*sid_ptr];
-            if (tj <= static_cast<int>(ti)) continue; // process each pair once only
+            auto [begin, end] = getPrecursorBinEntries(
+              static_cast<uint32_t>(mb), static_cast<uint32_t>(ib));
 
-            const SpectrumEntry& se_j = getSpectrumEntry(*sid_ptr);
-
-            if (se_i.source_file_idx == se_j.source_file_idx) continue;
-
-            const double rt_diff = std::abs(traces[ti].apex_rt - traces[tj].apex_rt);
-            if (rt_diff > rt_tolerance) continue;
-
-            if (use_im)
+            for (const uint32_t* sid_ptr = begin; sid_ptr != end; ++sid_ptr)
             {
-              const double im_diff = std::abs(se_i.drift_time - se_j.drift_time);
-              if (im_diff > im_tolerance) continue;
+              const int tj = spec_to_trace_idx[*sid_ptr];
+              if (tj <= static_cast<int>(ti)) continue; // process each pair once only
+
+              const SpectrumEntry& se_j = getSpectrumEntry(*sid_ptr);
+
+              if (se_i.source_file_idx == se_j.source_file_idx) continue;
+
+              const double rt_diff = std::abs(traces[ti].apex_rt - traces[tj].apex_rt);
+              if (rt_diff > rt_tolerance) continue;
+
+              if (use_im)
+              {
+                const double im_diff = std::abs(se_i.drift_time - se_j.drift_time);
+                if (im_diff > im_tolerance) continue;
+              }
+
+              // Precursor check: accept if the m/z difference is within ppm
+              // tolerance after correcting for any isotope offset
+              // k ∈ {0, ±1, …, ±isotope_error_tol}.
+              const int    charge  = se_i.precursor_charge;
+              const double mz_diff = se_i.precursor_mz - se_j.precursor_mz;
+              const double mean_mz = (se_i.precursor_mz + se_j.precursor_mz) * 0.5;
+              const double ppm_thr = precursor_ppm_tolerance * mean_mz / 1e6;
+
+              bool prec_ok = false;
+              for (int k = -static_cast<int>(isotope_error_tol);
+                   k <= static_cast<int>(isotope_error_tol) && !prec_ok; ++k)
+              {
+                if (std::abs(mz_diff - k * NEUTRON_MASS / charge) <= ppm_thr)
+                  prec_ok = true;
+              }
+              if (!prec_ok) continue;
+
+              const uint32_t overlap = count_overlap(fingerprint_bins[ti], fingerprint_bins[tj]);
+              if (overlap < min_fragment_overlap) continue;
+
+              unite(static_cast<int>(ti), tj);
             }
-
-            const double mean_mz    = (se_i.precursor_mz + se_j.precursor_mz) * 0.5;
-            const double prec_ppm   = std::abs(se_i.precursor_mz - se_j.precursor_mz) / mean_mz * 1e6;
-            if (prec_ppm > precursor_ppm_tolerance) continue;
-
-            const uint32_t overlap = count_overlap(fingerprint_bins[ti], fingerprint_bins[tj]);
-            if (overlap < min_fragment_overlap) continue;
-
-            unite(static_cast<int>(ti), tj);
           }
         }
       }

@@ -150,6 +150,16 @@ protected:
     setMinInt_("min_fragment_overlap", 1);
 
     registerIntOption_(
+      "isotope_error_tol",
+      "<n>",
+      3,
+      "Maximum number of isotope errors to tolerate when matching precursor m/z across runs. "
+      "For each pair, the m/z difference is checked against k * 1.003355 / charge for "
+      "k in {0, ±1, …, ±isotope_error_tol}. Set to 0 to disable isotope correction.",
+      false);
+    setMinInt_("isotope_error_tol", 0);
+
+    registerIntOption_(
       "min_matched_peaks",
       "<n>",
       2,
@@ -192,8 +202,9 @@ protected:
     const double     rt_tol    = getDoubleOption_("rt_tolerance");
     const double     im_tol    = getDoubleOption_("im_tolerance");
     const double     prec_ppm  = getDoubleOption_("precursor_ppm_tolerance");
-    const uint32_t   min_frags = static_cast<uint32_t>(getIntOption_("min_fragment_overlap"));
-    const uint32_t   min_peaks = static_cast<uint32_t>(getIntOption_("min_matched_peaks"));
+    const uint32_t   min_frags    = static_cast<uint32_t>(getIntOption_("min_fragment_overlap"));
+    const uint32_t   iso_err_tol  = static_cast<uint32_t>(getIntOption_("isotope_error_tol"));
+    const uint32_t   min_peaks    = static_cast<uint32_t>(getIntOption_("min_matched_peaks"));
 
 #ifdef _OPENMP
     omp_set_num_threads(getIntOption_("threads"));
@@ -481,7 +492,7 @@ protected:
         }
       }
 
-      const auto groups = aligner.groupFeatures(traces, rt_tol, min_frags, im_tol, prec_ppm);
+      const auto groups = aligner.groupFeatures(traces, rt_tol, min_frags, im_tol, prec_ppm, iso_err_tol);
       OPENMS_LOG_INFO << "    Feature groups (>=2 members): " << groups.size() << std::endl;
 
       const DiaWeaver::DIAWindow* decoy_win =
