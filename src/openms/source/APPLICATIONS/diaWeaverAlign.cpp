@@ -460,6 +460,12 @@ namespace OpenMS
     fragment_entries_.resize(all_entries.size());
     for (Size i = 0; i < all_entries.size(); ++i)
       fragment_entries_[i] = all_entries[i].second;
+
+    // Count how many bins each spectrum occupies in the final CSR.
+    // This is stored in SpectrumEntry so callers can compare it against
+    // matched peaks without needing to scan the index themselves.
+    for (const FragmentEntry& fe : fragment_entries_)
+      spectrum_entries_[fe.spectrum_id].n_indexed_fragments++;
   }
 
   // -----------------------------------------------------------------------
@@ -970,14 +976,16 @@ namespace OpenMS
     std::fwrite(&n_spec, 4, 1, fp);
     for (const SpectrumEntry& se : spectrum_entries_)
     {
-      const int32_t  charge  = static_cast<int32_t>(se.precursor_charge);
-      const uint32_t src_idx = static_cast<uint32_t>(se.source_file_idx);
-      const uint32_t id_len  = static_cast<uint32_t>(se.native_id.size());
+      const int32_t  charge   = static_cast<int32_t>(se.precursor_charge);
+      const uint32_t src_idx  = static_cast<uint32_t>(se.source_file_idx);
+      const uint32_t n_frags  = se.n_indexed_fragments;
+      const uint32_t id_len   = static_cast<uint32_t>(se.native_id.size());
       std::fwrite(&se.retention_time, 8, 1, fp);
       std::fwrite(&se.precursor_mz,   8, 1, fp);
       std::fwrite(&se.drift_time,     8, 1, fp);
       std::fwrite(&charge,            4, 1, fp);
       std::fwrite(&src_idx,           4, 1, fp);
+      std::fwrite(&n_frags,           4, 1, fp);
       std::fwrite(&id_len,            4, 1, fp);
       if (id_len > 0)
         std::fwrite(se.native_id.c_str(), 1, id_len, fp);
@@ -1077,15 +1085,17 @@ namespace OpenMS
     {
       SpectrumEntry& se = spectrum_entries_[i];
       int32_t  charge;
-      uint32_t src_idx, id_len;
+      uint32_t src_idx, n_frags, id_len;
       std::fread(&se.retention_time, 8, 1, fp);
       std::fread(&se.precursor_mz,   8, 1, fp);
       std::fread(&se.drift_time,     8, 1, fp);
       std::fread(&charge,            4, 1, fp);
       std::fread(&src_idx,           4, 1, fp);
+      std::fread(&n_frags,           4, 1, fp);
       std::fread(&id_len,            4, 1, fp);
-      se.precursor_charge = static_cast<int>(charge);
-      se.source_file_idx  = static_cast<Size>(src_idx);
+      se.precursor_charge      = static_cast<int>(charge);
+      se.source_file_idx       = static_cast<Size>(src_idx);
+      se.n_indexed_fragments   = n_frags;
       if (id_len > 0)
       {
         std::string buf(id_len, '\0');

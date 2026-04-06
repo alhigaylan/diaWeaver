@@ -77,12 +77,13 @@ namespace OpenMS
     */
     struct SpectrumEntry
     {
-      double retention_time{-1.0};   ///< Retention time in seconds
-      double precursor_mz{-1.0};     ///< Precursor m/z (-1 if unknown)
-      double drift_time{};            ///< Ion mobility drift time. Only valid when hasIM() is true.
-      String native_id;              ///< Native ID from the source mzML
-      Size   source_file_idx{0};     ///< Index into the source file list
-      int    precursor_charge{0};    ///< Precursor charge (0 = unknown)
+      double   retention_time{-1.0};      ///< Retention time in seconds
+      double   precursor_mz{-1.0};        ///< Precursor m/z (-1 if unknown)
+      double   drift_time{};              ///< Ion mobility drift time. Only valid when hasIM() is true.
+      String   native_id;                 ///< Native ID from the source mzML
+      Size     source_file_idx{0};        ///< Index into the source file list
+      int      precursor_charge{0};       ///< Precursor charge (0 = unknown)
+      uint32_t n_indexed_fragments{0};    ///< Number of fragment bins this spectrum occupies in the index
     };
 
     /**

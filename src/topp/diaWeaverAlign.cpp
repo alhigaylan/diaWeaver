@@ -242,7 +242,7 @@ protected:
         << "\tdecoy_window_lower_mz\tdecoy_window_upper_mz\tdecoy_window_lower_im\tdecoy_window_upper_im"
         << "\tspectrum_id\tsource_file\tnative_id"
         << "\tprecursor_mz\tprecursor_charge\tprecursor_drift_time"
-        << "\tpseudo_rt_s\tquery_apex_rt_s\tapex_matched_peaks\tbest_decoy\n";
+        << "\tpseudo_rt_s\tquery_apex_rt_s\tinput_fragments\tapex_matched_peaks\tbest_decoy\n";
 
     uint32_t global_group_id = 0;
 
@@ -613,6 +613,7 @@ private:
             << '\t' << (has_im ? std::to_string(se.drift_time) : "NA")
             << '\t' << se.retention_time
             << '\t' << query_apex_rt
+            << '\t' << se.n_indexed_fragments
             << '\t' << apex_matched_peaks
             << '\t' << best_decoy
             << '\n';
