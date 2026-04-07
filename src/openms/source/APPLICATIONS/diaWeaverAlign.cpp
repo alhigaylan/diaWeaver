@@ -1488,12 +1488,12 @@ namespace OpenMS
   }
 
   std::vector<DiaWeaverAlign::FeatureGroup>
-  DiaWeaverAlign::splitByJaccard_(
+  DiaWeaverAlign::splitByOverlap_(
     const FeatureGroup&                         group,
     const std::vector<ScoreTrace>&              traces,
     const std::vector<std::vector<uint32_t>>&   fingerprint_bins,
     const std::vector<int>&                     spec_to_trace_idx,
-    double                                       min_jaccard_similarity)
+    double                                       min_overlap_similarity)
   {
     const int N = static_cast<int>(group.spectrum_ids.size());
 
@@ -1503,10 +1503,12 @@ namespace OpenMS
       ti[i] = spec_to_trace_idx[group.spectrum_ids[i]];
 
     // -----------------------------------------------------------------------
-    // Jaccard similarity: |A ∩ B| / |A ∪ B| via two-pointer on sorted vectors.
-    // |A ∪ B| = |A| + |B| - |A ∩ B|.
+    // Overlap Coefficient: |A ∩ B| / min(|A|, |B|) via two-pointer on sorted
+    // vectors.  Normalising by the smaller set removes the bias that arises
+    // when one member's fingerprint is inflated by being from the same LC-MS
+    // run as the query file.
     // -----------------------------------------------------------------------
-    auto compute_jaccard = [](const std::vector<uint32_t>& a,
+    auto compute_overlap = [](const std::vector<uint32_t>& a,
                                const std::vector<uint32_t>& b) -> float
     {
       uint32_t intersect = 0;
@@ -1517,19 +1519,19 @@ namespace OpenMS
         else if (b[ib] < a[ia]) ++ib;
         else { ++intersect; ++ia; ++ib; }
       }
-      const uint32_t uni = static_cast<uint32_t>(a.size() + b.size()) - intersect;
-      return (uni == 0) ? 0.0f : static_cast<float>(intersect) / static_cast<float>(uni);
+      const uint32_t smaller = static_cast<uint32_t>(std::min(a.size(), b.size()));
+      return (smaller == 0) ? 0.0f : static_cast<float>(intersect) / static_cast<float>(smaller);
     };
 
     // -----------------------------------------------------------------------
-    // Build flat N×N Jaccard similarity matrix (upper triangle mirrored).
+    // Build flat N×N Overlap Coefficient matrix (upper triangle mirrored).
     // -----------------------------------------------------------------------
     std::vector<float> sim(static_cast<Size>(N) * N, 0.0f);
     for (int i = 0; i < N; ++i)
       for (int j = i + 1; j < N; ++j)
       {
-        const float jac = compute_jaccard(fingerprint_bins[ti[i]], fingerprint_bins[ti[j]]);
-        sim[i * N + j] = sim[j * N + i] = jac;
+        const float ov = compute_overlap(fingerprint_bins[ti[i]], fingerprint_bins[ti[j]]);
+        sim[i * N + j] = sim[j * N + i] = ov;
       }
 
     // -----------------------------------------------------------------------
@@ -1544,7 +1546,7 @@ namespace OpenMS
     // -----------------------------------------------------------------------
     std::vector<bool>             active(N, true);
     std::vector<std::vector<int>> clust(N);
-    std::vector<float>            clust_min_jac(N, 1.0f); // smallest merge Jaccard per cluster
+    std::vector<float>            clust_min_overlap(N, 1.0f); // smallest merge Overlap Coefficient per cluster
 
     for (int i = 0; i < N; ++i) clust[i] = {i};
     int n_active = N;
@@ -1561,10 +1563,10 @@ namespace OpenMS
           if (sim[p * N + q] > best) { best = sim[p * N + q]; bp = p; bq = q; }
         }
       }
-      if (best < static_cast<float>(min_jaccard_similarity)) break;
+      if (best < static_cast<float>(min_overlap_similarity)) break;
 
-      // Record the minimum Jaccard merge that has formed this cluster.
-      clust_min_jac[bp] = std::min({clust_min_jac[bp], clust_min_jac[bq], best});
+      // Record the minimum Overlap Coefficient merge that has formed this cluster.
+      clust_min_overlap[bp] = std::min({clust_min_overlap[bp], clust_min_overlap[bq], best});
 
       // Absorb bq's members into bp.
       for (int m : clust[bq]) clust[bp].push_back(m);
@@ -1587,9 +1589,9 @@ namespace OpenMS
     // -----------------------------------------------------------------------
     struct Sub_
     {
-      std::vector<int>      local_idx;  // positions in group.spectrum_ids
-      std::vector<uint32_t> union_bins; // sorted, deduplicated union fingerprint
-      float                 min_jac{1.0f};
+      std::vector<int>      local_idx;    // positions in group.spectrum_ids
+      std::vector<uint32_t> union_bins;   // sorted, deduplicated union fingerprint
+      float                 min_overlap{1.0f};
     };
 
     std::vector<Sub_> subs;
@@ -1597,8 +1599,8 @@ namespace OpenMS
     {
       if (!active[c] || clust[c].size() < 2) continue;
       Sub_ s;
-      s.local_idx = clust[c];
-      s.min_jac   = clust_min_jac[c];
+      s.local_idx   = clust[c];
+      s.min_overlap = clust_min_overlap[c];
 
       for (int li : s.local_idx)
       {
@@ -1655,7 +1657,7 @@ namespace OpenMS
       const Sub_& sub = subs[s];
       FeatureGroup fg;
       fg.spectrum_ids.reserve(sub.local_idx.size());
-      fg.min_internal_jaccard = static_cast<double>(sub.min_jac);
+      fg.min_internal_overlap = static_cast<double>(sub.min_overlap);
       fg.unique_fragment_bins = std::move(unique_bins[s]);
 
       double rt_sum = 0.0;
@@ -1698,7 +1700,7 @@ namespace OpenMS
                                  double   im_tolerance,
                                  double   precursor_ppm_tolerance,
                                  uint32_t isotope_error_tol,
-                                 double   min_jaccard_similarity) const
+                                 double   min_overlap_similarity) const
   {
     if (traces.empty() || precursor_offsets_.empty()) return {};
 
@@ -1985,8 +1987,8 @@ namespace OpenMS
       // -----------------------------------------------------------------------
       if (should_sub_cluster(group))
       {
-        auto subs = splitByJaccard_(group, traces, fingerprint_bins,
-                                    spec_to_trace_idx, min_jaccard_similarity);
+        auto subs = splitByOverlap_(group, traces, fingerprint_bins,
+                                    spec_to_trace_idx, min_overlap_similarity);
         OPENMS_LOG_DEBUG << "[DiaWeaverAlign::groupFeatures] sub-clustered group of "
                          << group.spectrum_ids.size() << " → " << subs.size()
                          << " sub-group(s)" << std::endl;

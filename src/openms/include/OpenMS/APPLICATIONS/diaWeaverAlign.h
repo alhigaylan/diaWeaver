@@ -136,7 +136,7 @@ namespace OpenMS
       std::vector<SharedFragment> shared_fragments;      ///< Fragment bins shared by >=2 members within this group, sorted by flat_bin_idx
       std::vector<uint32_t>       unique_fragment_bins;  ///< Fragment bins present in this sub-group's union fingerprint but absent from every other sub-group produced by the same split. Empty when sub-clustering was not triggered.
       double                      mean_apex_rt{-1.0};    ///< Mean apex RT across all members (seconds)
-      double                      min_internal_jaccard{1.0}; ///< Minimum pairwise Jaccard similarity within this group (1.0 when sub-clustering was not triggered).
+      double                      min_internal_overlap{1.0}; ///< Minimum pairwise Overlap Coefficient (|A∩B|/min(|A|,|B|)) within this group (1.0 when sub-clustering was not triggered).
     };
 
     /**
@@ -373,7 +373,7 @@ namespace OpenMS
                                              double   im_tolerance            = 0.01,
                                              double   precursor_ppm_tolerance = 20.0,
                                              uint32_t isotope_error_tol       = 3,
-                                             double   min_jaccard_similarity  = 0.7) const;
+                                             double   min_overlap_similarity  = 0.7) const;
 
     /**
       @brief Returns the spectrum_ids stored in a given precursor (m/z bin, IM bin) cell.
@@ -511,23 +511,25 @@ namespace OpenMS
 
     /**
       @brief Split one FeatureGroup into sub-groups using complete-linkage
-             Jaccard re-clustering on apex fingerprints.
+             re-clustering on the Overlap Coefficient of apex fingerprints.
 
-      For each pair of members the Jaccard similarity is computed over their
-      sorted flat_bin_idx sets. Complete-linkage agglomerative clustering
-      merges the pair with the highest similarity; a merge is accepted only
-      when the similarity exceeds @p min_jaccard_similarity. For each resulting
-      sub-group the unique_fragment_bins (bins absent from every other
-      sub-group's union fingerprint) and min_internal_jaccard are populated.
-      Singleton sub-clusters are discarded. Returns an empty vector when all
-      members become singletons.
+      For each pair of members the Overlap Coefficient (|A∩B| / min(|A|,|B|))
+      is computed over their sorted flat_bin_idx sets. This metric is
+      insensitive to the size asymmetry that arises when one member's fingerprint
+      is inflated by being from the same LC-MS run as the query. Complete-linkage
+      agglomerative clustering merges the pair with the highest similarity; a
+      merge is accepted only when the similarity exceeds @p min_overlap_similarity.
+      For each resulting sub-group the unique_fragment_bins (bins absent from
+      every other sub-group's union fingerprint) and min_internal_overlap are
+      populated. Singleton sub-clusters are discarded. Returns an empty vector
+      when all members become singletons.
     */
-    static std::vector<FeatureGroup> splitByJaccard_(
+    static std::vector<FeatureGroup> splitByOverlap_(
       const FeatureGroup&                         group,
       const std::vector<ScoreTrace>&              traces,
       const std::vector<std::vector<uint32_t>>&   fingerprint_bins,
       const std::vector<int>&                     spec_to_trace_idx,
-      double                                       min_jaccard_similarity);
+      double                                       min_overlap_similarity);
 
     // --- DIA window bounds (stored in .dwaindex for self-describing files) ---
     double window_lower_mz_{-1.0};
