@@ -159,6 +159,18 @@ protected:
       false);
     setMinInt_("isotope_error_tol", 0);
 
+    registerDoubleOption_(
+      "min_jaccard_similarity",
+      "<fraction>",
+      0.7,
+      "Minimum Jaccard similarity (intersection / union of apex fragment bins) required "
+      "for two members to stay in the same sub-group during complete-linkage re-clustering. "
+      "Re-clustering is only triggered for groups that exceed the number of source files and "
+      "show heterogeneity in m/z, ion mobility, and RT simultaneously.",
+      false);
+    setMinFloat_("min_jaccard_similarity", 0.0);
+    setMaxFloat_("min_jaccard_similarity", 1.0);
+
     registerIntOption_(
       "min_matched_peaks",
       "<n>",
@@ -205,6 +217,7 @@ protected:
     const uint32_t   min_frags    = static_cast<uint32_t>(getIntOption_("min_fragment_overlap"));
     const uint32_t   iso_err_tol  = static_cast<uint32_t>(getIntOption_("isotope_error_tol"));
     const uint32_t   min_peaks    = static_cast<uint32_t>(getIntOption_("min_matched_peaks"));
+    const double     min_jaccard  = getDoubleOption_("min_jaccard_similarity");
 
 #ifdef _OPENMP
     omp_set_num_threads(getIntOption_("threads"));
@@ -248,7 +261,7 @@ protected:
       return CANNOT_WRITE_OUTPUT_FILE;
     }
 
-    tsv << "group_id\tn_members\tmean_apex_rt_s\tn_shared_frags"
+    tsv << "group_id\tn_members\tmean_apex_rt_s\tn_shared_frags\tn_unique_frags\tmin_internal_jaccard"
         << "\twindow_lower_mz\twindow_upper_mz\twindow_lower_im\twindow_upper_im"
         << "\tdecoy_window_lower_mz\tdecoy_window_upper_mz\tdecoy_window_lower_im\tdecoy_window_upper_im"
         << "\tspectrum_id\tsource_file\tnative_id"
@@ -492,7 +505,7 @@ protected:
         }
       }
 
-      const auto groups = aligner.groupFeatures(traces, rt_tol, min_frags, im_tol, prec_ppm, iso_err_tol);
+      const auto groups = aligner.groupFeatures(traces, rt_tol, min_frags, im_tol, prec_ppm, iso_err_tol, min_jaccard);
       OPENMS_LOG_INFO << "    Feature groups (>=2 members): " << groups.size() << std::endl;
 
       const DiaWeaver::DIAWindow* decoy_win =
@@ -608,6 +621,8 @@ private:
             << '\t' << group.spectrum_ids.size()
             << '\t' << group.mean_apex_rt
             << '\t' << group.shared_fragments.size()
+            << '\t' << group.unique_fragment_bins.size()
+            << '\t' << group.min_internal_jaccard
             << '\t' << window.lower_mz
             << '\t' << window.upper_mz
             << '\t' << win_lo_im

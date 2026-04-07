@@ -1488,12 +1488,217 @@ namespace OpenMS
   }
 
   std::vector<DiaWeaverAlign::FeatureGroup>
+  DiaWeaverAlign::splitByJaccard_(
+    const FeatureGroup&                         group,
+    const std::vector<ScoreTrace>&              traces,
+    const std::vector<std::vector<uint32_t>>&   fingerprint_bins,
+    const std::vector<int>&                     spec_to_trace_idx,
+    double                                       min_jaccard_similarity)
+  {
+    const int N = static_cast<int>(group.spectrum_ids.size());
+
+    // Map each group member to its index in the traces / fingerprint_bins arrays.
+    std::vector<int> ti(N);
+    for (int i = 0; i < N; ++i)
+      ti[i] = spec_to_trace_idx[group.spectrum_ids[i]];
+
+    // -----------------------------------------------------------------------
+    // Jaccard similarity: |A ∩ B| / |A ∪ B| via two-pointer on sorted vectors.
+    // |A ∪ B| = |A| + |B| - |A ∩ B|.
+    // -----------------------------------------------------------------------
+    auto compute_jaccard = [](const std::vector<uint32_t>& a,
+                               const std::vector<uint32_t>& b) -> float
+    {
+      uint32_t intersect = 0;
+      Size ia = 0, ib = 0;
+      while (ia < a.size() && ib < b.size())
+      {
+        if      (a[ia] < b[ib]) ++ia;
+        else if (b[ib] < a[ia]) ++ib;
+        else { ++intersect; ++ia; ++ib; }
+      }
+      const uint32_t uni = static_cast<uint32_t>(a.size() + b.size()) - intersect;
+      return (uni == 0) ? 0.0f : static_cast<float>(intersect) / static_cast<float>(uni);
+    };
+
+    // -----------------------------------------------------------------------
+    // Build flat N×N Jaccard similarity matrix (upper triangle mirrored).
+    // -----------------------------------------------------------------------
+    std::vector<float> sim(static_cast<Size>(N) * N, 0.0f);
+    for (int i = 0; i < N; ++i)
+      for (int j = i + 1; j < N; ++j)
+      {
+        const float jac = compute_jaccard(fingerprint_bins[ti[i]], fingerprint_bins[ti[j]]);
+        sim[i * N + j] = sim[j * N + i] = jac;
+      }
+
+    // -----------------------------------------------------------------------
+    // Complete-linkage agglomerative clustering.
+    //
+    // At each step the active cluster pair with the highest similarity is
+    // merged. The similarity between the merged cluster and any other cluster r
+    // is updated to min(sim(p,r), sim(q,r)) — the complete-linkage rule that
+    // prevents chaining: a member joins only if it is similar to every
+    // existing member of the cluster.
+    // Clustering stops when no remaining pair exceeds min_jaccard_similarity.
+    // -----------------------------------------------------------------------
+    std::vector<bool>             active(N, true);
+    std::vector<std::vector<int>> clust(N);
+    std::vector<float>            clust_min_jac(N, 1.0f); // smallest merge Jaccard per cluster
+
+    for (int i = 0; i < N; ++i) clust[i] = {i};
+    int n_active = N;
+
+    while (n_active > 1)
+    {
+      float best = -1.0f; int bp = -1, bq = -1;
+      for (int p = 0; p < N; ++p)
+      {
+        if (!active[p]) continue;
+        for (int q = p + 1; q < N; ++q)
+        {
+          if (!active[q]) continue;
+          if (sim[p * N + q] > best) { best = sim[p * N + q]; bp = p; bq = q; }
+        }
+      }
+      if (best < static_cast<float>(min_jaccard_similarity)) break;
+
+      // Record the minimum Jaccard merge that has formed this cluster.
+      clust_min_jac[bp] = std::min({clust_min_jac[bp], clust_min_jac[bq], best});
+
+      // Absorb bq's members into bp.
+      for (int m : clust[bq]) clust[bp].push_back(m);
+
+      // Complete-linkage similarity update: new sim = min of the two old sims.
+      for (int r = 0; r < N; ++r)
+      {
+        if (!active[r] || r == bp || r == bq) continue;
+        const float ns = std::min(sim[bp * N + r], sim[bq * N + r]);
+        sim[bp * N + r] = sim[r * N + bp] = ns;
+      }
+
+      active[bq] = false;
+      --n_active;
+    }
+
+    // -----------------------------------------------------------------------
+    // Collect active clusters with ≥2 members and build their union
+    // fingerprints (sorted, deduplicated OR of all member fingerprint_bins).
+    // -----------------------------------------------------------------------
+    struct Sub_
+    {
+      std::vector<int>      local_idx;  // positions in group.spectrum_ids
+      std::vector<uint32_t> union_bins; // sorted, deduplicated union fingerprint
+      float                 min_jac{1.0f};
+    };
+
+    std::vector<Sub_> subs;
+    for (int c = 0; c < N; ++c)
+    {
+      if (!active[c] || clust[c].size() < 2) continue;
+      Sub_ s;
+      s.local_idx = clust[c];
+      s.min_jac   = clust_min_jac[c];
+
+      for (int li : s.local_idx)
+      {
+        const auto& bins = fingerprint_bins[ti[li]];
+        std::vector<uint32_t> merged;
+        merged.reserve(s.union_bins.size() + bins.size());
+        std::merge(s.union_bins.begin(), s.union_bins.end(),
+                   bins.begin(), bins.end(), std::back_inserter(merged));
+        merged.erase(std::unique(merged.begin(), merged.end()), merged.end());
+        s.union_bins = std::move(merged);
+      }
+      subs.push_back(std::move(s));
+    }
+
+    if (subs.empty()) return {};
+
+    // -----------------------------------------------------------------------
+    // Compute unique_fragment_bins for each sub-cluster:
+    // bins present in this sub's union fingerprint that are absent from every
+    // other sub's union fingerprint.
+    // -----------------------------------------------------------------------
+    const Size K = subs.size();
+    std::vector<std::vector<uint32_t>> unique_bins(K);
+
+    for (Size s = 0; s < K; ++s)
+    {
+      // Build the union of all other subs' fingerprints.
+      std::vector<uint32_t> others;
+      for (Size t = 0; t < K; ++t)
+      {
+        if (t == s) continue;
+        std::vector<uint32_t> tmp;
+        tmp.reserve(others.size() + subs[t].union_bins.size());
+        std::merge(others.begin(), others.end(),
+                   subs[t].union_bins.begin(), subs[t].union_bins.end(),
+                   std::back_inserter(tmp));
+        tmp.erase(std::unique(tmp.begin(), tmp.end()), tmp.end());
+        others = std::move(tmp);
+      }
+      std::set_difference(subs[s].union_bins.begin(), subs[s].union_bins.end(),
+                          others.begin(), others.end(),
+                          std::back_inserter(unique_bins[s]));
+    }
+
+    // -----------------------------------------------------------------------
+    // Assemble one FeatureGroup per sub-cluster.
+    // shared_fragments = fragment bins seen in >=2 members within the sub-group.
+    // -----------------------------------------------------------------------
+    std::vector<FeatureGroup> result;
+    result.reserve(K);
+
+    for (Size s = 0; s < K; ++s)
+    {
+      const Sub_& sub = subs[s];
+      FeatureGroup fg;
+      fg.spectrum_ids.reserve(sub.local_idx.size());
+      fg.min_internal_jaccard = static_cast<double>(sub.min_jac);
+      fg.unique_fragment_bins = std::move(unique_bins[s]);
+
+      double rt_sum = 0.0;
+      std::unordered_map<uint32_t, std::pair<uint32_t, float>> frag_acc;
+
+      for (int li : sub.local_idx)
+      {
+        const uint32_t sid = group.spectrum_ids[li];
+        fg.spectrum_ids.push_back(sid);
+        rt_sum += traces[ti[li]].apex_rt;
+
+        for (const ApexFragment& af : traces[ti[li]].apex_fingerprint)
+        {
+          auto& acc = frag_acc[af.flat_bin_idx];
+          ++acc.first;
+          if (af.experimental_intensity > acc.second) acc.second = af.experimental_intensity;
+        }
+      }
+
+      fg.mean_apex_rt = rt_sum / static_cast<double>(sub.local_idx.size());
+
+      for (const auto& [flat_idx, acc] : frag_acc)
+        if (acc.first >= 2)
+          fg.shared_fragments.push_back({flat_idx, acc.second});
+
+      std::sort(fg.shared_fragments.begin(), fg.shared_fragments.end(),
+        [](const SharedFragment& a, const SharedFragment& b)
+        { return a.flat_bin_idx < b.flat_bin_idx; });
+
+      result.push_back(std::move(fg));
+    }
+
+    return result;
+  }
+
+  std::vector<DiaWeaverAlign::FeatureGroup>
   DiaWeaverAlign::groupFeatures(const std::vector<ScoreTrace>& traces,
                                  double   rt_tolerance,
                                  uint32_t min_fragment_overlap,
                                  double   im_tolerance,
                                  double   precursor_ppm_tolerance,
-                                 uint32_t isotope_error_tol) const
+                                 uint32_t isotope_error_tol,
+                                 double   min_jaccard_similarity) const
   {
     if (traces.empty() || precursor_offsets_.empty()) return {};
 
@@ -1675,6 +1880,10 @@ namespace OpenMS
     // Singletons (no valid pair was found) are discarded.
     // For each group, accumulate per-fragment (count, max_intensity) to
     // identify shared fragments (count >= 2) and their best intensity.
+    //
+    // After assembly, groups that are oversized and show heterogeneity across
+    // m/z, IM, and RT are passed through Jaccard-based complete-linkage
+    // re-clustering (splitByJaccard_) to break transitivity chains.
     // -----------------------------------------------------------------------
 
     std::unordered_map<int, std::vector<int>> components;
@@ -1683,6 +1892,43 @@ namespace OpenMS
 
     std::vector<FeatureGroup> result;
     result.reserve(components.size());
+
+    // Trigger predicate: returns true when a group is large enough and shows
+    // spread in all three observables that indicates transitivity chaining.
+    // Uses the worst-case (min/max) pair in each dimension — O(N) scan.
+    auto should_sub_cluster = [&](const FeatureGroup& fg) -> bool
+    {
+      if (fg.spectrum_ids.size() <= source_files_.size()) return false;
+
+      const uint32_t sid0 = fg.spectrum_ids[0];
+      const SpectrumEntry& se0 = getSpectrumEntry(sid0);
+      double min_rt = traces[spec_to_trace_idx[sid0]].apex_rt, max_rt = min_rt;
+      double min_mz = se0.precursor_mz, max_mz = min_mz, sum_mz = min_mz;
+      double min_im = se0.drift_time,   max_im = min_im;
+
+      for (Size k = 1; k < fg.spectrum_ids.size(); ++k)
+      {
+        const uint32_t sid = fg.spectrum_ids[k];
+        const SpectrumEntry& se = getSpectrumEntry(sid);
+        const double rt = traces[spec_to_trace_idx[sid]].apex_rt;
+
+        if (rt < min_rt) min_rt = rt; else if (rt > max_rt) max_rt = rt;
+        if (se.precursor_mz < min_mz) min_mz = se.precursor_mz;
+        else if (se.precursor_mz > max_mz) max_mz = se.precursor_mz;
+        sum_mz += se.precursor_mz;
+        if (use_im)
+        {
+          if (se.drift_time < min_im) min_im = se.drift_time;
+          else if (se.drift_time > max_im) max_im = se.drift_time;
+        }
+      }
+
+      const double mean_mz  = sum_mz / static_cast<double>(fg.spectrum_ids.size());
+      const bool   mz_het   = (max_mz - min_mz) / mean_mz * 1e6 > precursor_ppm_tolerance;
+      const bool   rt_het   = (max_rt - min_rt) > rt_tolerance;
+      const bool   im_het   = !use_im || (max_im - min_im) > im_tolerance;
+      return mz_het && rt_het && im_het;
+    };
 
     for (auto& [root, members] : components)
     {
@@ -1731,6 +1977,23 @@ namespace OpenMS
         if (m + 1 < group.spectrum_ids.size()) OPENMS_LOG_DEBUG << ",";
       }
       OPENMS_LOG_DEBUG << "]" << std::endl;
+
+      // -----------------------------------------------------------------------
+      // Sub-clustering: if the group is oversized and heterogeneous, run
+      // complete-linkage Jaccard re-clustering to break transitivity chains.
+      // If all members become singletons the group is discarded.
+      // -----------------------------------------------------------------------
+      if (should_sub_cluster(group))
+      {
+        auto subs = splitByJaccard_(group, traces, fingerprint_bins,
+                                    spec_to_trace_idx, min_jaccard_similarity);
+        OPENMS_LOG_DEBUG << "[DiaWeaverAlign::groupFeatures] sub-clustered group of "
+                         << group.spectrum_ids.size() << " → " << subs.size()
+                         << " sub-group(s)" << std::endl;
+        for (auto& sg : subs)
+          result.push_back(std::move(sg));
+        continue;
+      }
 
       result.push_back(std::move(group));
     }
