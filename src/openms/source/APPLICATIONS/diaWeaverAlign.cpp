@@ -1493,7 +1493,13 @@ namespace OpenMS
     const std::vector<ScoreTrace>&              traces,
     const std::vector<std::vector<uint32_t>>&   fingerprint_bins,
     const std::vector<int>&                     spec_to_trace_idx,
-    double                                       min_overlap_similarity)
+    const std::vector<SpectrumEntry>&            spectrum_entries,
+    double                                       min_overlap_similarity,
+    double                                       rt_tolerance,
+    double                                       im_tolerance,
+    double                                       precursor_ppm_tolerance,
+    uint32_t                                     isotope_error_tol,
+    bool                                         use_im)
   {
     const int N = static_cast<int>(group.spectrum_ids.size());
 
@@ -1524,15 +1530,54 @@ namespace OpenMS
     };
 
     // -----------------------------------------------------------------------
-    // Build flat N×N Overlap Coefficient matrix (upper triangle mirrored).
+    // Build flat N×N similarity matrix (upper triangle mirrored).
+    //
+    // Each pair is first validated against the positional tolerances (same
+    // checks as Union-Find): apex RT, ion mobility, and isotope-corrected
+    // precursor m/z.  Pairs that fail any tolerance are left at 0 and can
+    // never be merged by the complete-linkage step.  Pairs that pass are
+    // assigned their Overlap Coefficient.
     // -----------------------------------------------------------------------
-    std::vector<float> sim(static_cast<Size>(N) * N, 0.0f);
+    static constexpr double NEUTRON_MASS_SUB = 1.003355;
+
+    // -1.0f = positionally ineligible (never merged); 0.0f = eligible but no
+    // shared bins; (0,1] = eligible with Overlap Coefficient.
+    std::vector<float> sim(static_cast<Size>(N) * N, -1.0f);
+    for (int i = 0; i < N; ++i) sim[i * N + i] = 0.0f; // diagonal: self-similarity irrelevant
+
     for (int i = 0; i < N; ++i)
+    {
+      const SpectrumEntry& se_i = spectrum_entries[group.spectrum_ids[i]];
+      const double         rt_i = traces[ti[i]].apex_rt;
+
       for (int j = i + 1; j < N; ++j)
       {
+        const SpectrumEntry& se_j = spectrum_entries[group.spectrum_ids[j]];
+        const double         rt_j = traces[ti[j]].apex_rt;
+
+        // RT check
+        if (std::abs(rt_i - rt_j) > rt_tolerance) continue;
+
+        // IM check
+        if (use_im && std::abs(se_i.drift_time - se_j.drift_time) > im_tolerance) continue;
+
+        // Isotope-corrected precursor m/z check (mirrors Union-Find logic).
+        const double mz_diff = se_i.precursor_mz - se_j.precursor_mz;
+        const double mean_mz = (se_i.precursor_mz + se_j.precursor_mz) * 0.5;
+        const double ppm_thr = precursor_ppm_tolerance * mean_mz / 1e6;
+        bool mz_ok = false;
+        for (int k = -static_cast<int>(isotope_error_tol);
+             k <= static_cast<int>(isotope_error_tol) && !mz_ok; ++k)
+        {
+          if (std::abs(mz_diff - k * NEUTRON_MASS_SUB / se_i.precursor_charge) <= ppm_thr)
+            mz_ok = true;
+        }
+        if (!mz_ok) continue;
+
         const float ov = compute_overlap(fingerprint_bins[ti[i]], fingerprint_bins[ti[j]]);
         sim[i * N + j] = sim[j * N + i] = ov;
       }
+    }
 
     // -----------------------------------------------------------------------
     // Complete-linkage agglomerative clustering.
@@ -1928,8 +1973,8 @@ namespace OpenMS
       const double mean_mz  = sum_mz / static_cast<double>(fg.spectrum_ids.size());
       const bool   mz_het   = (max_mz - min_mz) / mean_mz * 1e6 > precursor_ppm_tolerance;
       const bool   rt_het   = (max_rt - min_rt) > rt_tolerance;
-      const bool   im_het   = !use_im || (max_im - min_im) > im_tolerance;
-      return mz_het && rt_het && im_het;
+      const bool   im_het   = use_im && (max_im - min_im) > im_tolerance;
+      return mz_het || rt_het || im_het;
     };
 
     for (auto& [root, members] : components)
@@ -1988,7 +2033,11 @@ namespace OpenMS
       if (should_sub_cluster(group))
       {
         auto subs = splitByOverlap_(group, traces, fingerprint_bins,
-                                    spec_to_trace_idx, min_overlap_similarity);
+                                    spec_to_trace_idx, spectrum_entries_,
+                                    min_overlap_similarity,
+                                    rt_tolerance, im_tolerance,
+                                    precursor_ppm_tolerance, isotope_error_tol,
+                                    use_im);
         OPENMS_LOG_DEBUG << "[DiaWeaverAlign::groupFeatures] sub-clustered group of "
                          << group.spectrum_ids.size() << " → " << subs.size()
                          << " sub-group(s)" << std::endl;

@@ -513,10 +513,15 @@ namespace OpenMS
       @brief Split one FeatureGroup into sub-groups using complete-linkage
              re-clustering on the Overlap Coefficient of apex fingerprints.
 
-      For each pair of members the Overlap Coefficient (|A∩B| / min(|A|,|B|))
-      is computed over their sorted flat_bin_idx sets. This metric is
-      insensitive to the size asymmetry that arises when one member's fingerprint
-      is inflated by being from the same LC-MS run as the query. Complete-linkage
+      For each pair of members the pairwise positional tolerances are checked
+      first (apex RT within @p rt_tolerance, drift time within @p im_tolerance
+      when IM data is present, isotope-corrected precursor m/z within
+      @p precursor_ppm_tolerance). Pairs that violate any tolerance are
+      assigned a similarity of 0 and can never be merged. For pairs that pass
+      the positional checks the Overlap Coefficient (|A∩B| / min(|A|,|B|)) is
+      computed over their sorted flat_bin_idx sets; this metric is insensitive
+      to the size asymmetry that arises when one member's fingerprint is
+      inflated by being from the same LC-MS run as the query. Complete-linkage
       agglomerative clustering merges the pair with the highest similarity; a
       merge is accepted only when the similarity exceeds @p min_overlap_similarity.
       For each resulting sub-group the unique_fragment_bins (bins absent from
@@ -529,7 +534,13 @@ namespace OpenMS
       const std::vector<ScoreTrace>&              traces,
       const std::vector<std::vector<uint32_t>>&   fingerprint_bins,
       const std::vector<int>&                     spec_to_trace_idx,
-      double                                       min_overlap_similarity);
+      const std::vector<SpectrumEntry>&            spectrum_entries,
+      double                                       min_overlap_similarity,
+      double                                       rt_tolerance,
+      double                                       im_tolerance,
+      double                                       precursor_ppm_tolerance,
+      uint32_t                                     isotope_error_tol,
+      bool                                         use_im);
 
     // --- DIA window bounds (stored in .dwaindex for self-describing files) ---
     double window_lower_mz_{-1.0};
