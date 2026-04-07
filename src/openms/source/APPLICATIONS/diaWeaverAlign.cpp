@@ -1605,7 +1605,7 @@ namespace OpenMS
 
       add_mz_range(se_i.precursor_mz);  // k = 0
 
-      if (isotope_error_tol > 0 && se_i.precursor_charge > 0)
+      if (isotope_error_tol > 0)
       {
         for (uint32_t k = 1; k <= isotope_error_tol; ++k)
         {
@@ -1633,6 +1633,8 @@ namespace OpenMS
 
               if (se_i.source_file_idx == se_j.source_file_idx) continue;
 
+              if (se_i.precursor_charge != se_j.precursor_charge) continue;
+
               const double rt_diff = std::abs(traces[ti].apex_rt - traces[tj].apex_rt);
               if (rt_diff > rt_tolerance) continue;
 
@@ -1642,10 +1644,8 @@ namespace OpenMS
                 if (im_diff > im_tolerance) continue;
               }
 
-              // Precursor check: accept if the m/z difference is within ppm
-              // tolerance after correcting for any isotope offset
-              // k ∈ {0, ±1, …, ±isotope_error_tol}.
-              const int    charge  = se_i.precursor_charge;
+              // Precursor m/z check: the difference must match a k-isotope offset
+              // (k ∈ {0, ±1, …, ±isotope_error_tol}) within ppm tolerance.
               const double mz_diff = se_i.precursor_mz - se_j.precursor_mz;
               const double mean_mz = (se_i.precursor_mz + se_j.precursor_mz) * 0.5;
               const double ppm_thr = precursor_ppm_tolerance * mean_mz / 1e6;
@@ -1654,7 +1654,7 @@ namespace OpenMS
               for (int k = -static_cast<int>(isotope_error_tol);
                    k <= static_cast<int>(isotope_error_tol) && !prec_ok; ++k)
               {
-                if (std::abs(mz_diff - k * NEUTRON_MASS / charge) <= ppm_thr)
+                if (std::abs(mz_diff - k * NEUTRON_MASS / se_i.precursor_charge) <= ppm_thr)
                   prec_ok = true;
               }
               if (!prec_ok) continue;
