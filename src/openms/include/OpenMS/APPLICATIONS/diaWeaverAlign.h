@@ -53,22 +53,26 @@ namespace OpenMS
   public:
 
     /**
-      @brief One entry in the fragment index (exactly 8 bytes).
+      @brief One entry in the fragment index (exactly 9 bytes).
 
       Each indexed peak produces one FragmentEntry stored in the bin that
       contains its m/z.
+
+      log2_intensity encodes log2(peak_intensity) as a fixed-point uint16_t
+      scaled by 2048.  Decodes as: log2_val = log2_intensity / 2048.0f.
+      Covers intensities up to 2^32 (≈ 4e9) with ~0.0005 log2 resolution.
     */
 #pragma pack(push, 1)
     struct FragmentEntry
     {
-      uint32_t spectrum_id; ///< RT-ordered index of the parent spectrum
-      uint16_t mass_offset; ///< Fractional offset within the bin, scaled to [0, 65535]:
-                            ///  frac = mass_offset / 65535.0  (0 = bin start, 1 = bin end)
-      uint8_t  charge;      ///< Precursor charge (0 = unknown)
-      uint8_t  reserved{0}; ///< Reserved for future use
+      uint32_t spectrum_id;       ///< RT-ordered index of the parent spectrum
+      uint16_t mass_offset;       ///< Fractional offset within the bin, scaled to [0, 65535]:
+                                  ///  frac = mass_offset / 65535.0  (0 = bin start, 1 = bin end)
+      uint8_t  charge;            ///< Precursor charge (0 = unknown)
+      uint16_t log2_intensity{0}; ///< log2(peak intensity) * 2048, clamped to [0, 65535]
     };
 #pragma pack(pop)
-    static_assert(sizeof(FragmentEntry) == 8, "FragmentEntry must be exactly 8 bytes");
+    static_assert(sizeof(FragmentEntry) == 9, "FragmentEntry must be exactly 9 bytes");
 
     /**
       @brief Metadata for one indexed pseudo MS2 spectrum.
@@ -107,8 +111,9 @@ namespace OpenMS
     */
     struct ApexFragment
     {
-      uint32_t flat_bin_idx{0};          ///< Flat 2D fragment bin (mz_bin * n_im_bins + im_bin)
-      float    experimental_intensity{0}; ///< Intensity of the query peak that produced this hit
+      uint32_t flat_bin_idx{0};            ///< Flat 2D fragment bin (mz_bin * n_im_bins + im_bin)
+      float    experimental_intensity{0};  ///< Intensity of the query peak that produced this hit
+      float    index_log2_intensity{0.0f}; ///< log2(index peak intensity) decoded from FragmentEntry::log2_intensity
     };
 
     /**

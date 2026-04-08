@@ -13,10 +13,12 @@
 #include <OpenMS/IONMOBILITY/IMTypes.h>
 #include <OpenMS/KERNEL/MSExperiment.h>
 
+#include <cmath>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 
@@ -267,7 +269,7 @@ protected:
         << "\tdecoy_window_lower_mz\tdecoy_window_upper_mz\tdecoy_window_lower_im\tdecoy_window_upper_im"
         << "\tspectrum_id\tsource_file\tnative_id"
         << "\tprecursor_mz\tprecursor_charge\tprecursor_drift_time"
-        << "\tpseudo_rt_s\tquery_apex_rt_s\tinput_fragments\tapex_matched_peaks\tbest_decoy\n";
+        << "\tpseudo_rt_s\tquery_apex_rt_s\tinput_fragments\tapex_matched_peaks\tbest_decoy\tfold_changes\n";
 
     uint32_t global_group_id = 0;
 
@@ -618,6 +620,26 @@ private:
 
         const bool has_im = (se.drift_time >= 0.0);
 
+        // Build comma-separated list of per-fragment log2 fold changes
+        // (log2 experimental intensity − log2 index intensity) at the apex.
+        std::string fold_changes;
+        if (it != trace_map.end() && !it->second->apex_fingerprint.empty())
+        {
+          std::ostringstream oss;
+          bool first = true;
+          for (const DiaWeaverAlign::ApexFragment& af : it->second->apex_fingerprint)
+          {
+            if (!first) oss << ',';
+            oss << (std::log2f(std::max(1.0f, af.experimental_intensity)) - af.index_log2_intensity);
+            first = false;
+          }
+          fold_changes = oss.str();
+        }
+        else
+        {
+          fold_changes = "NA";
+        }
+
         tsv << global_group_id
             << '\t' << group.spectrum_ids.size()
             << '\t' << group.mean_apex_rt
@@ -643,6 +665,7 @@ private:
             << '\t' << se.n_indexed_fragments
             << '\t' << apex_matched_peaks
             << '\t' << best_decoy
+            << '\t' << fold_changes
             << '\n';
       }
       ++global_group_id;

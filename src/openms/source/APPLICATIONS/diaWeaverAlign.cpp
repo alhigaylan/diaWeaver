@@ -24,6 +24,17 @@
 namespace OpenMS
 {
 
+  namespace
+  {
+    // Encode log2(intensity) as a uint16_t scaled by 2048.
+    // Covers intensities up to 2^32 ≈ 4e9 with ~0.0005 log2 resolution.
+    inline uint16_t encodeLog2Intensity_(float intensity) noexcept
+    {
+      const float v = std::log2f(std::max(1.0f, intensity));
+      return static_cast<uint16_t>(std::min(65535.0f, v * 2048.0f));
+    }
+  }
+
   DiaWeaverAlign::DiaWeaverAlign() :
     DefaultParamHandler("DiaWeaverAlign")
   {
@@ -367,12 +378,14 @@ namespace OpenMS
         {
           occupied_im_bins.push_back(im_bin);
           im_best_intensity[im_bin] = intensity;
-          im_best_fe[im_bin] = {spec_id, toMassOffset_(mz, mz_bin), charge_byte, 0};
+          im_best_fe[im_bin] = {spec_id, toMassOffset_(mz, mz_bin), charge_byte,
+                                encodeLog2Intensity_(intensity)};
         }
         else if (intensity > im_best_intensity[im_bin])
         {
-          im_best_intensity[im_bin]     = intensity;
-          im_best_fe[im_bin].mass_offset = toMassOffset_(mz, mz_bin);
+          im_best_intensity[im_bin]         = intensity;
+          im_best_fe[im_bin].mass_offset    = toMassOffset_(mz, mz_bin);
+          im_best_fe[im_bin].log2_intensity = encodeLog2Intensity_(intensity);
         }
       }
 
@@ -402,17 +415,18 @@ namespace OpenMS
         if (bin_idx != current_bin)
         {
           emit();
-          current_bin         = bin_idx;
-          best_intensity      = intensity;
-          best_fe.spectrum_id = spec_id;
-          best_fe.mass_offset = toMassOffset_(mz, bin_idx);
-          best_fe.charge      = charge_byte;
-          best_fe.reserved    = 0;
+          current_bin               = bin_idx;
+          best_intensity            = intensity;
+          best_fe.spectrum_id       = spec_id;
+          best_fe.mass_offset       = toMassOffset_(mz, bin_idx);
+          best_fe.charge            = charge_byte;
+          best_fe.log2_intensity    = encodeLog2Intensity_(intensity);
         }
         else if (intensity > best_intensity)
         {
-          best_intensity      = intensity;
-          best_fe.mass_offset = toMassOffset_(mz, bin_idx);
+          best_intensity            = intensity;
+          best_fe.mass_offset       = toMassOffset_(mz, bin_idx);
+          best_fe.log2_intensity    = encodeLog2Intensity_(intensity);
         }
       }
 
@@ -568,12 +582,14 @@ namespace OpenMS
           {
             occupied_im_bins.push_back(im_bin);
             im_best_intensity[im_bin] = intensity;
-            im_best_fe[im_bin] = {spec_id, toMassOffset_(mz, mz_bin), charge_byte, 0};
+            im_best_fe[im_bin] = {spec_id, toMassOffset_(mz, mz_bin), charge_byte,
+                                  encodeLog2Intensity_(intensity)};
           }
           else if (intensity > im_best_intensity[im_bin])
           {
-            im_best_intensity[im_bin]              = intensity;
-            im_best_fe[im_bin].mass_offset = toMassOffset_(mz, mz_bin);
+            im_best_intensity[im_bin]         = intensity;
+            im_best_fe[im_bin].mass_offset    = toMassOffset_(mz, mz_bin);
+            im_best_fe[im_bin].log2_intensity = encodeLog2Intensity_(intensity);
           }
         }
 
@@ -612,17 +628,18 @@ namespace OpenMS
           if (bin_idx != current_bin)
           {
             emit();
-            current_bin         = bin_idx;
-            best_intensity      = intensity;
-            best_fe.spectrum_id = spec_id;
-            best_fe.mass_offset = toMassOffset_(mz, bin_idx);
-            best_fe.charge      = charge_byte;
-            best_fe.reserved    = 0;
+            current_bin               = bin_idx;
+            best_intensity            = intensity;
+            best_fe.spectrum_id       = spec_id;
+            best_fe.mass_offset       = toMassOffset_(mz, bin_idx);
+            best_fe.charge            = charge_byte;
+            best_fe.log2_intensity    = encodeLog2Intensity_(intensity);
           }
           else if (intensity > best_intensity)
           {
-            best_intensity      = intensity;
-            best_fe.mass_offset = toMassOffset_(mz, bin_idx);
+            best_intensity            = intensity;
+            best_fe.mass_offset       = toMassOffset_(mz, bin_idx);
+            best_fe.log2_intensity    = encodeLog2Intensity_(intensity);
           }
         }
 
@@ -1480,7 +1497,8 @@ namespace OpenMS
         for (const FragmentEntry* fe = begin; fe != end; ++fe)
         {
           if (is_target[fe->spectrum_id])
-            result[spec_to_result_idx[fe->spectrum_id]].apex_fingerprint.push_back({flat_idx, intensity});
+            result[spec_to_result_idx[fe->spectrum_id]].apex_fingerprint.push_back(
+              {flat_idx, intensity, fe->log2_intensity / 2048.0f});
         }
       }
 
