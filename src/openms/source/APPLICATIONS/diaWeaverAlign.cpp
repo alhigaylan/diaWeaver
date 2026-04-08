@@ -1517,6 +1517,7 @@ namespace OpenMS
     const std::vector<int>&                     spec_to_trace_idx,
     const std::vector<SpectrumEntry>&            spectrum_entries,
     double                                       min_overlap_similarity,
+    double                                       min_within_file_jaccard,
     double                                       rt_tolerance,
     double                                       im_tolerance,
     double                                       precursor_ppm_tolerance,
@@ -1525,157 +1526,243 @@ namespace OpenMS
   {
     const int N = static_cast<int>(group.spectrum_ids.size());
 
-    // Map each group member to its index in the traces / fingerprint_bins arrays.
+    // Map each group member to its trace index.
     std::vector<int> ti(N);
     for (int i = 0; i < N; ++i)
       ti[i] = spec_to_trace_idx[group.spectrum_ids[i]];
 
-    // -----------------------------------------------------------------------
-    // Overlap Coefficient: |A ∩ B| / min(|A|, |B|) via two-pointer on sorted
-    // vectors.  Normalising by the smaller set removes the bias that arises
-    // when one member's fingerprint is inflated by being from the same LC-MS
-    // run as the query file.
-    // -----------------------------------------------------------------------
-    auto compute_overlap = [](const std::vector<uint32_t>& a,
+    // =========================================================================
+    // Phase 1: Within-file Jaccard clustering.
+    //
+    // Group spectrum_ids by source file. For files with multiple spectrum_ids,
+    // compute pairwise Jaccard on their fingerprint_bins. Spectrum_ids whose
+    // Jaccard meets min_within_file_jaccard represent the same compound in
+    // different MS2 scans and are merged into one file-cluster whose union
+    // fingerprint carries the combined fragment evidence. Dissimilar same-file
+    // spectrum_ids (likely different co-eluting compounds) form separate
+    // file-clusters and will be separated by the cross-file step.
+    // =========================================================================
+
+    auto compute_jaccard = [](const std::vector<uint32_t>& a,
                                const std::vector<uint32_t>& b) -> float
     {
-      uint32_t intersect = 0;
+      uint32_t isect = 0;
       Size ia = 0, ib = 0;
       while (ia < a.size() && ib < b.size())
       {
         if      (a[ia] < b[ib]) ++ia;
         else if (b[ib] < a[ia]) ++ib;
-        else { ++intersect; ++ia; ++ib; }
+        else { ++isect; ++ia; ++ib; }
       }
-      const uint32_t smaller = static_cast<uint32_t>(std::min(a.size(), b.size()));
-      return (smaller == 0) ? 0.0f : static_cast<float>(intersect) / static_cast<float>(smaller);
+      const uint32_t union_sz =
+        static_cast<uint32_t>(a.size() + b.size()) - isect;
+      return (union_sz == 0) ? 1.0f
+                             : static_cast<float>(isect) / static_cast<float>(union_sz);
     };
 
-    // -----------------------------------------------------------------------
-    // Build flat N×N similarity matrix (upper triangle mirrored).
+    struct FileCluster_
+    {
+      std::vector<int>      local_idxs; ///< Local indices into group.spectrum_ids
+      std::vector<uint32_t> union_fp;   ///< Sorted, deduplicated union fingerprint
+    };
+
+    // Group local indices by source file.
+    std::unordered_map<Size, std::vector<int>> by_file;
+    for (int i = 0; i < N; ++i)
+      by_file[spectrum_entries[group.spectrum_ids[i]].source_file_idx].push_back(i);
+
+    std::vector<FileCluster_> file_clusters;
+    file_clusters.reserve(static_cast<Size>(N));
+
+    for (auto& [fid, locals] : by_file)
+    {
+      const int nf = static_cast<int>(locals.size());
+
+      if (nf == 1)
+      {
+        // Single spectrum from this file — trivial file-cluster.
+        file_clusters.push_back({locals, fingerprint_bins[ti[locals[0]]]});
+        continue;
+      }
+
+      // Within-file Union-Find keyed on positions in `locals`.
+      std::vector<int> uf_par(nf); std::iota(uf_par.begin(), uf_par.end(), 0);
+      std::vector<int> uf_rnk(nf, 0);
+
+      auto uf_find = [&uf_par](int x) {
+        while (uf_par[x] != x) { uf_par[x] = uf_par[uf_par[x]]; x = uf_par[x]; }
+        return x;
+      };
+      auto uf_unite = [&uf_par, &uf_rnk, &uf_find](int x, int y) {
+        x = uf_find(x); y = uf_find(y);
+        if (x == y) return;
+        if (uf_rnk[x] < uf_rnk[y]) std::swap(x, y);
+        uf_par[y] = x;
+        if (uf_rnk[x] == uf_rnk[y]) ++uf_rnk[x];
+      };
+
+      for (int a = 0; a < nf; ++a)
+        for (int b = a + 1; b < nf; ++b)
+        {
+          const float jac = compute_jaccard(fingerprint_bins[ti[locals[a]]],
+                                             fingerprint_bins[ti[locals[b]]]);
+          if (jac >= static_cast<float>(min_within_file_jaccard))
+            uf_unite(a, b);
+        }
+
+      // Collect components and build their union fingerprints.
+      std::unordered_map<int, FileCluster_> comps;
+      for (int a = 0; a < nf; ++a)
+        comps[uf_find(a)].local_idxs.push_back(locals[a]);
+
+      for (auto& [root, fc] : comps)
+      {
+        for (int li : fc.local_idxs)
+        {
+          const auto& fp_li = fingerprint_bins[ti[li]];
+          std::vector<uint32_t> merged;
+          merged.reserve(fc.union_fp.size() + fp_li.size());
+          std::merge(fc.union_fp.begin(), fc.union_fp.end(),
+                     fp_li.begin(), fp_li.end(), std::back_inserter(merged));
+          merged.erase(std::unique(merged.begin(), merged.end()), merged.end());
+          fc.union_fp = std::move(merged);
+        }
+        file_clusters.push_back(std::move(fc));
+      }
+    }
+
+    const int M = static_cast<int>(file_clusters.size());
+    if (M < 2) return {}; // nothing to cross-cluster
+
+    // =========================================================================
+    // Phase 2: Cross-file complete-linkage on file-cluster representatives.
     //
-    // Each pair is first validated against the positional tolerances (same
-    // checks as Union-Find): apex RT, ion mobility, and isotope-corrected
-    // precursor m/z.  Pairs that fail any tolerance are left at 0 and can
-    // never be merged by the complete-linkage step.  Pairs that pass are
-    // assigned their Overlap Coefficient.
-    // -----------------------------------------------------------------------
+    // The M×M similarity matrix uses Overlap Coefficient on union fingerprints.
+    // Same-file file-cluster pairs are left at -1.0 (ineligible): they failed
+    // within-file Jaccard and so represent different compounds that must not
+    // merge here. Cross-file pairs undergo positional checks followed by
+    // Overlap Coefficient on their union fingerprints. The first local_idx of
+    // each file-cluster serves as the positional representative.
+    // =========================================================================
+    auto compute_overlap = [](const std::vector<uint32_t>& a,
+                               const std::vector<uint32_t>& b) -> float
+    {
+      uint32_t isect = 0;
+      Size ia = 0, ib = 0;
+      while (ia < a.size() && ib < b.size())
+      {
+        if      (a[ia] < b[ib]) ++ia;
+        else if (b[ib] < a[ia]) ++ib;
+        else { ++isect; ++ia; ++ib; }
+      }
+      const uint32_t smaller = static_cast<uint32_t>(std::min(a.size(), b.size()));
+      return (smaller == 0) ? 0.0f
+                            : static_cast<float>(isect) / static_cast<float>(smaller);
+    };
+
     static constexpr double NEUTRON_MASS_SUB = 1.003355;
 
-    // -1.0f = positionally ineligible (never merged); 0.0f = eligible but no
-    // shared bins; (0,1] = eligible with Overlap Coefficient.
-    std::vector<float> sim(static_cast<Size>(N) * N, -1.0f);
-    for (int i = 0; i < N; ++i) sim[i * N + i] = 0.0f; // diagonal: self-similarity irrelevant
+    std::vector<float> sim(static_cast<Size>(M) * M, -1.0f);
+    for (int i = 0; i < M; ++i) sim[i * M + i] = 0.0f;
 
-    for (int i = 0; i < N; ++i)
+    for (int i = 0; i < M; ++i)
     {
-      const SpectrumEntry& se_i = spectrum_entries[group.spectrum_ids[i]];
-      const double         rt_i = traces[ti[i]].apex_rt;
+      const int            rep_i = file_clusters[i].local_idxs[0];
+      const SpectrumEntry&  se_i = spectrum_entries[group.spectrum_ids[rep_i]];
+      const double           rt_i = traces[ti[rep_i]].apex_rt;
 
-      for (int j = i + 1; j < N; ++j)
+      for (int j = i + 1; j < M; ++j)
       {
-        const SpectrumEntry& se_j = spectrum_entries[group.spectrum_ids[j]];
-        const double         rt_j = traces[ti[j]].apex_rt;
+        const int            rep_j = file_clusters[j].local_idxs[0];
+        const SpectrumEntry&  se_j = spectrum_entries[group.spectrum_ids[rep_j]];
 
-        // RT check
+        if (se_i.source_file_idx == se_j.source_file_idx) continue; // ineligible
+
+        const double rt_j = traces[ti[rep_j]].apex_rt;
         if (std::abs(rt_i - rt_j) > rt_tolerance) continue;
-
-        // IM check
         if (use_im && std::abs(se_i.drift_time - se_j.drift_time) > im_tolerance) continue;
 
-        // Isotope-corrected precursor m/z check (mirrors Union-Find logic).
         const double mz_diff = se_i.precursor_mz - se_j.precursor_mz;
         const double mean_mz = (se_i.precursor_mz + se_j.precursor_mz) * 0.5;
         const double ppm_thr = precursor_ppm_tolerance * mean_mz / 1e6;
         bool mz_ok = false;
         for (int k = -static_cast<int>(isotope_error_tol);
              k <= static_cast<int>(isotope_error_tol) && !mz_ok; ++k)
-        {
           if (std::abs(mz_diff - k * NEUTRON_MASS_SUB / se_i.precursor_charge) <= ppm_thr)
             mz_ok = true;
-        }
         if (!mz_ok) continue;
 
-        const float ov = compute_overlap(fingerprint_bins[ti[i]], fingerprint_bins[ti[j]]);
-        sim[i * N + j] = sim[j * N + i] = ov;
+        sim[i * M + j] = sim[j * M + i] =
+          compute_overlap(file_clusters[i].union_fp, file_clusters[j].union_fp);
       }
     }
 
-    // -----------------------------------------------------------------------
-    // Complete-linkage agglomerative clustering.
-    //
-    // At each step the active cluster pair with the highest similarity is
-    // merged. The similarity between the merged cluster and any other cluster r
-    // is updated to min(sim(p,r), sim(q,r)) — the complete-linkage rule that
-    // prevents chaining: a member joins only if it is similar to every
-    // existing member of the cluster.
-    // Clustering stops when no remaining pair exceeds min_jaccard_similarity.
-    // -----------------------------------------------------------------------
-    std::vector<bool>             active(N, true);
-    std::vector<std::vector<int>> clust(N);
-    std::vector<float>            clust_min_overlap(N, 1.0f); // smallest merge Overlap Coefficient per cluster
-
-    for (int i = 0; i < N; ++i) clust[i] = {i};
-    int n_active = N;
+    // Complete-linkage agglomerative clustering on M file-clusters.
+    std::vector<bool>             active(M, true);
+    std::vector<std::vector<int>> clust(M);
+    std::vector<float>            clust_min_overlap(M, 1.0f);
+    for (int i = 0; i < M; ++i) clust[i] = {i};
+    int n_active = M;
 
     while (n_active > 1)
     {
       float best = -1.0f; int bp = -1, bq = -1;
-      for (int p = 0; p < N; ++p)
+      for (int p = 0; p < M; ++p)
       {
         if (!active[p]) continue;
-        for (int q = p + 1; q < N; ++q)
+        for (int q = p + 1; q < M; ++q)
         {
           if (!active[q]) continue;
-          if (sim[p * N + q] > best) { best = sim[p * N + q]; bp = p; bq = q; }
+          if (sim[p * M + q] > best) { best = sim[p * M + q]; bp = p; bq = q; }
         }
       }
       if (best < static_cast<float>(min_overlap_similarity)) break;
 
-      // Record the minimum Overlap Coefficient merge that has formed this cluster.
       clust_min_overlap[bp] = std::min({clust_min_overlap[bp], clust_min_overlap[bq], best});
-
-      // Absorb bq's members into bp.
       for (int m : clust[bq]) clust[bp].push_back(m);
 
-      // Complete-linkage similarity update: new sim = min of the two old sims.
-      for (int r = 0; r < N; ++r)
+      for (int r = 0; r < M; ++r)
       {
         if (!active[r] || r == bp || r == bq) continue;
-        const float ns = std::min(sim[bp * N + r], sim[bq * N + r]);
-        sim[bp * N + r] = sim[r * N + bp] = ns;
+        const float ns = std::min(sim[bp * M + r], sim[bq * M + r]);
+        sim[bp * M + r] = sim[r * M + bp] = ns;
       }
-
       active[bq] = false;
       --n_active;
     }
 
-    // -----------------------------------------------------------------------
-    // Collect active clusters with ≥2 members and build their union
-    // fingerprints (sorted, deduplicated OR of all member fingerprint_bins).
-    // -----------------------------------------------------------------------
+    // =========================================================================
+    // Collect active clusters with >=2 file-clusters.
+    // Since same-file pairs are ineligible in Phase 2, any cluster of >=2
+    // file-clusters is guaranteed to span >=2 distinct source files.
+    // =========================================================================
     struct Sub_
     {
-      std::vector<int>      local_idx;    // positions in group.spectrum_ids
-      std::vector<uint32_t> union_bins;   // sorted, deduplicated union fingerprint
+      std::vector<int>      local_idx;   // local indices in group.spectrum_ids
+      std::vector<int>      fc_idxs;    // indices into file_clusters
+      std::vector<uint32_t> union_bins; // sorted union of all file-cluster fingerprints
       float                 min_overlap{1.0f};
     };
 
     std::vector<Sub_> subs;
-    for (int c = 0; c < N; ++c)
+    for (int c = 0; c < M; ++c)
     {
       if (!active[c] || clust[c].size() < 2) continue;
       Sub_ s;
-      s.local_idx   = clust[c];
       s.min_overlap = clust_min_overlap[c];
 
-      for (int li : s.local_idx)
+      for (int fc_idx : clust[c])
       {
-        const auto& bins = fingerprint_bins[ti[li]];
+        s.fc_idxs.push_back(fc_idx);
+        for (int li : file_clusters[fc_idx].local_idxs)
+          s.local_idx.push_back(li);
+
         std::vector<uint32_t> merged;
-        merged.reserve(s.union_bins.size() + bins.size());
+        merged.reserve(s.union_bins.size() + file_clusters[fc_idx].union_fp.size());
         std::merge(s.union_bins.begin(), s.union_bins.end(),
-                   bins.begin(), bins.end(), std::back_inserter(merged));
+                   file_clusters[fc_idx].union_fp.begin(),
+                   file_clusters[fc_idx].union_fp.end(),
+                   std::back_inserter(merged));
         merged.erase(std::unique(merged.begin(), merged.end()), merged.end());
         s.union_bins = std::move(merged);
       }
@@ -1684,17 +1771,15 @@ namespace OpenMS
 
     if (subs.empty()) return {};
 
-    // -----------------------------------------------------------------------
+    // =========================================================================
     // Assemble one FeatureGroup per sub-cluster.
     //
-    // For each sub we compute in one pass:
-    //   shared_fragments  — bins seen by >=2 members (count, max_exp)
-    //   intersection      — bins seen by ALL members (strict consensus)
-    //   others_union      — union of every other sub's fingerprint
-    //   quantification_bins / quantification_max_exp
-    //                     — intersection filtered to bins absent from every
-    //                       other sub (inter-group unique); parallel vectors.
-    // -----------------------------------------------------------------------
+    //   shared_fragments      — bins seen by >=2 individual members
+    //   file_isect            — intersection of all file-cluster union fingerprints
+    //                           (bins every FILE agrees on, not every individual scan)
+    //   quantification_bins   — file_isect filtered to bins absent from all other subs
+    //   quantification_max_exp — max experimental intensity per quantification bin
+    // =========================================================================
     const Size K = subs.size();
 
     std::vector<FeatureGroup> result;
@@ -1702,21 +1787,18 @@ namespace OpenMS
 
     for (Size s = 0; s < K; ++s)
     {
-      const Sub_& sub  = subs[s];
-      const Size  N_s  = sub.local_idx.size();
-
+      const Sub_& sub = subs[s];
       FeatureGroup fg;
-      fg.spectrum_ids.reserve(N_s);
+      fg.spectrum_ids.reserve(sub.local_idx.size());
       fg.min_internal_overlap = static_cast<double>(sub.min_overlap);
 
       double rt_sum = 0.0;
-      std::unordered_map<uint32_t, std::pair<uint32_t, float>> frag_acc; // bin → (count, max_exp)
+      std::unordered_map<uint32_t, std::pair<uint32_t, float>> frag_acc;
 
       for (int li : sub.local_idx)
       {
         fg.spectrum_ids.push_back(group.spectrum_ids[li]);
         rt_sum += traces[ti[li]].apex_rt;
-
         for (const ApexFragment& af : traces[ti[li]].apex_fingerprint)
         {
           auto& acc = frag_acc[af.flat_bin_idx];
@@ -1724,10 +1806,9 @@ namespace OpenMS
           if (af.experimental_intensity > acc.second) acc.second = af.experimental_intensity;
         }
       }
+      fg.mean_apex_rt = rt_sum / static_cast<double>(sub.local_idx.size());
 
-      fg.mean_apex_rt = rt_sum / static_cast<double>(N_s);
-
-      // shared_fragments: bins observed by >=2 members.
+      // shared_fragments: bins seen by >=2 individual spectra.
       for (const auto& [flat_idx, acc] : frag_acc)
         if (acc.first >= 2)
           fg.shared_fragments.push_back({flat_idx, acc.second});
@@ -1735,17 +1816,32 @@ namespace OpenMS
         [](const SharedFragment& a, const SharedFragment& b)
         { return a.flat_bin_idx < b.flat_bin_idx; });
 
-      // Strict intersection: bins observed by every member of this sub-cluster.
-      // Collect as sorted (bin, max_exp) pairs ready for two-pointer set ops.
-      std::vector<std::pair<uint32_t, float>> isect;
-      isect.reserve(frag_acc.size());
-      for (const auto& [flat_idx, acc] : frag_acc)
-        if (acc.first == static_cast<uint32_t>(N_s))
-          isect.push_back({flat_idx, acc.second});
-      std::sort(isect.begin(), isect.end(),
-        [](const auto& a, const auto& b) { return a.first < b.first; });
+      // File-level intersection: bins present in every file-cluster's union
+      // fingerprint. This is more robust than per-scan intersection because a
+      // bin that only one scan from a file observed still counts for that file.
+      std::vector<uint32_t> file_isect = file_clusters[sub.fc_idxs[0]].union_fp;
+      for (Size k = 1; k < sub.fc_idxs.size(); ++k)
+      {
+        std::vector<uint32_t> tmp;
+        std::set_intersection(file_isect.begin(), file_isect.end(),
+                              file_clusters[sub.fc_idxs[k]].union_fp.begin(),
+                              file_clusters[sub.fc_idxs[k]].union_fp.end(),
+                              std::back_inserter(tmp));
+        file_isect = std::move(tmp);
+      }
 
-      // Union of all other subs' fingerprints (sorted, deduplicated).
+      // Build (bin, max_exp) pairs for bins in the file-level intersection.
+      // max_exp is taken from frag_acc (max over all individual spectra in the sub).
+      std::vector<std::pair<uint32_t, float>> isect;
+      isect.reserve(file_isect.size());
+      for (uint32_t bin : file_isect)
+      {
+        const auto it = frag_acc.find(bin);
+        isect.push_back({bin, (it != frag_acc.end()) ? it->second.second : 0.0f});
+      }
+      // file_isect is already sorted; isect inherits that order.
+
+      // Union of all other subs' fingerprints (for inter-group uniqueness check).
       std::vector<uint32_t> others;
       for (Size t = 0; t < K; ++t)
       {
@@ -1759,13 +1855,12 @@ namespace OpenMS
         others = std::move(tmp);
       }
 
-      // quantification_bins = isect \ others  (two-pointer set difference).
-      // Both isect and others are sorted by flat_bin_idx.
+      // quantification_bins = isect \ others (two-pointer set difference).
       {
         Size ia = 0, ib = 0;
         while (ia < isect.size() && ib < others.size())
         {
-          if      (isect[ia].first < others[ib])
+          if (isect[ia].first < others[ib])
           {
             fg.quantification_bins.push_back(isect[ia].first);
             fg.quantification_max_exp.push_back(isect[ia].second);
@@ -1795,7 +1890,8 @@ namespace OpenMS
                                  double   im_tolerance,
                                  double   precursor_ppm_tolerance,
                                  uint32_t isotope_error_tol,
-                                 double   min_overlap_similarity) const
+                                 double   min_overlap_similarity,
+                                 double   min_within_file_jaccard) const
   {
     if (traces.empty() || precursor_offsets_.empty()) return {};
 
@@ -2106,6 +2202,7 @@ namespace OpenMS
         auto subs = splitByOverlap_(group, traces, fingerprint_bins,
                                     spec_to_trace_idx, spectrum_entries_,
                                     min_overlap_similarity,
+                                    min_within_file_jaccard,
                                     rt_tolerance, im_tolerance,
                                     precursor_ppm_tolerance, isotope_error_tol,
                                     use_im);

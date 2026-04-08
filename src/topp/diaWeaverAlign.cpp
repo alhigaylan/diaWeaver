@@ -174,6 +174,18 @@ protected:
     setMinFloat_("min_overlap_similarity", 0.0);
     setMaxFloat_("min_overlap_similarity", 1.0);
 
+    registerDoubleOption_(
+      "min_within_file_jaccard",
+      "<fraction>",
+      0.7,
+      "Minimum Jaccard similarity (|A∩B| / |A∪B|) required for two spectrum_ids from the "
+      "same source file to be merged into a single file-cluster before cross-file Overlap "
+      "Coefficient clustering. Spectrum_ids below this threshold are treated as different "
+      "compounds and kept as separate file-clusters.",
+      false);
+    setMinFloat_("min_within_file_jaccard", 0.0);
+    setMaxFloat_("min_within_file_jaccard", 1.0);
+
     registerIntOption_(
       "min_matched_peaks",
       "<n>",
@@ -220,7 +232,8 @@ protected:
     const uint32_t   min_frags    = static_cast<uint32_t>(getIntOption_("min_fragment_overlap"));
     const uint32_t   iso_err_tol  = static_cast<uint32_t>(getIntOption_("isotope_error_tol"));
     const uint32_t   min_peaks    = static_cast<uint32_t>(getIntOption_("min_matched_peaks"));
-    const double     min_overlap  = getDoubleOption_("min_overlap_similarity");
+    const double     min_overlap       = getDoubleOption_("min_overlap_similarity");
+    const double     min_file_jaccard  = getDoubleOption_("min_within_file_jaccard");
 
 #ifdef _OPENMP
     omp_set_num_threads(getIntOption_("threads"));
@@ -508,7 +521,7 @@ protected:
         }
       }
 
-      const auto groups = aligner.groupFeatures(traces, rt_tol, min_frags, im_tol, prec_ppm, iso_err_tol, min_overlap);
+      const auto groups = aligner.groupFeatures(traces, rt_tol, min_frags, im_tol, prec_ppm, iso_err_tol, min_overlap, min_file_jaccard);
       OPENMS_LOG_INFO << "    Feature groups (>=2 members): " << groups.size() << std::endl;
 
       const DiaWeaver::DIAWindow* decoy_win =

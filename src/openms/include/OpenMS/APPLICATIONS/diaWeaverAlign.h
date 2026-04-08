@@ -374,12 +374,13 @@ namespace OpenMS
       @return                        FeatureGroups with >=2 members, sorted by mean_apex_rt.
     */
     std::vector<FeatureGroup> groupFeatures(const std::vector<ScoreTrace>& traces,
-                                             double   rt_tolerance            = 10.0,
-                                             uint32_t min_fragment_overlap    = 5,
-                                             double   im_tolerance            = 0.01,
-                                             double   precursor_ppm_tolerance = 20.0,
-                                             uint32_t isotope_error_tol       = 3,
-                                             double   min_overlap_similarity  = 0.7) const;
+                                             double   rt_tolerance              = 10.0,
+                                             uint32_t min_fragment_overlap      = 5,
+                                             double   im_tolerance              = 0.01,
+                                             double   precursor_ppm_tolerance   = 20.0,
+                                             uint32_t isotope_error_tol         = 3,
+                                             double   min_overlap_similarity    = 0.7,
+                                             double   min_within_file_jaccard   = 0.7) const;
 
     /**
       @brief Returns the spectrum_ids stored in a given precursor (m/z bin, IM bin) cell.
@@ -543,6 +544,7 @@ namespace OpenMS
       const std::vector<int>&                     spec_to_trace_idx,
       const std::vector<SpectrumEntry>&            spectrum_entries,
       double                                       min_overlap_similarity,
+      double                                       min_within_file_jaccard,
       double                                       rt_tolerance,
       double                                       im_tolerance,
       double                                       precursor_ppm_tolerance,
