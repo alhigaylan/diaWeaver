@@ -380,7 +380,8 @@ namespace OpenMS
                                              double   precursor_ppm_tolerance   = 20.0,
                                              uint32_t isotope_error_tol         = 3,
                                              double   min_overlap_similarity    = 0.7,
-                                             double   min_within_file_jaccard   = 0.7) const;
+                                             double   min_within_file_jaccard   = 0.7,
+                                             uint32_t singleton_min_frags       = 50) const;
 
     /**
       @brief Returns the spectrum_ids stored in a given precursor (m/z bin, IM bin) cell.

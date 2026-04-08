@@ -1891,7 +1891,8 @@ namespace OpenMS
                                  double   precursor_ppm_tolerance,
                                  uint32_t isotope_error_tol,
                                  double   min_overlap_similarity,
-                                 double   min_within_file_jaccard) const
+                                 double   min_within_file_jaccard,
+                                 uint32_t singleton_min_frags) const
   {
     if (traces.empty() || precursor_offsets_.empty()) return {};
 
@@ -2125,7 +2126,39 @@ namespace OpenMS
 
     for (auto& [root, members] : components)
     {
-      if (members.size() < 2) continue;
+      if (members.size() < 2)
+      {
+        // Singleton: keep if apex matched-peak count meets the threshold.
+        const ScoreTrace& tr = traces[members[0]];
+        if (tr.apex_score < singleton_min_frags) continue;
+
+        FeatureGroup sg;
+        sg.spectrum_ids.push_back(tr.spectrum_id);
+        sg.mean_apex_rt = tr.apex_rt;
+        // shared_fragments and min_internal_overlap stay at defaults (empty / 1.0).
+
+        // quantification_bins: all bins from this singleton's apex fingerprint.
+        // Deduplicate by keeping max experimental intensity per bin, then sort.
+        std::unordered_map<uint32_t, float> bin_max;
+        for (const ApexFragment& af : tr.apex_fingerprint)
+        {
+          auto it = bin_max.find(af.flat_bin_idx);
+          if (it == bin_max.end() || af.experimental_intensity > it->second)
+            bin_max[af.flat_bin_idx] = af.experimental_intensity;
+        }
+        std::vector<std::pair<uint32_t, float>> qp(bin_max.begin(), bin_max.end());
+        std::sort(qp.begin(), qp.end(),
+          [](const auto& a, const auto& b) { return a.first < b.first; });
+        sg.quantification_bins.reserve(qp.size());
+        sg.quantification_max_exp.reserve(qp.size());
+        for (const auto& [bin, exp] : qp)
+        {
+          sg.quantification_bins.push_back(bin);
+          sg.quantification_max_exp.push_back(exp);
+        }
+        result.push_back(std::move(sg));
+        continue;
+      }
 
       FeatureGroup group;
       group.spectrum_ids.reserve(members.size());

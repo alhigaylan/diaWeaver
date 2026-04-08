@@ -187,6 +187,15 @@ protected:
     setMaxFloat_("min_within_file_jaccard", 1.0);
 
     registerIntOption_(
+      "singleton_min_frags",
+      "<n>",
+      50,
+      "Minimum apex matched-peak count for a spectrum_id with no cross-file partner to be "
+      "retained as a singleton group. Set to 0 to discard all singletons.",
+      false);
+    setMinInt_("singleton_min_frags", 0);
+
+    registerIntOption_(
       "min_matched_peaks",
       "<n>",
       2,
@@ -232,8 +241,9 @@ protected:
     const uint32_t   min_frags    = static_cast<uint32_t>(getIntOption_("min_fragment_overlap"));
     const uint32_t   iso_err_tol  = static_cast<uint32_t>(getIntOption_("isotope_error_tol"));
     const uint32_t   min_peaks    = static_cast<uint32_t>(getIntOption_("min_matched_peaks"));
-    const double     min_overlap       = getDoubleOption_("min_overlap_similarity");
-    const double     min_file_jaccard  = getDoubleOption_("min_within_file_jaccard");
+    const double     min_overlap         = getDoubleOption_("min_overlap_similarity");
+    const double     min_file_jaccard    = getDoubleOption_("min_within_file_jaccard");
+    const uint32_t   singleton_min_frags = static_cast<uint32_t>(getIntOption_("singleton_min_frags"));
 
 #ifdef _OPENMP
     omp_set_num_threads(getIntOption_("threads"));
@@ -521,7 +531,7 @@ protected:
         }
       }
 
-      const auto groups = aligner.groupFeatures(traces, rt_tol, min_frags, im_tol, prec_ppm, iso_err_tol, min_overlap, min_file_jaccard);
+      const auto groups = aligner.groupFeatures(traces, rt_tol, min_frags, im_tol, prec_ppm, iso_err_tol, min_overlap, min_file_jaccard, singleton_min_frags);
       OPENMS_LOG_INFO << "    Feature groups (>=2 members): " << groups.size() << std::endl;
 
       const DiaWeaver::DIAWindow* decoy_win =
