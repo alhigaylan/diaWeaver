@@ -1685,16 +1685,67 @@ namespace OpenMS
     if (subs.empty()) return {};
 
     // -----------------------------------------------------------------------
-    // Compute unique_fragment_bins for each sub-cluster:
-    // bins present in this sub's union fingerprint that are absent from every
-    // other sub's union fingerprint.
+    // Assemble one FeatureGroup per sub-cluster.
+    //
+    // For each sub we compute in one pass:
+    //   shared_fragments  — bins seen by >=2 members (count, max_exp)
+    //   intersection      — bins seen by ALL members (strict consensus)
+    //   others_union      — union of every other sub's fingerprint
+    //   quantification_bins / quantification_max_exp
+    //                     — intersection filtered to bins absent from every
+    //                       other sub (inter-group unique); parallel vectors.
     // -----------------------------------------------------------------------
     const Size K = subs.size();
-    std::vector<std::vector<uint32_t>> unique_bins(K);
+
+    std::vector<FeatureGroup> result;
+    result.reserve(K);
 
     for (Size s = 0; s < K; ++s)
     {
-      // Build the union of all other subs' fingerprints.
+      const Sub_& sub  = subs[s];
+      const Size  N_s  = sub.local_idx.size();
+
+      FeatureGroup fg;
+      fg.spectrum_ids.reserve(N_s);
+      fg.min_internal_overlap = static_cast<double>(sub.min_overlap);
+
+      double rt_sum = 0.0;
+      std::unordered_map<uint32_t, std::pair<uint32_t, float>> frag_acc; // bin → (count, max_exp)
+
+      for (int li : sub.local_idx)
+      {
+        fg.spectrum_ids.push_back(group.spectrum_ids[li]);
+        rt_sum += traces[ti[li]].apex_rt;
+
+        for (const ApexFragment& af : traces[ti[li]].apex_fingerprint)
+        {
+          auto& acc = frag_acc[af.flat_bin_idx];
+          ++acc.first;
+          if (af.experimental_intensity > acc.second) acc.second = af.experimental_intensity;
+        }
+      }
+
+      fg.mean_apex_rt = rt_sum / static_cast<double>(N_s);
+
+      // shared_fragments: bins observed by >=2 members.
+      for (const auto& [flat_idx, acc] : frag_acc)
+        if (acc.first >= 2)
+          fg.shared_fragments.push_back({flat_idx, acc.second});
+      std::sort(fg.shared_fragments.begin(), fg.shared_fragments.end(),
+        [](const SharedFragment& a, const SharedFragment& b)
+        { return a.flat_bin_idx < b.flat_bin_idx; });
+
+      // Strict intersection: bins observed by every member of this sub-cluster.
+      // Collect as sorted (bin, max_exp) pairs ready for two-pointer set ops.
+      std::vector<std::pair<uint32_t, float>> isect;
+      isect.reserve(frag_acc.size());
+      for (const auto& [flat_idx, acc] : frag_acc)
+        if (acc.first == static_cast<uint32_t>(N_s))
+          isect.push_back({flat_idx, acc.second});
+      std::sort(isect.begin(), isect.end(),
+        [](const auto& a, const auto& b) { return a.first < b.first; });
+
+      // Union of all other subs' fingerprints (sorted, deduplicated).
       std::vector<uint32_t> others;
       for (Size t = 0; t < K; ++t)
       {
@@ -1707,52 +1758,29 @@ namespace OpenMS
         tmp.erase(std::unique(tmp.begin(), tmp.end()), tmp.end());
         others = std::move(tmp);
       }
-      std::set_difference(subs[s].union_bins.begin(), subs[s].union_bins.end(),
-                          others.begin(), others.end(),
-                          std::back_inserter(unique_bins[s]));
-    }
 
-    // -----------------------------------------------------------------------
-    // Assemble one FeatureGroup per sub-cluster.
-    // shared_fragments = fragment bins seen in >=2 members within the sub-group.
-    // -----------------------------------------------------------------------
-    std::vector<FeatureGroup> result;
-    result.reserve(K);
-
-    for (Size s = 0; s < K; ++s)
-    {
-      const Sub_& sub = subs[s];
-      FeatureGroup fg;
-      fg.spectrum_ids.reserve(sub.local_idx.size());
-      fg.min_internal_overlap = static_cast<double>(sub.min_overlap);
-      fg.unique_fragment_bins = std::move(unique_bins[s]);
-
-      double rt_sum = 0.0;
-      std::unordered_map<uint32_t, std::pair<uint32_t, float>> frag_acc;
-
-      for (int li : sub.local_idx)
+      // quantification_bins = isect \ others  (two-pointer set difference).
+      // Both isect and others are sorted by flat_bin_idx.
       {
-        const uint32_t sid = group.spectrum_ids[li];
-        fg.spectrum_ids.push_back(sid);
-        rt_sum += traces[ti[li]].apex_rt;
-
-        for (const ApexFragment& af : traces[ti[li]].apex_fingerprint)
+        Size ia = 0, ib = 0;
+        while (ia < isect.size() && ib < others.size())
         {
-          auto& acc = frag_acc[af.flat_bin_idx];
-          ++acc.first;
-          if (af.experimental_intensity > acc.second) acc.second = af.experimental_intensity;
+          if      (isect[ia].first < others[ib])
+          {
+            fg.quantification_bins.push_back(isect[ia].first);
+            fg.quantification_max_exp.push_back(isect[ia].second);
+            ++ia;
+          }
+          else if (others[ib] < isect[ia].first) ++ib;
+          else                                   { ++ia; ++ib; }
+        }
+        while (ia < isect.size())
+        {
+          fg.quantification_bins.push_back(isect[ia].first);
+          fg.quantification_max_exp.push_back(isect[ia].second);
+          ++ia;
         }
       }
-
-      fg.mean_apex_rt = rt_sum / static_cast<double>(sub.local_idx.size());
-
-      for (const auto& [flat_idx, acc] : frag_acc)
-        if (acc.first >= 2)
-          fg.shared_fragments.push_back({flat_idx, acc.second});
-
-      std::sort(fg.shared_fragments.begin(), fg.shared_fragments.end(),
-        [](const SharedFragment& a, const SharedFragment& b)
-        { return a.flat_bin_idx < b.flat_bin_idx; });
 
       result.push_back(std::move(fg));
     }
@@ -2034,6 +2062,27 @@ namespace OpenMS
       std::sort(group.shared_fragments.begin(), group.shared_fragments.end(),
         [](const SharedFragment& a, const SharedFragment& b)
         { return a.flat_bin_idx < b.flat_bin_idx; });
+
+      // quantification_bins: strict intersection (all members observed the bin).
+      // No competing sub-groups exist here, so inter-group uniqueness is trivially
+      // satisfied. Collect sorted (bin, max_exp) pairs.
+      {
+        const uint32_t n_members = static_cast<uint32_t>(members.size());
+        std::vector<std::pair<uint32_t, float>> quant_pairs;
+        quant_pairs.reserve(frag_acc.size());
+        for (const auto& [flat_idx, acc] : frag_acc)
+          if (acc.first == n_members)
+            quant_pairs.push_back({flat_idx, acc.second});
+        std::sort(quant_pairs.begin(), quant_pairs.end(),
+          [](const auto& a, const auto& b) { return a.first < b.first; });
+        group.quantification_bins.reserve(quant_pairs.size());
+        group.quantification_max_exp.reserve(quant_pairs.size());
+        for (const auto& [bin, exp] : quant_pairs)
+        {
+          group.quantification_bins.push_back(bin);
+          group.quantification_max_exp.push_back(exp);
+        }
+      }
 
       OPENMS_LOG_DEBUG << "[DiaWeaverAlign::groupFeatures] group: n_members="
                        << group.spectrum_ids.size()

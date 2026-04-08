@@ -139,7 +139,8 @@ namespace OpenMS
     {
       std::vector<uint32_t>       spectrum_ids;          ///< Grouped spectrum_ids, one per source file ideally
       std::vector<SharedFragment> shared_fragments;      ///< Fragment bins shared by >=2 members within this group, sorted by flat_bin_idx
-      std::vector<uint32_t>       unique_fragment_bins;  ///< Fragment bins present in this sub-group's union fingerprint but absent from every other sub-group produced by the same split. Empty when sub-clustering was not triggered.
+      std::vector<uint32_t>       quantification_bins;   ///< Strict intersection of all members' apex fingerprints, further restricted to bins absent from every other sub-group (inter-group unique). Sorted by flat_bin_idx. Parallel to quantification_max_exp.
+      std::vector<float>          quantification_max_exp;///< Max experimental intensity across all members for each quantification bin. Parallel to quantification_bins.
       double                      mean_apex_rt{-1.0};    ///< Mean apex RT across all members (seconds)
       double                      min_internal_overlap{1.0}; ///< Minimum pairwise Overlap Coefficient (|A∩B|/min(|A|,|B|)) within this group (1.0 when sub-clustering was not triggered).
     };
@@ -529,10 +530,11 @@ namespace OpenMS
       inflated by being from the same LC-MS run as the query. Complete-linkage
       agglomerative clustering merges the pair with the highest similarity; a
       merge is accepted only when the similarity exceeds @p min_overlap_similarity.
-      For each resulting sub-group the unique_fragment_bins (bins absent from
-      every other sub-group's union fingerprint) and min_internal_overlap are
-      populated. Singleton sub-clusters are discarded. Returns an empty vector
-      when all members become singletons.
+      For each resulting sub-group, quantification_bins (strict intersection of
+      all members' apex fingerprints, further restricted to bins absent from every
+      other sub-group's union fingerprint) and min_internal_overlap are populated.
+      Singleton sub-clusters are discarded. Returns an empty vector when all
+      members become singletons.
     */
     static std::vector<FeatureGroup> splitByOverlap_(
       const FeatureGroup&                         group,

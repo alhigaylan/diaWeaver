@@ -264,7 +264,7 @@ protected:
       return CANNOT_WRITE_OUTPUT_FILE;
     }
 
-    tsv << "group_id\tn_members\tmean_apex_rt_s\tn_shared_frags\tn_unique_frags\tmin_internal_overlap"
+    tsv << "group_id\tn_members\tmean_apex_rt_s\tn_shared_frags\tn_quant_frags\tmin_internal_overlap"
         << "\twindow_lower_mz\twindow_upper_mz\twindow_lower_im\twindow_upper_im"
         << "\tdecoy_window_lower_mz\tdecoy_window_upper_mz\tdecoy_window_lower_im\tdecoy_window_upper_im"
         << "\tspectrum_id\tsource_file\tnative_id"
@@ -620,20 +620,30 @@ private:
 
         const bool has_im = (se.drift_time >= 0.0);
 
-        // Build comma-separated list of per-fragment log2 fold changes
-        // (log2 experimental intensity − log2 index intensity) at the apex.
+        // Fold changes: one value per quantification bin.
+        // Numerator  = group-level max experimental intensity (group.quantification_max_exp).
+        // Denominator = this member's index log2 intensity for that bin.
         std::string fold_changes;
-        if (it != trace_map.end() && !it->second->apex_fingerprint.empty())
+        if (!group.quantification_bins.empty() && it != trace_map.end())
         {
+          // Build flat_bin_idx → index_log2_intensity map for this member.
+          std::unordered_map<uint32_t, float> idx_log2;
+          idx_log2.reserve(it->second->apex_fingerprint.size());
+          for (const DiaWeaverAlign::ApexFragment& af : it->second->apex_fingerprint)
+            idx_log2[af.flat_bin_idx] = af.index_log2_intensity;
+
           std::ostringstream oss;
           bool first = true;
-          for (const DiaWeaverAlign::ApexFragment& af : it->second->apex_fingerprint)
+          for (Size k = 0; k < group.quantification_bins.size(); ++k)
           {
+            const auto jt = idx_log2.find(group.quantification_bins[k]);
+            if (jt == idx_log2.end()) continue; // bin not in this member's fingerprint
             if (!first) oss << ',';
-            oss << (std::log2f(std::max(1.0f, af.experimental_intensity)) - af.index_log2_intensity);
+            oss << (std::log2f(std::max(1.0f, group.quantification_max_exp[k])) - jt->second);
             first = false;
           }
           fold_changes = oss.str();
+          if (fold_changes.empty()) fold_changes = "NA";
         }
         else
         {
@@ -644,7 +654,7 @@ private:
             << '\t' << group.spectrum_ids.size()
             << '\t' << group.mean_apex_rt
             << '\t' << group.shared_fragments.size()
-            << '\t' << group.unique_fragment_bins.size()
+            << '\t' << group.quantification_bins.size()
             << '\t' << group.min_internal_overlap
             << '\t' << window.lower_mz
             << '\t' << window.upper_mz
