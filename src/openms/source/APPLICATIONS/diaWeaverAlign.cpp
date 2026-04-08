@@ -722,7 +722,7 @@ namespace OpenMS
     const uint32_t spec_id     = stream_next_spec_id_++;
     const uint8_t  charge_byte = static_cast<uint8_t>(spec.getPrecursors()[0].getCharge());
 
-    // Bin fragment peaks and write records: uint32_t flat_idx (4) + FragmentEntry (8) = 12 bytes each
+    // Bin fragment peaks and write records: uint32_t flat_idx (4) + FragmentEntry (sizeof) bytes each.
     std::vector<std::pair<uint32_t, FragmentEntry>> entries;
     binSingleSpectrum_(spec, spec_id, charge_byte, stream_im_detected_, entries);
 
@@ -739,7 +739,7 @@ namespace OpenMS
     for (const auto& [flat_idx, fe] : entries)
     {
       std::fwrite(&flat_idx, 4, 1, stream_frags_fp_);
-      std::fwrite(&fe,       8, 1, stream_frags_fp_);
+      std::fwrite(&fe,       sizeof(FragmentEntry), 1, stream_frags_fp_);
     }
 
     // Write metadata record to meta file
@@ -845,7 +845,7 @@ namespace OpenMS
       uint32_t     flat_idx;
       FragmentEntry fe;
       std::fread(&flat_idx, 4, 1, fp);
-      std::fread(&fe,       8, 1, fp);
+      std::fread(&fe,       sizeof(FragmentEntry), 1, fp);
       all_entries[i] = {flat_idx, fe};
     }
     std::fclose(fp);
@@ -917,7 +917,7 @@ namespace OpenMS
   // Index serialization / deserialization
   //
   // File format (.dwaindex):
-  //   magic[4]  "DWAI"
+  //   magic[4]  "DWA2"
   //   doubles/uint32_ts for all bin-axis scalars + has_im flag
   //   source_files_   (count + length-prefixed strings)
   //   spectrum_entries_  (count + per-entry fixed+variable data)
@@ -935,7 +935,7 @@ namespace OpenMS
         __FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, path);
 
     // Magic
-    const char magic[4] = {'D', 'W', 'A', 'I'};
+    const char magic[4] = {'D', 'W', 'A', '2'};
     std::fwrite(magic, 1, 4, fp);
 
     // Bin-axis scalars
@@ -995,7 +995,7 @@ namespace OpenMS
     const uint64_t n_frag = static_cast<uint64_t>(fragment_entries_.size());
     std::fwrite(&n_frag, 8, 1, fp);
     if (n_frag > 0)
-      std::fwrite(fragment_entries_.data(), 8, n_frag, fp);
+      std::fwrite(fragment_entries_.data(), sizeof(FragmentEntry), n_frag, fp);
 
     // Bin offsets (4 bytes each)
     const uint64_t n_bin_off = static_cast<uint64_t>(bin_offsets_.size());
@@ -1029,12 +1029,16 @@ namespace OpenMS
     // Magic
     char magic[4];
     std::fread(magic, 1, 4, fp);
-    if (magic[0] != 'D' || magic[1] != 'W' || magic[2] != 'A' || magic[3] != 'I')
+    if (magic[0] != 'D' || magic[1] != 'W' || magic[2] != 'A' || magic[3] != '2')
     {
       std::fclose(fp);
+      if (magic[0] == 'D' && magic[1] == 'W' && magic[2] == 'A' && magic[3] == 'I')
+        throw Exception::ParseError(
+          __FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+          path, "Index was built with an older format (DWAI); please regenerate it.");
       throw Exception::ParseError(
         __FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-        path, "Bad magic number; expected DWAI.");
+        path, "Bad magic number; expected DWA2.");
     }
 
     // Bin-axis scalars — restore directly (bypasses updateMembers_)
@@ -1109,7 +1113,7 @@ namespace OpenMS
     std::fread(&n_frag, 8, 1, fp);
     fragment_entries_.resize(n_frag);
     if (n_frag > 0)
-      std::fread(fragment_entries_.data(), 8, n_frag, fp);
+      std::fread(fragment_entries_.data(), sizeof(FragmentEntry), n_frag, fp);
 
     // Bin offsets
     uint64_t n_bin_off;
