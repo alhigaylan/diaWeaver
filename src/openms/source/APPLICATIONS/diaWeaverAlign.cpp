@@ -1852,15 +1852,15 @@ namespace OpenMS
     if (M < 2) return {}; // nothing to cross-cluster
 
     // =========================================================================
-    // Phase 2: Cross-file complete-linkage on file-cluster representatives.
+    // Phase 2: Build weighted eligibility graph + maximum spanning forest.
     //
-    // The M×M similarity matrix uses Overlap Coefficient on union fingerprints.
-    // Same-file file-cluster pairs are left at -1.0 (ineligible): they failed
-    // within-file Jaccard and so represent different compounds that must not
-    // merge here. Cross-file pairs undergo positional checks followed by
-    // Overlap Coefficient on their union fingerprints. The first local_idx of
-    // each file-cluster serves as the positional representative.
+    // Same positional checks as before (RT, IM, precursor m/z). Edge weight is
+    // the Overlap Coefficient on union fingerprints. Kruskal's maximum spanning
+    // forest gives the best-supported connectivity with no hard group-formation
+    // threshold. Same-file pairs have no edge, so they can never poison
+    // cross-file linkage (no -1.0 sentinel propagation).
     // =========================================================================
+
     auto compute_overlap = [](const std::vector<uint32_t>& a,
                                const std::vector<uint32_t>& b) -> float
     {
@@ -1879,8 +1879,9 @@ namespace OpenMS
 
     static constexpr double NEUTRON_MASS_SUB = 1.003355;
 
-    std::vector<float> sim(static_cast<Size>(M) * M, -1.0f);
-    for (int i = 0; i < M; ++i) sim[i * M + i] = 0.0f;
+    struct MstEdge_ { int i, j; float w; };
+    std::vector<MstEdge_> all_edges;
+    all_edges.reserve(static_cast<Size>(M) * (M - 1) / 2);
 
     for (int i = 0; i < M; ++i)
     {
@@ -1893,7 +1894,7 @@ namespace OpenMS
         const int            rep_j = file_clusters[j].local_idxs[0];
         const SpectrumEntry&  se_j = spectrum_entries[group.spectrum_ids[rep_j]];
 
-        if (se_i.source_file_idx == se_j.source_file_idx) continue; // ineligible
+        if (se_i.source_file_idx == se_j.source_file_idx) continue;
 
         const double rt_j = traces[ti[rep_j]].apex_rt;
         if (std::abs(rt_i - rt_j) > rt_tolerance) continue;
@@ -1909,81 +1910,203 @@ namespace OpenMS
             mz_ok = true;
         if (!mz_ok) continue;
 
-        sim[i * M + j] = sim[j * M + i] =
-          compute_overlap(file_clusters[i].union_fp, file_clusters[j].union_fp);
+        const float ov = compute_overlap(file_clusters[i].union_fp, file_clusters[j].union_fp);
+        if (ov < static_cast<float>(min_overlap_similarity)) continue;
+
+        all_edges.push_back({i, j, ov});
       }
     }
 
-    // Complete-linkage agglomerative clustering on M file-clusters.
-    std::vector<bool>             active(M, true);
-    std::vector<std::vector<int>> clust(M);
-    std::vector<float>            clust_min_overlap(M, 1.0f);
-    for (int i = 0; i < M; ++i) clust[i] = {i};
-    int n_active = M;
+    // Kruskal's maximum spanning forest: sort descending, greedily accept edges
+    // that connect different components.
+    std::sort(all_edges.begin(), all_edges.end(),
+              [](const MstEdge_& a, const MstEdge_& b) { return a.w > b.w; });
 
-    while (n_active > 1)
+    std::vector<int> kuf_par(M); std::iota(kuf_par.begin(), kuf_par.end(), 0);
+    std::vector<int> kuf_rnk(M, 0);
+    auto kuf_find = [&kuf_par](int x) -> int {
+      while (kuf_par[x] != x) { kuf_par[x] = kuf_par[kuf_par[x]]; x = kuf_par[x]; }
+      return x;
+    };
+
+    std::vector<MstEdge_> mst_edges;
+    mst_edges.reserve(static_cast<Size>(M - 1));
+    for (const MstEdge_& e : all_edges)
     {
-      float best = -1.0f; int bp = -1, bq = -1;
-      for (int p = 0; p < M; ++p)
+      int ri = kuf_find(e.i), rj = kuf_find(e.j);
+      if (ri == rj) continue;
+      mst_edges.push_back(e);
+      if (kuf_rnk[ri] < kuf_rnk[rj]) std::swap(ri, rj);
+      kuf_par[rj] = ri;
+      if (kuf_rnk[ri] == kuf_rnk[rj]) ++kuf_rnk[ri];
+    }
+
+    // Identify connected components of the spanning forest via DFS over MST edges.
+    // Isolated file-clusters (no eligible cross-file edges) each form their own
+    // 1-node component and are handled as singletons in Phase 3.
+    std::vector<int> comp_id(M, -1);
+    int n_comps = 0;
+    for (int i = 0; i < M; ++i)
+    {
+      if (comp_id[i] != -1) continue;
+      std::vector<int> stk = {i};
+      comp_id[i] = n_comps;
+      while (!stk.empty())
       {
-        if (!active[p]) continue;
-        for (int q = p + 1; q < M; ++q)
+        int cur = stk.back(); stk.pop_back();
+        for (const MstEdge_& e : mst_edges)
         {
-          if (!active[q]) continue;
-          if (sim[p * M + q] > best) { best = sim[p * M + q]; bp = p; bq = q; }
+          if (e.i == cur && comp_id[e.j] == -1) { comp_id[e.j] = n_comps; stk.push_back(e.j); }
+          if (e.j == cur && comp_id[e.i] == -1) { comp_id[e.i] = n_comps; stk.push_back(e.i); }
         }
       }
-      if (best < static_cast<float>(min_overlap_similarity)) break;
-
-      clust_min_overlap[bp] = std::min({clust_min_overlap[bp], clust_min_overlap[bq], best});
-      for (int m : clust[bq]) clust[bp].push_back(m);
-
-      for (int r = 0; r < M; ++r)
-      {
-        if (!active[r] || r == bp || r == bq) continue;
-        const float ns = std::min(sim[bp * M + r], sim[bq * M + r]);
-        sim[bp * M + r] = sim[r * M + bp] = ns;
-      }
-      active[bq] = false;
-      --n_active;
+      ++n_comps;
     }
 
+    std::vector<std::vector<int>>      comp_fc(n_comps);
+    std::vector<std::vector<MstEdge_>> comp_edges(n_comps);
+    for (int i = 0; i < M; ++i) comp_fc[comp_id[i]].push_back(i);
+    for (const MstEdge_& e : mst_edges) comp_edges[comp_id[e.i]].push_back(e);
+
     // =========================================================================
-    // Collect active clusters with >=2 file-clusters.
-    // Since same-file pairs are ineligible in Phase 2, any cluster of >=2
-    // file-clusters is guaranteed to span >=2 distinct source files.
+    // Phase 3: Divisive recursion guided by cross-file fragment intersection.
+    //
+    // For each MST connected component: compute file_isect (bins every file in
+    // the component agrees on). If |file_isect| >= singleton_min_frags the
+    // group is coherent — keep as one sub-cluster. Otherwise cut the minimum-
+    // weight MST edge (the weakest cross-file link, most likely the cross-
+    // peptide bridge), split into two sub-components, and repeat on each part
+    // independently. file_isect is recomputed fresh per sub-component at every
+    // level so that removing a heterogeneous member reveals the true
+    // intersection of the remainder.
+    //
+    // Implemented as an explicit worklist (iterative) to avoid deep call stacks.
+    // Singletons produced by cutting — or isolated from the start — are gated
+    // by the same singleton_min_frags criterion used in groupFeatures.
     // =========================================================================
     struct Sub_
     {
-      std::vector<int>      local_idx;   // local indices in group.spectrum_ids
-      std::vector<int>      fc_idxs;    // indices into file_clusters
-      std::vector<uint32_t> union_bins; // sorted union of all file-cluster fingerprints
+      std::vector<int>      local_idx;
+      std::vector<int>      fc_idxs;
+      std::vector<uint32_t> union_bins;
       float                 min_overlap{1.0f};
     };
 
     std::vector<Sub_> subs;
-    for (int c = 0; c < M; ++c)
+
+    struct WorkItem_ { std::vector<int> fcs; std::vector<MstEdge_> edges; };
+    std::vector<WorkItem_> worklist;
+    worklist.reserve(static_cast<Size>(n_comps));
+    for (int c = 0; c < n_comps; ++c)
+      worklist.push_back({comp_fc[c], comp_edges[c]});
+
+    while (!worklist.empty())
     {
-      if (!active[c] || clust[c].size() < 2) continue;
-      Sub_ s;
-      s.min_overlap = clust_min_overlap[c];
+      WorkItem_ item = std::move(worklist.back());
+      worklist.pop_back();
+      std::vector<int>&      fcs   = item.fcs;
+      std::vector<MstEdge_>& edges = item.edges;
 
-      for (int fc_idx : clust[c])
+      // --- Singleton base case ---------------------------------------------
+      if (fcs.size() == 1)
       {
-        s.fc_idxs.push_back(fc_idx);
-        for (int li : file_clusters[fc_idx].local_idxs)
-          s.local_idx.push_back(li);
+        uint32_t max_score = 0;
+        for (int li : file_clusters[fcs[0]].local_idxs)
+          max_score = std::max(max_score, traces[ti[li]].apex_score);
+        if (max_score < singleton_min_frags) continue;
 
-        std::vector<uint32_t> merged;
-        merged.reserve(s.union_bins.size() + file_clusters[fc_idx].union_fp.size());
-        std::merge(s.union_bins.begin(), s.union_bins.end(),
-                   file_clusters[fc_idx].union_fp.begin(),
-                   file_clusters[fc_idx].union_fp.end(),
-                   std::back_inserter(merged));
-        merged.erase(std::unique(merged.begin(), merged.end()), merged.end());
-        s.union_bins = std::move(merged);
+        Sub_ s;
+        s.fc_idxs = fcs;
+        for (int li : file_clusters[fcs[0]].local_idxs)
+          s.local_idx.push_back(li);
+        s.union_bins = file_clusters[fcs[0]].union_fp;
+        s.min_overlap = 1.0f;
+        subs.push_back(std::move(s));
+        continue;
       }
-      subs.push_back(std::move(s));
+
+      // --- Coherence test: recompute file_isect fresh for this component ---
+      std::vector<uint32_t> isect = file_clusters[fcs[0]].union_fp;
+      for (Size k = 1; k < fcs.size(); ++k)
+      {
+        std::vector<uint32_t> tmp;
+        std::set_intersection(isect.begin(), isect.end(),
+                              file_clusters[fcs[k]].union_fp.begin(),
+                              file_clusters[fcs[k]].union_fp.end(),
+                              std::back_inserter(tmp));
+        isect = std::move(tmp);
+      }
+
+      if (isect.size() >= static_cast<Size>(singleton_min_frags))
+      {
+        // Every file agrees on enough fragments: coherent single-peptide group.
+        Sub_ s;
+        s.fc_idxs = fcs;
+        for (int fc : fcs)
+          for (int li : file_clusters[fc].local_idxs)
+            s.local_idx.push_back(li);
+        for (int fc : fcs)
+        {
+          std::vector<uint32_t> tmp;
+          tmp.reserve(s.union_bins.size() + file_clusters[fc].union_fp.size());
+          std::merge(s.union_bins.begin(), s.union_bins.end(),
+                     file_clusters[fc].union_fp.begin(),
+                     file_clusters[fc].union_fp.end(),
+                     std::back_inserter(tmp));
+          tmp.erase(std::unique(tmp.begin(), tmp.end()), tmp.end());
+          s.union_bins = std::move(tmp);
+        }
+        s.min_overlap = edges.empty() ? 1.0f
+          : std::min_element(edges.begin(), edges.end(),
+              [](const MstEdge_& a, const MstEdge_& b) { return a.w < b.w; })->w;
+        subs.push_back(std::move(s));
+        continue;
+      }
+
+      // --- Incoherent: cut weakest MST edge and push two sub-components ----
+      if (edges.empty())
+      {
+        // No edges left to cut: dissolve remaining file-clusters into singletons.
+        for (int fc : fcs)
+          worklist.push_back({{fc}, {}});
+        continue;
+      }
+
+      const auto weakest_it = std::min_element(edges.begin(), edges.end(),
+        [](const MstEdge_& a, const MstEdge_& b) { return a.w < b.w; });
+      const int cut_seed = weakest_it->i;
+      edges.erase(weakest_it);
+
+      // DFS from cut_seed on remaining edges to identify one side of the cut.
+      std::vector<bool> in_side_a(M, false);
+      {
+        std::vector<int> dfs = {cut_seed};
+        in_side_a[cut_seed] = true;
+        while (!dfs.empty())
+        {
+          int cur = dfs.back(); dfs.pop_back();
+          for (const MstEdge_& e : edges)
+          {
+            if (e.i == cur && !in_side_a[e.j]) { in_side_a[e.j] = true; dfs.push_back(e.j); }
+            if (e.j == cur && !in_side_a[e.i]) { in_side_a[e.i] = true; dfs.push_back(e.i); }
+          }
+        }
+      }
+
+      WorkItem_ item_a, item_b;
+      for (int fc : fcs)
+      {
+        if (in_side_a[fc]) item_a.fcs.push_back(fc);
+        else               item_b.fcs.push_back(fc);
+      }
+      for (const MstEdge_& e : edges)
+      {
+        if (in_side_a[e.i]) item_a.edges.push_back(e);
+        else                item_b.edges.push_back(e);
+      }
+
+      worklist.push_back(std::move(item_a));
+      worklist.push_back(std::move(item_b));
     }
 
     // =========================================================================
@@ -1995,10 +2118,9 @@ namespace OpenMS
     //   quantification_bins   — file_isect filtered to bins absent from all other subs
     //   quantification_max_exp — max experimental intensity per quantification bin
     //
-    // Isolated file-clusters (left alone by complete-linkage) are treated as
-    // singletons using the same singleton_min_frags gate as groupFeatures.
-    // This is consistent: a spectrum_id should not be silently dropped merely
-    // because it was placed in a large group that later got sub-clustered.
+    // subs contains both multi-file groups and singletons produced by the
+    // divisive recursion (including isolated file-clusters). All are assembled
+    // uniformly below.
     // =========================================================================
     const Size K = subs.size();
 
@@ -2098,55 +2220,6 @@ namespace OpenMS
       }
 
       result.push_back(std::move(fg));
-    }
-
-    // =========================================================================
-    // Singleton pass: isolated file-clusters that did not join any multi-member
-    // sub-cluster.  Apply the same singleton_min_frags gate used by groupFeatures
-    // so the behavior is consistent regardless of whether sub-clustering fired.
-    // =========================================================================
-    for (int c = 0; c < M; ++c)
-    {
-      if (!active[c] || clust[c].size() != 1) continue;
-
-      const FileCluster_& fc = file_clusters[clust[c][0]];
-
-      // Gate on the maximum apex_score across all spectrum_ids in the cluster.
-      uint32_t max_score = 0;
-      for (int li : fc.local_idxs)
-        max_score = std::max(max_score, traces[ti[li]].apex_score);
-      if (max_score < singleton_min_frags) continue;
-
-      FeatureGroup sg;
-      sg.spectrum_ids.reserve(fc.local_idxs.size());
-      double rt_sum = 0.0;
-      std::unordered_map<uint32_t, float> bin_max;
-
-      for (int li : fc.local_idxs)
-      {
-        sg.spectrum_ids.push_back(group.spectrum_ids[li]);
-        rt_sum += traces[ti[li]].apex_rt;
-        for (const ApexFragment& af : traces[ti[li]].apex_fingerprint)
-        {
-          auto it = bin_max.find(af.flat_bin_idx);
-          if (it == bin_max.end() || af.experimental_intensity > it->second)
-            bin_max[af.flat_bin_idx] = af.experimental_intensity;
-        }
-      }
-      sg.mean_apex_rt = rt_sum / static_cast<double>(fc.local_idxs.size());
-
-      std::vector<std::pair<uint32_t, float>> qp(bin_max.begin(), bin_max.end());
-      std::sort(qp.begin(), qp.end(),
-        [](const auto& a, const auto& b) { return a.first < b.first; });
-      sg.quantification_bins.reserve(qp.size());
-      sg.quantification_max_exp.reserve(qp.size());
-      for (const auto& [bin, exp] : qp)
-      {
-        sg.quantification_bins.push_back(bin);
-        sg.quantification_max_exp.push_back(exp);
-      }
-
-      result.push_back(std::move(sg));
     }
 
     return result;
