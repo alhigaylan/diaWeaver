@@ -843,13 +843,14 @@ namespace OpenMS
 
     const bool im_detected = (has_im_flag != 0);
 
-    // Derive record count from file size (each record is 12 bytes: 4+8)
+    // Derive record count from file size (each record is 4 + sizeof(FragmentEntry) bytes)
+    static constexpr long RECORD_SIZE = 4 + static_cast<long>(sizeof(FragmentEntry));
     std::fseek(fp, 0, SEEK_END);
     const long file_size = std::ftell(fp);
     std::fseek(fp, 12, SEEK_SET);   // rewind to first record
 
     const uint64_t n_records = (file_size > 12)
-      ? static_cast<uint64_t>(file_size - 12) / 12
+      ? static_cast<uint64_t>(file_size - 12) / RECORD_SIZE
       : 0;
 
     OPENMS_LOG_INFO << "[DiaWeaverAlign] Finalizing: reading " << n_records
