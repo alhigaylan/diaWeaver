@@ -385,7 +385,8 @@ namespace OpenMS
                                              uint32_t isotope_error_tol         = 3,
                                              double   min_overlap_similarity    = 0.7,
                                              double   min_within_file_jaccard   = 0.7,
-                                             uint32_t singleton_min_frags       = 50) const;
+                                             uint32_t singleton_min_frags       = 50,
+                                             double   min_consensus_fraction    = 0.3) const;
 
     /**
       @brief Returns the spectrum_ids stored in a given precursor (m/z bin, IM bin) cell.
@@ -522,25 +523,19 @@ namespace OpenMS
                    bool                                              im_detected);
 
     /**
-      @brief Split one FeatureGroup into sub-groups using complete-linkage
-             re-clustering on the Overlap Coefficient of apex fingerprints.
+      @brief Split one FeatureGroup into coherent per-peptide sub-groups.
 
-      For each pair of members the pairwise positional tolerances are checked
-      first (apex RT within @p rt_tolerance, drift time within @p im_tolerance
-      when IM data is present, isotope-corrected precursor m/z within
-      @p precursor_ppm_tolerance). Pairs that violate any tolerance are
-      assigned a similarity of 0 and can never be merged. For pairs that pass
-      the positional checks the Overlap Coefficient (|A∩B| / min(|A|,|B|)) is
-      computed over their sorted flat_bin_idx sets; this metric is insensitive
-      to the size asymmetry that arises when one member's fingerprint is
-      inflated by being from the same LC-MS run as the query. Complete-linkage
-      agglomerative clustering merges the pair with the highest similarity; a
-      merge is accepted only when the similarity exceeds @p min_overlap_similarity.
-      For each resulting sub-group, quantification_bins (strict intersection of
-      all members' apex fingerprints, further restricted to bins absent from every
-      other sub-group's union fingerprint) and min_internal_overlap are populated.
-      Singleton sub-clusters are discarded. Returns an empty vector when all
-      members become singletons.
+      Phase 1 performs within-file Jaccard clustering to merge same-file scans
+      of the same compound into file-cluster representatives. Phase 2 builds a
+      maximum spanning forest over cross-file file-cluster pairs (Kruskal's on
+      Overlap Coefficient edge weights, subject to RT/IM/m/z positional checks).
+      Phase 3 applies divisive recursion guided by the cross-file fragment
+      intersection: for each MST connected component, the file_isect (bins
+      agreed on by every file) is tested against @p min_consensus_fraction of
+      the smallest file-cluster fingerprint. If the test passes the component
+      is a coherent sub-group; otherwise the minimum-weight MST edge is cut and
+      both halves are re-tested independently. Singletons produced by cutting
+      are gated by @p singleton_min_frags (same criterion as groupFeatures).
     */
     static std::vector<FeatureGroup> splitByOverlap_(
       const FeatureGroup&                         group,
@@ -555,7 +550,8 @@ namespace OpenMS
       double                                       precursor_ppm_tolerance,
       uint32_t                                     isotope_error_tol,
       bool                                         use_im,
-      uint32_t                                     singleton_min_frags);
+      uint32_t                                     singleton_min_frags,
+      double                                       min_consensus_fraction);
 
     // --- DIA window bounds (stored in .dwaindex for self-describing files) ---
     double window_lower_mz_{-1.0};

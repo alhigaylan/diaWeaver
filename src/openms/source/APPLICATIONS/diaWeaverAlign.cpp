@@ -1740,7 +1740,8 @@ namespace OpenMS
     double                                       precursor_ppm_tolerance,
     uint32_t                                     isotope_error_tol,
     bool                                         use_im,
-    uint32_t                                     singleton_min_frags)
+    uint32_t                                     singleton_min_frags,
+    double                                       min_consensus_fraction)
   {
     const int N = static_cast<int>(group.spectrum_ids.size());
 
@@ -1973,13 +1974,16 @@ namespace OpenMS
     // Phase 3: Divisive recursion guided by cross-file fragment intersection.
     //
     // For each MST connected component: compute file_isect (bins every file in
-    // the component agrees on). If |file_isect| >= singleton_min_frags the
-    // group is coherent — keep as one sub-cluster. Otherwise cut the minimum-
-    // weight MST edge (the weakest cross-file link, most likely the cross-
-    // peptide bridge), split into two sub-components, and repeat on each part
-    // independently. file_isect is recomputed fresh per sub-component at every
-    // level so that removing a heterogeneous member reveals the true
-    // intersection of the remainder.
+    // the component agrees on) and min_fp (smallest file-cluster fingerprint).
+    // Coherence test: min_fp >= 3 AND |file_isect| >= min_consensus_fraction *
+    // min_fp. Using min_fp as denominator makes the threshold scale with peptide
+    // size — a small peptide with 6 detectable fragments needs fewer intersecting
+    // bins than a large one with 40. The floor of 3 prevents a near-empty
+    // file-cluster from making the fraction trivially satisfy the threshold.
+    // If the test passes the component is kept as one sub-cluster. Otherwise the
+    // minimum-weight MST edge (most likely the cross-peptide bridge) is cut and
+    // both halves are re-tested independently. file_isect and min_fp are
+    // recomputed fresh per sub-component at every level.
     //
     // Implemented as an explicit worklist (iterative) to avoid deep call stacks.
     // Singletons produced by cutting — or isolated from the start — are gated
@@ -2027,9 +2031,14 @@ namespace OpenMS
       }
 
       // --- Coherence test: recompute file_isect fresh for this component ---
+      // min_fp tracks the smallest file-cluster fingerprint — used as the
+      // denominator for the fraction-based coherence threshold so the test
+      // scales naturally with peptide size rather than using a hard count.
+      Size min_fp = file_clusters[fcs[0]].union_fp.size();
       std::vector<uint32_t> isect = file_clusters[fcs[0]].union_fp;
       for (Size k = 1; k < fcs.size(); ++k)
       {
+        min_fp = std::min(min_fp, file_clusters[fcs[k]].union_fp.size());
         std::vector<uint32_t> tmp;
         std::set_intersection(isect.begin(), isect.end(),
                               file_clusters[fcs[k]].union_fp.begin(),
@@ -2038,7 +2047,13 @@ namespace OpenMS
         isect = std::move(tmp);
       }
 
-      if (isect.size() >= static_cast<Size>(singleton_min_frags))
+      // Coherent when: (a) the weakest file detected >= 3 bins (guard against
+      // degenerate file-clusters with near-zero detections that would make the
+      // fraction trivially satisfy any threshold), AND (b) the cross-file
+      // intersection covers at least min_consensus_fraction of that weakest file.
+      const bool coherent = (min_fp >= 3) &&
+        (isect.size() >= static_cast<Size>(min_consensus_fraction * static_cast<double>(min_fp)));
+      if (coherent)
       {
         // Every file agrees on enough fragments: coherent single-peptide group.
         Sub_ s;
@@ -2235,7 +2250,8 @@ namespace OpenMS
                                  uint32_t isotope_error_tol,
                                  double   min_overlap_similarity,
                                  double   min_within_file_jaccard,
-                                 uint32_t singleton_min_frags) const
+                                 uint32_t singleton_min_frags,
+                                 double   min_consensus_fraction) const
   {
     if (traces.empty() || precursor_offsets_.empty()) return {};
 
@@ -2581,7 +2597,8 @@ namespace OpenMS
                                     min_within_file_jaccard,
                                     rt_tolerance, im_tolerance,
                                     precursor_ppm_tolerance, isotope_error_tol,
-                                    use_im, singleton_min_frags);
+                                    use_im, singleton_min_frags,
+                                    min_consensus_fraction);
         OPENMS_LOG_DEBUG << "[DiaWeaverAlign::groupFeatures] sub-clustered group of "
                          << group.spectrum_ids.size() << " → " << subs.size()
                          << " sub-group(s)" << std::endl;
