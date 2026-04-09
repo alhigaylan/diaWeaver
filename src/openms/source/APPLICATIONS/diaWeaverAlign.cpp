@@ -1419,13 +1419,12 @@ namespace OpenMS
     // -----------------------------------------------------------------------
     // Multi-apex Phase 1: find top-K local RT maxima per spectrum_id.
     //
-    // For each trace, scan the (rts, scores) time series for local maxima that
-    // are at least apex_min_separation_s apart.  Select the top-K highest-
-    // scoring ones greedily (score desc).  When apex_candidate_count == 1,
-    // short-circuit to the global apex from apex_info to match the old O(1)
-    // path.  A point i is a local maximum when scores[i] > scores[i-1] (strict
-    // left, or i==0) and scores[i] >= scores[i+1] (or i==n-1); this picks the
-    // first point of any score plateau and avoids redundant candidates.
+    // No fingerprints are collected here — fragments are only recorded for
+    // the single confirmed apex after precursor-level voting in Phase 2.
+    //
+    // A point i is a local maximum when scores[i] > scores[i-1] (strict left,
+    // or i==0) and scores[i] >= scores[i+1] (or i==n-1); this selects the
+    // first point of a plateau and avoids duplicate candidates from flat runs.
     // -----------------------------------------------------------------------
 
     struct ApexCandidate_
@@ -1433,7 +1432,6 @@ namespace OpenMS
       double   rt{-1.0};
       uint32_t score{0};
       int      query_idx{-1};
-      std::vector<ApexFragment> fingerprint;
     };
 
     std::vector<std::vector<ApexCandidate_>> candidates(result.size());
@@ -1447,7 +1445,7 @@ namespace OpenMS
       {
         // Fast path: single-candidate mode — use the global apex directly.
         const ApexInfo& best = apex_info[trace.spectrum_id];
-        cands.push_back({best.rt, best.score, best.query_idx, {}});
+        cands.push_back({best.rt, best.score, best.query_idx});
         continue;
       }
 
@@ -1475,108 +1473,43 @@ namespace OpenMS
           { sep_ok = false; break; }
         }
         if (sep_ok)
-          cands.push_back({trace.rts[idx], trace.scores[idx], qi[idx], {}});
+          cands.push_back({trace.rts[idx], trace.scores[idx], qi[idx]});
       }
 
-      // Guarantee at least one candidate (monotone trace or single-point trace).
+      // Guarantee at least one candidate (monotone or single-point trace).
       if (cands.empty())
       {
         const ApexInfo& best = apex_info[trace.spectrum_id];
-        cands.push_back({best.rt, best.score, best.query_idx, {}});
+        cands.push_back({best.rt, best.score, best.query_idx});
       }
     }
 
-    // -----------------------------------------------------------------------
-    // Multi-apex Phase 2: collect fingerprints for every candidate.
-    //
-    // spec_to_result_idx: spectrum_id → index in result (direct access).
-    // spec_to_fp:         spectrum_id → pointer to the ApexCandidate_::fingerprint
-    //                     vector that receives hits from the current query scan.
-    // query_to_cands:     for each query spectrum index q, the list of
-    //                     (result_idx, candidate_k) pairs for which q is the apex.
-    // Arrays are reset via target_list after each query to avoid O(N) scans.
-    // -----------------------------------------------------------------------
-
-    std::vector<int>     spec_to_result_idx(spectrum_entries_.size(), -1);
-    std::vector<uint8_t> is_target(spectrum_entries_.size(), 0);
-    std::vector<std::vector<ApexFragment>*> spec_to_fp(spectrum_entries_.size(), nullptr);
-    std::vector<uint32_t> target_list;
-
+    // spec_to_result_idx is needed by the voting pass (Phase 2) and the
+    // fingerprint collection (Phase 3).
+    std::vector<int> spec_to_result_idx(spectrum_entries_.size(), -1);
     for (int r = 0; r < static_cast<int>(result.size()); ++r)
       spec_to_result_idx[result[r].spectrum_id] = r;
 
-    std::vector<std::vector<std::pair<int, int>>> query_to_cands(query_spectra.size());
-    for (int r = 0; r < static_cast<int>(result.size()); ++r)
-      for (int k = 0; k < static_cast<int>(candidates[r].size()); ++k)
-        query_to_cands[candidates[r][k].query_idx].emplace_back(r, k);
-
-    for (int q = 0; q < static_cast<int>(query_spectra.size()); ++q)
-    {
-      if (query_to_cands[q].empty()) continue;
-
-      for (const auto& [r, k] : query_to_cands[q])
-      {
-        const uint32_t sid = result[r].spectrum_id;
-        is_target[sid] = 1;
-        spec_to_fp[sid] = &candidates[r][k].fingerprint;
-        target_list.push_back(sid);
-      }
-
-      const MSSpectrum& apex_spec = *query_spectra[q];
-      Size im_array_idx = 0;
-      if (query_has_im)
-        im_array_idx = apex_spec.getIMData().first;
-
-      for (Size i = 0; i < apex_spec.size(); ++i)
-      {
-        const double mz = apex_spec[i].getMZ();
-        if (mz < lower_mz_ || mz >= upper_mz_) continue;
-        const float    intensity = apex_spec[i].getIntensity();
-        const uint32_t mz_bin   = toBinIdx_(mz);
-
-        uint32_t im_bin = 0;
-        if (query_has_im)
-        {
-          const float im = apex_spec.getFloatDataArrays()[im_array_idx][i];
-          if (im < lower_im_ || im >= upper_im_) continue;
-          im_bin = toBinIdx_im_(im);
-        }
-
-        const uint32_t flat_idx = query_has_im
-          ? mz_bin * n_im_bins_ + im_bin
-          : mz_bin;
-
-        auto [begin, end] = getBinEntries(mz_bin, im_bin);
-        for (const FragmentEntry* fe = begin; fe != end; ++fe)
-        {
-          if (is_target[fe->spectrum_id])
-            spec_to_fp[fe->spectrum_id]->push_back(
-              {flat_idx, intensity, fe->log2_intensity / 2048.0f});
-        }
-      }
-
-      for (uint32_t sid : target_list) { is_target[sid] = 0; spec_to_fp[sid] = nullptr; }
-      target_list.clear();
-    }
-
     // -----------------------------------------------------------------------
-    // Multi-apex Phase 3: cross-file vote counting (RT / IM / m/z / charge).
+    // Multi-apex Phase 2: cross-file vote counting (m/z / IM / charge / RT).
     //
-    // For each ordered pair of traces (ri < rj) from different source files
-    // that share the same precursor identity (IM + m/z + charge within their
-    // respective tolerances), iterate over every K_i × K_j candidate pair.
-    // A candidate combination that passes the RT check earns one vote for
-    // candidate k_i from file j's source, and one vote for candidate k_j from
-    // file i's source.  Each source file casts at most one vote per
-    // (trace, candidate) pair across all its spectrum_ids.
+    // For each ordered pair of traces (ri < rj) from different source files,
+    // first verify that the precursors agree on m/z, IM, and charge.  Only
+    // then iterate over the K_i × K_j candidate pairs and check RT.  A pair
+    // that passes the RT check earns one vote for candidate k_i from file j
+    // and one vote for candidate k_j from file i.  Each source file casts at
+    // most one vote per (trace, candidate) across all its spectrum_ids.
+    //
+    // Fingerprints are NOT collected here; they are collected in Phase 3 only
+    // for the single confirmed apex per trace.
     //
     // Voting is skipped when fewer than two source files are present, when the
-    // precursor index has not been built, or when every trace has a single
-    // candidate (apex_candidate_count == 1 or short monotone traces).
+    // precursor index has not been built, or when every trace has exactly one
+    // candidate.
     // -----------------------------------------------------------------------
 
     // candidate_votes[r][k]           = votes received by candidate k of trace r.
-    // voted_files[r][k * n_files + f] = 1 when file f has already voted for (r, k).
+    // voted_files[r][k * n_files + f] = 1 when file f has already voted for (r,k).
     std::vector<std::vector<uint32_t>> candidate_votes;
     std::vector<std::vector<uint8_t>>  voted_files;
 
@@ -1675,7 +1608,7 @@ namespace OpenMS
                 }
                 if (!prec_ok) continue;
 
-                // One vote per source file per (trace, candidate).
+                // Precursors agree — now check RT per candidate pair.
                 const Size fi = se_i.source_file_idx;
                 const Size fj = se_j.source_file_idx;
 
@@ -1710,11 +1643,15 @@ namespace OpenMS
     }
 
     // -----------------------------------------------------------------------
-    // Multi-apex Phase 4: confirm apex per trace.
+    // Multi-apex Phase 3: confirm apex, then collect fingerprints.
     //
-    // Priority: (1) most cross-file votes, (2) highest apex_score,
-    // (3) lowest candidate index (greedy first = highest-score, stable tie).
+    // Select the confirmed candidate per trace (votes → score → index), write
+    // apex_rt / apex_score, then collect the apex fingerprint in a single
+    // re-scan of each confirmed query spectrum.  Fingerprints are only
+    // collected for confirmed apices, matching the cost of the original code.
     // -----------------------------------------------------------------------
+
+    std::vector<std::vector<uint32_t>> apex_groups(query_spectra.size());
 
     for (Size r = 0; r < result.size(); ++r)
     {
@@ -1724,16 +1661,68 @@ namespace OpenMS
         const uint32_t votes_k    = need_voting ? candidate_votes[r][k]      : 0u;
         const uint32_t votes_best = need_voting ? candidate_votes[r][best_k] : 0u;
 
-        if (votes_k > votes_best)                                           { best_k = k; continue; }
+        if (votes_k > votes_best)                                  { best_k = k; continue; }
         if (votes_k == votes_best &&
-            candidates[r][k].score > candidates[r][best_k].score)          { best_k = k; }
-        // Tie in both: keep best_k (lowest index = first greedy pick).
+            candidates[r][k].score > candidates[r][best_k].score) { best_k = k; }
+        // Tie in both: keep best_k (lowest index = first greedy pick = highest score).
       }
 
-      auto& confirmed            = candidates[r][best_k];
-      result[r].apex_rt          = confirmed.rt;
-      result[r].apex_score       = confirmed.score;
-      result[r].apex_fingerprint = std::move(confirmed.fingerprint);
+      const auto& confirmed = candidates[r][best_k];
+      result[r].apex_rt    = confirmed.rt;
+      result[r].apex_score = confirmed.score;
+      apex_groups[confirmed.query_idx].push_back(result[r].spectrum_id);
+    }
+
+    // Collect fingerprints for confirmed apices only.
+    // is_target / target_list: sparse-reset to avoid O(N_index) scans.
+    std::vector<uint8_t>  is_target(spectrum_entries_.size(), 0);
+    std::vector<uint32_t> target_list;
+
+    for (int q = 0; q < static_cast<int>(query_spectra.size()); ++q)
+    {
+      if (apex_groups[q].empty()) continue;
+
+      for (uint32_t sid : apex_groups[q])
+      {
+        is_target[sid] = 1;
+        target_list.push_back(sid);
+      }
+
+      const MSSpectrum& apex_spec = *query_spectra[q];
+      Size im_array_idx = 0;
+      if (query_has_im)
+        im_array_idx = apex_spec.getIMData().first;
+
+      for (Size i = 0; i < apex_spec.size(); ++i)
+      {
+        const double mz = apex_spec[i].getMZ();
+        if (mz < lower_mz_ || mz >= upper_mz_) continue;
+        const float    intensity = apex_spec[i].getIntensity();
+        const uint32_t mz_bin   = toBinIdx_(mz);
+
+        uint32_t im_bin = 0;
+        if (query_has_im)
+        {
+          const float im = apex_spec.getFloatDataArrays()[im_array_idx][i];
+          if (im < lower_im_ || im >= upper_im_) continue;
+          im_bin = toBinIdx_im_(im);
+        }
+
+        const uint32_t flat_idx = query_has_im
+          ? mz_bin * n_im_bins_ + im_bin
+          : mz_bin;
+
+        auto [begin, end] = getBinEntries(mz_bin, im_bin);
+        for (const FragmentEntry* fe = begin; fe != end; ++fe)
+        {
+          if (is_target[fe->spectrum_id])
+            result[spec_to_result_idx[fe->spectrum_id]].apex_fingerprint.push_back(
+              {flat_idx, intensity, fe->log2_intensity / 2048.0f});
+        }
+      }
+
+      for (uint32_t sid : target_list) is_target[sid] = 0;
+      target_list.clear();
     }
 
     // Stats logging (after apex confirmation so apex_score is valid).
