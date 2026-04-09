@@ -1769,7 +1769,8 @@ namespace OpenMS
     double                                       im_tolerance,
     double                                       precursor_ppm_tolerance,
     uint32_t                                     isotope_error_tol,
-    bool                                         use_im)
+    bool                                         use_im,
+    uint32_t                                     singleton_min_frags)
   {
     const int N = static_cast<int>(group.spectrum_ids.size());
 
@@ -2016,8 +2017,6 @@ namespace OpenMS
       subs.push_back(std::move(s));
     }
 
-    if (subs.empty()) return {};
-
     // =========================================================================
     // Assemble one FeatureGroup per sub-cluster.
     //
@@ -2026,6 +2025,11 @@ namespace OpenMS
     //                           (bins every FILE agrees on, not every individual scan)
     //   quantification_bins   — file_isect filtered to bins absent from all other subs
     //   quantification_max_exp — max experimental intensity per quantification bin
+    //
+    // Isolated file-clusters (left alone by complete-linkage) are treated as
+    // singletons using the same singleton_min_frags gate as groupFeatures.
+    // This is consistent: a spectrum_id should not be silently dropped merely
+    // because it was placed in a large group that later got sub-clustered.
     // =========================================================================
     const Size K = subs.size();
 
@@ -2125,6 +2129,55 @@ namespace OpenMS
       }
 
       result.push_back(std::move(fg));
+    }
+
+    // =========================================================================
+    // Singleton pass: isolated file-clusters that did not join any multi-member
+    // sub-cluster.  Apply the same singleton_min_frags gate used by groupFeatures
+    // so the behavior is consistent regardless of whether sub-clustering fired.
+    // =========================================================================
+    for (int c = 0; c < M; ++c)
+    {
+      if (!active[c] || clust[c].size() != 1) continue;
+
+      const FileCluster_& fc = file_clusters[clust[c][0]];
+
+      // Gate on the maximum apex_score across all spectrum_ids in the cluster.
+      uint32_t max_score = 0;
+      for (int li : fc.local_idxs)
+        max_score = std::max(max_score, traces[ti[li]].apex_score);
+      if (max_score < singleton_min_frags) continue;
+
+      FeatureGroup sg;
+      sg.spectrum_ids.reserve(fc.local_idxs.size());
+      double rt_sum = 0.0;
+      std::unordered_map<uint32_t, float> bin_max;
+
+      for (int li : fc.local_idxs)
+      {
+        sg.spectrum_ids.push_back(group.spectrum_ids[li]);
+        rt_sum += traces[ti[li]].apex_rt;
+        for (const ApexFragment& af : traces[ti[li]].apex_fingerprint)
+        {
+          auto it = bin_max.find(af.flat_bin_idx);
+          if (it == bin_max.end() || af.experimental_intensity > it->second)
+            bin_max[af.flat_bin_idx] = af.experimental_intensity;
+        }
+      }
+      sg.mean_apex_rt = rt_sum / static_cast<double>(fc.local_idxs.size());
+
+      std::vector<std::pair<uint32_t, float>> qp(bin_max.begin(), bin_max.end());
+      std::sort(qp.begin(), qp.end(),
+        [](const auto& a, const auto& b) { return a.first < b.first; });
+      sg.quantification_bins.reserve(qp.size());
+      sg.quantification_max_exp.reserve(qp.size());
+      for (const auto& [bin, exp] : qp)
+      {
+        sg.quantification_bins.push_back(bin);
+        sg.quantification_max_exp.push_back(exp);
+      }
+
+      result.push_back(std::move(sg));
     }
 
     return result;
@@ -2485,7 +2538,7 @@ namespace OpenMS
                                     min_within_file_jaccard,
                                     rt_tolerance, im_tolerance,
                                     precursor_ppm_tolerance, isotope_error_tol,
-                                    use_im);
+                                    use_im, singleton_min_frags);
         OPENMS_LOG_DEBUG << "[DiaWeaverAlign::groupFeatures] sub-clustered group of "
                          << group.spectrum_ids.size() << " → " << subs.size()
                          << " sub-group(s)" << std::endl;

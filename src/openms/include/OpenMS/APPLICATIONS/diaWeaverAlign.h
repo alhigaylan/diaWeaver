@@ -555,7 +555,8 @@ namespace OpenMS
       double                                       im_tolerance,
       double                                       precursor_ppm_tolerance,
       uint32_t                                     isotope_error_tol,
-      bool                                         use_im);
+      bool                                         use_im,
+      uint32_t                                     singleton_min_frags);
 
     // --- DIA window bounds (stored in .dwaindex for self-describing files) ---
     double window_lower_mz_{-1.0};
