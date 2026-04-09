@@ -1605,7 +1605,6 @@ namespace OpenMS
                     }
                   }
                 }
-              }
             }
           }
         }
