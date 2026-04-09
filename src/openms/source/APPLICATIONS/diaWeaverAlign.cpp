@@ -1271,8 +1271,7 @@ namespace OpenMS
                                    uint32_t apex_candidate_count,
                                    double   apex_min_separation_s,
                                    double   apex_voting_rt_tol,
-                                   double   apex_voting_im_tol,
-                                   uint32_t isotope_error_tol) const
+                                   double   apex_voting_im_tol) const
   {
     // Collect pointers to query spectra in load order (ascending RT).
     //
@@ -1534,8 +1533,6 @@ namespace OpenMS
         voted_files[r].assign(candidates[r].size() * n_files, 0u);
       }
 
-      static constexpr double NEUTRON_MASS = 1.003355;
-
       for (Size ri = 0; ri < result.size(); ++ri)
       {
         const SpectrumEntry& se_i = spectrum_entries_[result[ri].spectrum_id];
@@ -1547,68 +1544,41 @@ namespace OpenMS
         const int im_hi = query_has_im
           ? std::min((int)n_im_bins_ - 1, (int)im_bin_i + 1) : 0;
 
-        std::vector<std::pair<int, int>> mz_ranges;
-        mz_ranges.reserve(1 + 2 * isotope_error_tol);
+        // Exact m/z match only — no isotope offsets during apex voting.
+        // Isotope error tolerance is applied in groupFeatures where confirmed
+        // apices from different files are grouped; here we only want spectrum_ids
+        // that capture the exact same precursor ion to vote on each other's RT.
+        const uint32_t mz_bin_i = toPrecursorBinIdx_(se_i.precursor_mz);
+        const int mz_lo = std::max(0, (int)mz_bin_i - 1);
+        const int mz_hi = std::min((int)n_precursor_bins_ - 1, (int)mz_bin_i + 1);
 
-        auto add_mz_range = [&](double target_mz)
+        for (int mb = mz_lo; mb <= mz_hi; ++mb)
         {
-          if (target_mz < lower_precursor_mz_ || target_mz >= upper_precursor_mz_) return;
-          const uint32_t bin = toPrecursorBinIdx_(target_mz);
-          mz_ranges.push_back({
-            std::max(0, (int)bin - 1),
-            std::min((int)n_precursor_bins_ - 1, (int)bin + 1)
-          });
-        };
-
-        add_mz_range(se_i.precursor_mz);
-        if (isotope_error_tol > 0 && se_i.precursor_charge > 0)
-        {
-          for (uint32_t iso_k = 1; iso_k <= isotope_error_tol; ++iso_k)
+          for (int ib = im_lo; ib <= im_hi; ++ib)
           {
-            const double offset =
-              static_cast<double>(iso_k) * NEUTRON_MASS / se_i.precursor_charge;
-            add_mz_range(se_i.precursor_mz + offset);
-            add_mz_range(se_i.precursor_mz - offset);
-          }
-        }
+            auto [prec_beg, prec_end] = getPrecursorBinEntries(
+              static_cast<uint32_t>(mb), static_cast<uint32_t>(ib));
 
-        for (const auto& [mz_lo, mz_hi] : mz_ranges)
-        {
-          for (int mb = mz_lo; mb <= mz_hi; ++mb)
-          {
-            for (int ib = im_lo; ib <= im_hi; ++ib)
+            for (const uint32_t* sid_ptr = prec_beg; sid_ptr != prec_end; ++sid_ptr)
             {
-              auto [prec_beg, prec_end] = getPrecursorBinEntries(
-                static_cast<uint32_t>(mb), static_cast<uint32_t>(ib));
+              const int rj = spec_to_result_idx[*sid_ptr];
+              if (rj <= static_cast<int>(ri)) continue;
 
-              for (const uint32_t* sid_ptr = prec_beg; sid_ptr != prec_end; ++sid_ptr)
-              {
-                const int rj = spec_to_result_idx[*sid_ptr];
-                if (rj <= static_cast<int>(ri)) continue;
+              const SpectrumEntry& se_j = spectrum_entries_[*sid_ptr];
+              if (se_i.source_file_idx == se_j.source_file_idx) continue;
+              if (se_i.precursor_charge != se_j.precursor_charge)  continue;
 
-                const SpectrumEntry& se_j = spectrum_entries_[*sid_ptr];
-                if (se_i.source_file_idx == se_j.source_file_idx) continue;
-                if (se_i.precursor_charge != se_j.precursor_charge)  continue;
+              if (query_has_im &&
+                  std::abs(se_i.drift_time - se_j.drift_time) > apex_voting_im_tol)
+                continue;
 
-                if (query_has_im &&
-                    std::abs(se_i.drift_time - se_j.drift_time) > apex_voting_im_tol)
-                  continue;
+              // Exact precursor m/z check (no isotope correction).
+              const double mz_diff = se_i.precursor_mz - se_j.precursor_mz;
+              const double mean_mz = (se_i.precursor_mz + se_j.precursor_mz) * 0.5;
+              const double ppm_thr = precursor_ppm_tolerance_ * mean_mz / 1e6;
+              if (std::abs(mz_diff) > ppm_thr) continue;
 
-                // Isotope-corrected precursor m/z check.
-                const double mz_diff = se_i.precursor_mz - se_j.precursor_mz;
-                const double mean_mz = (se_i.precursor_mz + se_j.precursor_mz) * 0.5;
-                const double ppm_thr = precursor_ppm_tolerance_ * mean_mz / 1e6;
-                bool prec_ok = false;
-                for (int iso_k = -(int)isotope_error_tol;
-                     iso_k <= (int)isotope_error_tol && !prec_ok; ++iso_k)
-                {
-                  if (std::abs(mz_diff -
-                      iso_k * NEUTRON_MASS / se_i.precursor_charge) <= ppm_thr)
-                    prec_ok = true;
-                }
-                if (!prec_ok) continue;
-
-                // Precursors agree — now check RT per candidate pair.
+              // Precursors agree — now check RT per candidate pair.
                 const Size fi = se_i.source_file_idx;
                 const Size fj = se_j.source_file_idx;
 

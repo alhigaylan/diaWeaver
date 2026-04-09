@@ -527,7 +527,7 @@ protected:
       }
 
       const auto traces = aligner.matchExperiment(window_query, min_peaks,
-        apex_cand_count, apex_min_sep_s, rt_tol, im_tol, iso_err_tol);
+        apex_cand_count, apex_min_sep_s, rt_tol, im_tol);
       OPENMS_LOG_INFO << "    Score traces: " << traces.size() << std::endl;
 
       // ------------------------------------------------------------------

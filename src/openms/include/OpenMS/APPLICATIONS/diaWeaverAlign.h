@@ -337,8 +337,7 @@ namespace OpenMS
                                              uint32_t apex_candidate_count  = 3,
                                              double   apex_min_separation_s = 30.0,
                                              double   apex_voting_rt_tol    = 10.0,
-                                             double   apex_voting_im_tol    = 0.01,
-                                             uint32_t isotope_error_tol     = 3) const;
+                                             double   apex_voting_im_tol    = 0.01) const;
 
     /**
       @brief Build the precursor index from the loaded spectrum metadata.
