@@ -1266,7 +1266,13 @@ namespace OpenMS
   }
 
   std::vector<DiaWeaverAlign::ScoreTrace>
-  DiaWeaverAlign::matchExperiment(const MSExperiment& experiment, uint32_t min_matched_peaks) const
+  DiaWeaverAlign::matchExperiment(const MSExperiment& experiment,
+                                   uint32_t min_matched_peaks,
+                                   uint32_t apex_candidate_count,
+                                   double   apex_min_separation_s,
+                                   double   apex_voting_rt_tol,
+                                   double   apex_voting_im_tol,
+                                   uint32_t isotope_error_tol) const
   {
     // Collect pointers to query spectra in load order (ascending RT).
     //
@@ -1369,6 +1375,10 @@ namespace OpenMS
     std::unordered_map<uint32_t, ScoreTrace> merged;
     std::unordered_map<uint32_t, ApexInfo>   apex_info;
 
+    // merged_qi accumulates the query_indices parallel to each trace's rts/scores.
+    // Built here so they remain accessible after thread_traces goes out of scope.
+    std::unordered_map<uint32_t, std::vector<int>> merged_qi; // sid → query_indices
+
     for (Size t = 0; t < thread_traces.size(); ++t)
     {
       for (auto& [sid, local_entry] : thread_traces[t])
@@ -1379,6 +1389,10 @@ namespace OpenMS
                          local_entry.rts.begin(), local_entry.rts.end());
         trace.scores.insert(trace.scores.end(),
                             local_entry.scores.begin(), local_entry.scores.end());
+
+        auto& qi = merged_qi[sid];
+        qi.insert(qi.end(),
+                  local_entry.query_indices.begin(), local_entry.query_indices.end());
 
         ApexInfo& best = apex_info[sid];
         for (Size j = 0; j < local_entry.scores.size(); ++j)
@@ -1402,70 +1416,109 @@ namespace OpenMS
       [](const ScoreTrace& a, const ScoreTrace& b)
       { return a.spectrum_id < b.spectrum_id; });
 
-    // Populate apex fields and group spectrum_ids by their apex query spectrum index.
-    std::vector<std::vector<uint32_t>> apex_groups(query_spectra.size());
-    for (ScoreTrace& trace : result)
-    {
-      const ApexInfo& best = apex_info[trace.spectrum_id];
-      trace.apex_score = best.score;
-      trace.apex_rt    = best.rt;
-      apex_groups[best.query_idx].push_back(trace.spectrum_id);
-    }
+    // -----------------------------------------------------------------------
+    // Multi-apex Phase 1: find top-K local RT maxima per spectrum_id.
+    //
+    // For each trace, scan the (rts, scores) time series for local maxima that
+    // are at least apex_min_separation_s apart.  Select the top-K highest-
+    // scoring ones greedily (score desc).  When apex_candidate_count == 1,
+    // short-circuit to the global apex from apex_info to match the old O(1)
+    // path.  A point i is a local maximum when scores[i] > scores[i-1] (strict
+    // left, or i==0) and scores[i] >= scores[i+1] (or i==n-1); this picks the
+    // first point of any score plateau and avoids redundant candidates.
+    // -----------------------------------------------------------------------
 
-    if (!result.empty())
+    struct ApexCandidate_
     {
-      uint32_t min_apex = result[0].apex_score;
-      uint32_t max_apex = result[0].apex_score;
-      uint64_t sum_apex = 0;
-      for (const ScoreTrace& t : result)
+      double   rt{-1.0};
+      uint32_t score{0};
+      int      query_idx{-1};
+      std::vector<ApexFragment> fingerprint;
+    };
+
+    std::vector<std::vector<ApexCandidate_>> candidates(result.size());
+
+    for (Size r = 0; r < result.size(); ++r)
+    {
+      const ScoreTrace& trace = result[r];
+      auto& cands = candidates[r];
+
+      if (apex_candidate_count == 1)
       {
-        if (t.apex_score < min_apex) min_apex = t.apex_score;
-        if (t.apex_score > max_apex) max_apex = t.apex_score;
-        sum_apex += t.apex_score;
+        // Fast path: single-candidate mode — use the global apex directly.
+        const ApexInfo& best = apex_info[trace.spectrum_id];
+        cands.push_back({best.rt, best.score, best.query_idx, {}});
+        continue;
       }
-      const double mean_apex = static_cast<double>(sum_apex) / result.size();
-      OPENMS_LOG_DEBUG << "[DiaWeaverAlign::matchExperiment] "
-                       << query_spectra.size() << " query spectra  "
-                       << result.size() << " index spectrum_ids traced  "
-                       << "apex_matched_peaks: min=" << min_apex
-                       << " max=" << max_apex
-                       << " mean=" << mean_apex << std::endl;
-    }
-    else
-    {
-      OPENMS_LOG_DEBUG << "[DiaWeaverAlign::matchExperiment] "
-                       << query_spectra.size() << " query spectra  "
-                       << "no index spectrum_ids traced (threshold too high or empty index)"
-                       << std::endl;
+
+      const auto& qi = merged_qi.at(trace.spectrum_id);
+      const int   n  = static_cast<int>(trace.rts.size());
+
+      std::vector<int> local_max;
+      for (int i = 0; i < n; ++i)
+      {
+        const bool left_ok  = (i == 0)     || (trace.scores[i] > trace.scores[i-1]);
+        const bool right_ok = (i == n - 1) || (trace.scores[i] >= trace.scores[i+1]);
+        if (left_ok && right_ok) local_max.push_back(i);
+      }
+
+      std::sort(local_max.begin(), local_max.end(),
+        [&](int a, int b) { return trace.scores[a] > trace.scores[b]; });
+
+      for (int idx : local_max)
+      {
+        if (cands.size() >= apex_candidate_count) break;
+        bool sep_ok = true;
+        for (const auto& existing : cands)
+        {
+          if (std::abs(trace.rts[idx] - existing.rt) < apex_min_separation_s)
+          { sep_ok = false; break; }
+        }
+        if (sep_ok)
+          cands.push_back({trace.rts[idx], trace.scores[idx], qi[idx], {}});
+      }
+
+      // Guarantee at least one candidate (monotone trace or single-point trace).
+      if (cands.empty())
+      {
+        const ApexInfo& best = apex_info[trace.spectrum_id];
+        cands.push_back({best.rt, best.score, best.query_idx, {}});
+      }
     }
 
     // -----------------------------------------------------------------------
-    // Second pass: collect apex fingerprints.
+    // Multi-apex Phase 2: collect fingerprints for every candidate.
     //
-    // For each query spectrum that is the apex for at least one spectrum_id,
-    // re-scan its peaks and record (flat_bin_idx, experimental_intensity) for
-    // every fragment index hit that belongs to a target spectrum_id.
-    //
-    // is_target uses uint8_t (not bool) to avoid std::vector<bool> bit-packing,
-    // which would prevent safe per-element writes from the inner loop.
-    // spec_to_result_idx maps spectrum_id -> index in result for direct access.
-    // Both arrays are O(N_index) and reset via target_list to avoid O(N_index) scans.
+    // spec_to_result_idx: spectrum_id → index in result (direct access).
+    // spec_to_fp:         spectrum_id → pointer to the ApexCandidate_::fingerprint
+    //                     vector that receives hits from the current query scan.
+    // query_to_cands:     for each query spectrum index q, the list of
+    //                     (result_idx, candidate_k) pairs for which q is the apex.
+    // Arrays are reset via target_list after each query to avoid O(N) scans.
     // -----------------------------------------------------------------------
 
     std::vector<int>     spec_to_result_idx(spectrum_entries_.size(), -1);
     std::vector<uint8_t> is_target(spectrum_entries_.size(), 0);
+    std::vector<std::vector<ApexFragment>*> spec_to_fp(spectrum_entries_.size(), nullptr);
     std::vector<uint32_t> target_list;
 
     for (int r = 0; r < static_cast<int>(result.size()); ++r)
       spec_to_result_idx[result[r].spectrum_id] = r;
 
+    std::vector<std::vector<std::pair<int, int>>> query_to_cands(query_spectra.size());
+    for (int r = 0; r < static_cast<int>(result.size()); ++r)
+      for (int k = 0; k < static_cast<int>(candidates[r].size()); ++k)
+        query_to_cands[candidates[r][k].query_idx].emplace_back(r, k);
+
     for (int q = 0; q < static_cast<int>(query_spectra.size()); ++q)
     {
-      if (apex_groups[q].empty()) continue;
+      if (query_to_cands[q].empty()) continue;
 
-      for (uint32_t sid : apex_groups[q])
+      for (const auto& [r, k] : query_to_cands[q])
       {
+        const uint32_t sid = result[r].spectrum_id;
         is_target[sid] = 1;
+        spec_to_fp[sid] = &candidates[r][k].fingerprint;
         target_list.push_back(sid);
       }
 
@@ -1497,13 +1550,218 @@ namespace OpenMS
         for (const FragmentEntry* fe = begin; fe != end; ++fe)
         {
           if (is_target[fe->spectrum_id])
-            result[spec_to_result_idx[fe->spectrum_id]].apex_fingerprint.push_back(
+            spec_to_fp[fe->spectrum_id]->push_back(
               {flat_idx, intensity, fe->log2_intensity / 2048.0f});
         }
       }
 
-      for (uint32_t sid : target_list) is_target[sid] = 0;
+      for (uint32_t sid : target_list) { is_target[sid] = 0; spec_to_fp[sid] = nullptr; }
       target_list.clear();
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-apex Phase 3: cross-file vote counting (RT / IM / m/z / charge).
+    //
+    // For each ordered pair of traces (ri < rj) from different source files
+    // that share the same precursor identity (IM + m/z + charge within their
+    // respective tolerances), iterate over every K_i × K_j candidate pair.
+    // A candidate combination that passes the RT check earns one vote for
+    // candidate k_i from file j's source, and one vote for candidate k_j from
+    // file i's source.  Each source file casts at most one vote per
+    // (trace, candidate) pair across all its spectrum_ids.
+    //
+    // Voting is skipped when fewer than two source files are present, when the
+    // precursor index has not been built, or when every trace has a single
+    // candidate (apex_candidate_count == 1 or short monotone traces).
+    // -----------------------------------------------------------------------
+
+    // candidate_votes[r][k]           = votes received by candidate k of trace r.
+    // voted_files[r][k * n_files + f] = 1 when file f has already voted for (r, k).
+    std::vector<std::vector<uint32_t>> candidate_votes;
+    std::vector<std::vector<uint8_t>>  voted_files;
+
+    const bool need_voting = [&]() -> bool
+    {
+      if (source_files_.size() < 2)   return false;
+      if (precursor_offsets_.empty()) return false;
+      for (const auto& cands_r : candidates)
+        if (cands_r.size() > 1) return true;
+      return false;
+    }();
+
+    if (need_voting)
+    {
+      const Size n_files = source_files_.size();
+
+      candidate_votes.resize(result.size());
+      voted_files.resize(result.size());
+      for (Size r = 0; r < result.size(); ++r)
+      {
+        candidate_votes[r].assign(candidates[r].size(), 0u);
+        voted_files[r].assign(candidates[r].size() * n_files, 0u);
+      }
+
+      static constexpr double NEUTRON_MASS = 1.003355;
+
+      for (Size ri = 0; ri < result.size(); ++ri)
+      {
+        const SpectrumEntry& se_i = spectrum_entries_[result[ri].spectrum_id];
+        if (se_i.precursor_mz < lower_precursor_mz_ ||
+            se_i.precursor_mz >= upper_precursor_mz_) continue;
+
+        const uint32_t im_bin_i = query_has_im ? toBinIdx_im_(se_i.drift_time) : 0;
+        const int im_lo = query_has_im ? std::max(0, (int)im_bin_i - 1) : 0;
+        const int im_hi = query_has_im
+          ? std::min((int)n_im_bins_ - 1, (int)im_bin_i + 1) : 0;
+
+        std::vector<std::pair<int, int>> mz_ranges;
+        mz_ranges.reserve(1 + 2 * isotope_error_tol);
+
+        auto add_mz_range = [&](double target_mz)
+        {
+          if (target_mz < lower_precursor_mz_ || target_mz >= upper_precursor_mz_) return;
+          const uint32_t bin = toPrecursorBinIdx_(target_mz);
+          mz_ranges.push_back({
+            std::max(0, (int)bin - 1),
+            std::min((int)n_precursor_bins_ - 1, (int)bin + 1)
+          });
+        };
+
+        add_mz_range(se_i.precursor_mz);
+        if (isotope_error_tol > 0 && se_i.precursor_charge > 0)
+        {
+          for (uint32_t iso_k = 1; iso_k <= isotope_error_tol; ++iso_k)
+          {
+            const double offset =
+              static_cast<double>(iso_k) * NEUTRON_MASS / se_i.precursor_charge;
+            add_mz_range(se_i.precursor_mz + offset);
+            add_mz_range(se_i.precursor_mz - offset);
+          }
+        }
+
+        for (const auto& [mz_lo, mz_hi] : mz_ranges)
+        {
+          for (int mb = mz_lo; mb <= mz_hi; ++mb)
+          {
+            for (int ib = im_lo; ib <= im_hi; ++ib)
+            {
+              auto [prec_beg, prec_end] = getPrecursorBinEntries(
+                static_cast<uint32_t>(mb), static_cast<uint32_t>(ib));
+
+              for (const uint32_t* sid_ptr = prec_beg; sid_ptr != prec_end; ++sid_ptr)
+              {
+                const int rj = spec_to_result_idx[*sid_ptr];
+                if (rj <= static_cast<int>(ri)) continue;
+
+                const SpectrumEntry& se_j = spectrum_entries_[*sid_ptr];
+                if (se_i.source_file_idx == se_j.source_file_idx) continue;
+                if (se_i.precursor_charge != se_j.precursor_charge)  continue;
+
+                if (query_has_im &&
+                    std::abs(se_i.drift_time - se_j.drift_time) > apex_voting_im_tol)
+                  continue;
+
+                // Isotope-corrected precursor m/z check.
+                const double mz_diff = se_i.precursor_mz - se_j.precursor_mz;
+                const double mean_mz = (se_i.precursor_mz + se_j.precursor_mz) * 0.5;
+                const double ppm_thr = precursor_ppm_tolerance_ * mean_mz / 1e6;
+                bool prec_ok = false;
+                for (int iso_k = -(int)isotope_error_tol;
+                     iso_k <= (int)isotope_error_tol && !prec_ok; ++iso_k)
+                {
+                  if (std::abs(mz_diff -
+                      iso_k * NEUTRON_MASS / se_i.precursor_charge) <= ppm_thr)
+                    prec_ok = true;
+                }
+                if (!prec_ok) continue;
+
+                // One vote per source file per (trace, candidate).
+                const Size fi = se_i.source_file_idx;
+                const Size fj = se_j.source_file_idx;
+
+                for (int ki = 0; ki < (int)candidates[ri].size(); ++ki)
+                {
+                  for (int kj = 0; kj < (int)candidates[rj].size(); ++kj)
+                  {
+                    if (std::abs(candidates[ri][ki].rt - candidates[rj][kj].rt)
+                        > apex_voting_rt_tol) continue;
+
+                    // Vote for (ri, ki) from file fj.
+                    const Size vi = static_cast<Size>(ki) * n_files + fj;
+                    if (!voted_files[ri][vi])
+                    {
+                      voted_files[ri][vi] = 1;
+                      ++candidate_votes[ri][ki];
+                    }
+                    // Vote for (rj, kj) from file fi.
+                    const Size vj = static_cast<Size>(kj) * n_files + fi;
+                    if (!voted_files[rj][vj])
+                    {
+                      voted_files[rj][vj] = 1;
+                      ++candidate_votes[rj][kj];
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+
+    // -----------------------------------------------------------------------
+    // Multi-apex Phase 4: confirm apex per trace.
+    //
+    // Priority: (1) most cross-file votes, (2) highest apex_score,
+    // (3) lowest candidate index (greedy first = highest-score, stable tie).
+    // -----------------------------------------------------------------------
+
+    for (Size r = 0; r < result.size(); ++r)
+    {
+      int best_k = 0;
+      for (int k = 1; k < static_cast<int>(candidates[r].size()); ++k)
+      {
+        const uint32_t votes_k    = need_voting ? candidate_votes[r][k]      : 0u;
+        const uint32_t votes_best = need_voting ? candidate_votes[r][best_k] : 0u;
+
+        if (votes_k > votes_best)                                           { best_k = k; continue; }
+        if (votes_k == votes_best &&
+            candidates[r][k].score > candidates[r][best_k].score)          { best_k = k; }
+        // Tie in both: keep best_k (lowest index = first greedy pick).
+      }
+
+      auto& confirmed            = candidates[r][best_k];
+      result[r].apex_rt          = confirmed.rt;
+      result[r].apex_score       = confirmed.score;
+      result[r].apex_fingerprint = std::move(confirmed.fingerprint);
+    }
+
+    // Stats logging (after apex confirmation so apex_score is valid).
+    if (!result.empty())
+    {
+      uint32_t min_apex = result[0].apex_score;
+      uint32_t max_apex = result[0].apex_score;
+      uint64_t sum_apex = 0;
+      for (const ScoreTrace& t : result)
+      {
+        if (t.apex_score < min_apex) min_apex = t.apex_score;
+        if (t.apex_score > max_apex) max_apex = t.apex_score;
+        sum_apex += t.apex_score;
+      }
+      const double mean_apex = static_cast<double>(sum_apex) / result.size();
+      OPENMS_LOG_DEBUG << "[DiaWeaverAlign::matchExperiment] "
+                       << query_spectra.size() << " query spectra  "
+                       << result.size() << " index spectrum_ids traced  "
+                       << "apex_matched_peaks: min=" << min_apex
+                       << " max=" << max_apex
+                       << " mean=" << mean_apex << std::endl;
+    }
+    else
+    {
+      OPENMS_LOG_DEBUG << "[DiaWeaverAlign::matchExperiment] "
+                       << query_spectra.size() << " query spectra  "
+                       << "no index spectrum_ids traced (threshold too high or empty index)"
+                       << std::endl;
     }
 
     return result;

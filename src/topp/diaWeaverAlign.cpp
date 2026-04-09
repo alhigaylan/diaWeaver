@@ -196,6 +196,26 @@ protected:
     setMinInt_("singleton_min_frags", 0);
 
     registerIntOption_(
+      "apex_candidate_count",
+      "<n>",
+      3,
+      "Number of top-K local RT maxima to consider per spectrum_id when disambiguating "
+      "the correct apex across runs via cross-file vote counting. Set to 1 to disable "
+      "multi-apex voting and use the single highest-scoring RT (legacy behaviour).",
+      false);
+    setMinInt_("apex_candidate_count", 1);
+
+    registerDoubleOption_(
+      "apex_min_separation_s",
+      "<seconds>",
+      30.0,
+      "Minimum retention time separation (seconds) between two apex candidates for the "
+      "same spectrum_id. Candidates closer than this threshold are treated as the same "
+      "elution peak and only the higher-scoring one is kept.",
+      false);
+    setMinFloat_("apex_min_separation_s", 0.0);
+
+    registerIntOption_(
       "min_matched_peaks",
       "<n>",
       2,
@@ -244,6 +264,8 @@ protected:
     const double     min_overlap         = getDoubleOption_("min_overlap_similarity");
     const double     min_file_jaccard    = getDoubleOption_("min_within_file_jaccard");
     const uint32_t   singleton_min_frags = static_cast<uint32_t>(getIntOption_("singleton_min_frags"));
+    const uint32_t   apex_cand_count     = static_cast<uint32_t>(getIntOption_("apex_candidate_count"));
+    const double     apex_min_sep_s      = getDoubleOption_("apex_min_separation_s");
 
 #ifdef _OPENMP
     omp_set_num_threads(getIntOption_("threads"));
@@ -504,7 +526,8 @@ protected:
         continue;
       }
 
-      const auto traces = aligner.matchExperiment(window_query, min_peaks);
+      const auto traces = aligner.matchExperiment(window_query, min_peaks,
+        apex_cand_count, apex_min_sep_s, rt_tol, im_tol, iso_err_tol);
       OPENMS_LOG_INFO << "    Score traces: " << traces.size() << std::endl;
 
       // ------------------------------------------------------------------
@@ -524,7 +547,8 @@ protected:
         if (!decoy_query.empty())
         {
           // min_matched_peaks=1 to capture every non-zero decoy hit
-          const auto decoy_traces = aligner.matchExperiment(decoy_query, 1);
+          // apex_candidate_count=1: decoy scoring only needs the peak score, no voting.
+          const auto decoy_traces = aligner.matchExperiment(decoy_query, 1, 1);
           for (const DiaWeaverAlign::ScoreTrace& dt : decoy_traces)
             decoy_apex_map[dt.spectrum_id] = dt.apex_score;
           OPENMS_LOG_INFO << "    Decoy traces: " << decoy_traces.size() << std::endl;
