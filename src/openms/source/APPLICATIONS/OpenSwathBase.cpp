@@ -11,6 +11,7 @@
 #include <OpenMS/CONCEPT/LogStream.h>
 #include <OpenMS/FORMAT/FileHandler.h>
 #include <OpenMS/FORMAT/SwathFile.h>
+#include <OpenMS/config.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/SwathWindowLoader.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/TransitionTSVFile.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/TransitionPQPFile.h>
@@ -67,10 +68,21 @@ namespace OpenMS
       {
         swath_maps = swath_file.loadSqMass(file_list[0], exp_meta);
       }
+#ifdef WITH_OPENTIMS
+      else if (in_file_type == FileTypes::BRUKER_TDF)
+      {
+        swath_maps = swath_file.loadBrukerTdf(file_list[0], tmp, exp_meta, readoptions);
+      }
+#endif
       else
       {
+#ifdef WITH_OPENTIMS
         throw Exception::IllegalArgument(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-                                         "Input file needs to have ending mzML or mzXML");
+                                         "Input file needs to have ending mzML, mzXML, sqMass, or .d (Bruker TDF)");
+#else
+        throw Exception::IllegalArgument(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+                                         "Input file needs to have ending mzML, mzXML, or sqMass");
+#endif
       }
     }
   }

@@ -15,6 +15,9 @@
 #include <OpenMS/FORMAT/FileHandler.h>
 #include <OpenMS/FORMAT/FileTypes.h>
 #include <OpenMS/FORMAT/IBSpectraFile.h>
+#ifdef WITH_OPENTIMS
+#include <OpenMS/FORMAT/BrukerTimsFile.h>
+#endif
 // TODO add handler support for other access
 #include <OpenMS/FORMAT/MascotGenericFile.h>
 // TODO: remove MZML header after we get cached and Transform working
@@ -140,7 +143,11 @@ protected:
   {
     registerInputFile_("in", "<file>", "", "Input file to convert.");
     registerStringOption_("in_type", "<type>", "", "Input file type -- default: determined from file extension or content\n", false, false); // optional and not advanced (for workflow engines to show this param)
-    vector<String> input_formats = {"mzML", "mzXML", "mgf", "raw", "cachedMzML", "mzData", "dta", "dta2d", "featureXML", "consensusXML", "ms2", "fid", "tsv", "peplist", "kroenik", "edta", "oms"};
+    vector<String> input_formats = {"mzML", "mzXML", "mgf", "raw", "cachedMzML", "mzData", "dta", "dta2d", "featureXML", "consensusXML", "ms2", "fid",
+#ifdef WITH_OPENTIMS
+      "d",
+#endif
+      "tsv", "peplist", "kroenik", "edta", "oms"};
     setValidFormats_("in", input_formats);
     setValidStrings_("in_type", input_formats);
 
@@ -173,7 +180,59 @@ protected:
     registerFlag_("RawToMzML:no_peak_picking", "Disables vendor peak picking for raw files.", true);
     registerFlag_("RawToMzML:no_zlib_compression", "Disables zlib compression for raw file conversion. Enables compatibility with some tools that do not support compressed input files, e.g. X!Tandem.", true);
     registerFlag_("RawToMzML:include_noise", "Include noise data in mzML output.", true);
+
+#ifdef WITH_OPENTIMS
+    registerTOPPSubsection_("bruker", "Options for reading Bruker TimsTOF .d files (requires WITH_OPENTIMS)");
+    registerDoubleOption_("bruker:calibration_tolerance", "<float>", 0.0, "m/z recalibration tolerance (0 = library default)", false, true);
+    setMinFloat_("bruker:calibration_tolerance", 0.0);
+    registerStringOption_("bruker:calibrate", "<toggle>", "false", "Enable m/z recalibration (may fail on some datasets)", false, true);
+    setValidStrings_("bruker:calibrate", {"true", "false"});
+    registerStringOption_("bruker:export_mode", "<mode>", "auto", "Export mode: 'auto' detects DDA/DIA acquisition type, "
+      "'spectrum' forces per-precursor MS2 spectra (DDA-style), 'frame' returns raw 4D frames without signal processing.", false, true);
+    setValidStrings_("bruker:export_mode", {"auto", "spectrum", "frame"});
+    registerDoubleOption_("bruker:ms1_centroid_mz_ppm", "<float>", 0.0,
+      "MS1 frame IM-centroiding m/z tolerance in ppm. Collapses the ion mobility dimension "
+      "by aggregating neighboring peaks. Both this and ms1_centroid_im_pct must be > 0 to enable. "
+      "Suggested value: 5.0. Algorithm from Sage (Lazear 2023).", false, true);
+    setMinFloat_("bruker:ms1_centroid_mz_ppm", 0.0);
+    registerDoubleOption_("bruker:ms1_centroid_im_pct", "<float>", 0.0,
+      "MS1 frame IM-centroiding ion mobility tolerance in percent. Both this and ms1_centroid_mz_ppm "
+      "must be > 0 to enable. Suggested value: 3.0.", false, true);
+    setMinFloat_("bruker:ms1_centroid_im_pct", 0.0);
+    registerIntOption_("bruker:dia_ms2_n_neighbors", "<int>", 0,
+      "DIA MS2 frame aggregation: number of adjacent frames on each side to sum per SWATH window. "
+      "0 = disabled (raw export), 1 = 3-frame sum, 2 = 5-frame sum. "
+      "Boosts signal by summing intensity across neighboring RT frames, then removes isolated noise.", false, true);
+    setMinInt_("bruker:dia_ms2_n_neighbors", 0);
+    registerIntOption_("bruker:dia_ms2_min_support", "<int>", 1,
+      "DIA MS2 denoising: minimum occupied neighbor cells in a 3x3 (m/z x IM) grid to keep a point "
+      "(center cell excluded from count). Applied after frame aggregation. Only effective when dia_ms2_n_neighbors > 0.", false, true);
+    setMinInt_("bruker:dia_ms2_min_support", 1);
+    registerStringOption_("bruker:dia_ms2_centroid", "<toggle>", "false",
+      "Apply 2D Gaussian smoothing + local maxima peak picking to the denoised DIA MS2 grid. "
+      "Produces IM_CENTROIDED spectra with sub-bin (m/z, IM) precision. Only effective when dia_ms2_n_neighbors > 0.", false, true);
+    setValidStrings_("bruker:dia_ms2_centroid", {"true", "false"});
+#endif
   }
+
+#ifdef WITH_OPENTIMS
+  BrukerTimsFile::Config getBrukerConfig_()
+  {
+    BrukerTimsFile::Config c;
+    c.calibration_tolerance = getDoubleOption_("bruker:calibration_tolerance");
+    c.calibrate = (getStringOption_("bruker:calibrate") == "true");
+    String mode = getStringOption_("bruker:export_mode");
+    if (mode == "spectrum") c.export_mode = BrukerTimsFile::Config::SPECTRUM;
+    else if (mode == "frame") c.export_mode = BrukerTimsFile::Config::FRAME;
+    else c.export_mode = BrukerTimsFile::Config::AUTO;
+    c.ms1_centroid_mz_ppm = static_cast<float>(getDoubleOption_("bruker:ms1_centroid_mz_ppm"));
+    c.ms1_centroid_im_pct = static_cast<float>(getDoubleOption_("bruker:ms1_centroid_im_pct"));
+    c.dia_ms2_n_neighbors = getIntOption_("bruker:dia_ms2_n_neighbors");
+    c.dia_ms2_min_support = getIntOption_("bruker:dia_ms2_min_support");
+    c.dia_ms2_centroid = (getStringOption_("bruker:dia_ms2_centroid") == "true");
+    return c;
+  }
+#endif
 
   ExitCodes main_(int, const char**) override
   {
@@ -435,6 +494,15 @@ protected:
           "Process_lowmemory option can only be used with mzML / mzXML input and mzML output data types.");
       }
     }
+#ifdef WITH_OPENTIMS
+    else if (in_type == FileTypes::BRUKER_TDF)
+    {
+      auto bruker_config = getBrukerConfig_();
+      BrukerTimsFile tims_file;
+      tims_file.setLogType(log_type_);
+      tims_file.load(in, exp, bruker_config);
+    }
+#endif
     else
     {
       fh.loadExperiment(in, exp, {in_type}, log_type_, true, true);
