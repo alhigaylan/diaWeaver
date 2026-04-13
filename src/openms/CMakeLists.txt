@@ -83,6 +83,10 @@ set(OPENMS_DEP_PRIVATE_LIBRARIES
     )
 endif()
 
+if (WITH_OPENTIMS)
+  list(APPEND OPENMS_DEP_PRIVATE_LIBRARIES opentims_cpp)
+endif()
+
 # Xerces requires linking against CoreFoundation&CoreServices on macOS
 # TODO check if this is still the case
 if(APPLE)
@@ -109,7 +113,6 @@ openms_add_library(TARGET_NAME  OpenMS
                                      ${CMAKE_CURRENT_BINARY_DIR}/include
                    PRIVATE_INCLUDES ${EOL_BSPLINE_INCLUDE_DIRECTORY}
                                     ${ISOSPEC_INCLUDE_DIRECTORY}
-                                    $<$<BOOL:${WITH_OPENTIMS}>:${OPENTIMS_INCLUDE_DIR}>
                    EXTERNAL_INCLUDES
                    LINK_LIBRARIES OpenSwathAlgo
                                   ${OPENMS_DEP_LIBRARIES}
