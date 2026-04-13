@@ -714,9 +714,12 @@ protected:
             }
             else
             {
-              MSSpectrum picked;
-              picker_hr.pick(ms2_exp[s], picked);
-              ms2_exp[s] = std::move(picked);
+              if (ms2_exp[s].getType(true) != SpectrumSettings::SpectrumType::CENTROID)
+              {
+                MSSpectrum picked;
+                picker_hr.pick(ms2_exp[s], picked);
+                ms2_exp[s] = std::move(picked);
+              }
             }
           }
         }
@@ -781,9 +784,12 @@ protected:
               }
               else
               {
-                MSSpectrum picked;
-                picker_hr.pick(precursor_exp[s], picked);
-                precursor_exp[s] = std::move(picked);
+                if (precursor_exp[s].getType(true) != SpectrumSettings::SpectrumType::CENTROID)
+                {
+                  MSSpectrum picked;
+                  picker_hr.pick(precursor_exp[s], picked);
+                  precursor_exp[s] = std::move(picked);
+                }
               }
             }
           }
@@ -870,9 +876,12 @@ protected:
             }
             else
             {
-              MSSpectrum picked;
-              picker_hr.pick(ms1_exp[s], picked);
-              ms1_exp[s] = std::move(picked);
+              if (ms1_exp[s].getType(true) != SpectrumSettings::SpectrumType::CENTROID)
+              {
+                MSSpectrum picked;
+                picker_hr.pick(ms1_exp[s], picked);
+                ms1_exp[s] = std::move(picked);
+              }
             }
           }
         }
