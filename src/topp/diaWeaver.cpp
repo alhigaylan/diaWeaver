@@ -132,7 +132,11 @@ protected:
       "",
       "Input DIA file (mzML or Bruker .d directory)",
       true);
-    setValidFormats_("in", {"mzML", "d"});
+    setValidFormats_("in", { "mzML",
+#ifdef WITH_OPENTIMS
+      "d",
+#endif
+    });
 
     registerOutputPrefix_(
       "out",
