@@ -681,10 +681,17 @@ protected:
 #pragma omp for schedule(dynamic, 1)
           for (SignedSize s = 0; s < static_cast<SignedSize>(ms2_exp.size()); ++s)
           {
-            MSSpectrum aggregated;
-            aggregateSpectrum_(ms2_exp, static_cast<Size>(s), picker_im, aggregated);
-            picker_im.pickIMTraces(aggregated);
-            ms2_picked[s] = std::move(aggregated);
+            if (IMTypes::determineIMFormat(ms2_exp[s]) != IMFormat::CENTROIDED)
+            {
+              MSSpectrum aggregated;
+              aggregateSpectrum_(ms2_exp, static_cast<Size>(s), picker_im, aggregated);
+              picker_im.pickIMTraces(aggregated);
+              ms2_picked[s] = std::move(aggregated);
+            }
+            else
+            {
+              ms2_picked[s] = ms2_exp[s];
+            }
           }
         }
 
@@ -754,10 +761,17 @@ protected:
 #pragma omp for schedule(dynamic, 1)
             for (SignedSize s = 0; s < static_cast<SignedSize>(precursor_exp.size()); ++s)
             {
-              MSSpectrum aggregated;
-              aggregateSpectrum_(precursor_exp, static_cast<Size>(s), picker_im, aggregated);
-              picker_im.pickIMTraces(aggregated);
-              prec_picked[s] = std::move(aggregated);
+              if (IMTypes::determineIMFormat(precursor_exp[s]) != IMFormat::CENTROIDED)
+              {
+                MSSpectrum aggregated;
+                aggregateSpectrum_(precursor_exp, static_cast<Size>(s), picker_im, aggregated);
+                picker_im.pickIMTraces(aggregated);
+                prec_picked[s] = std::move(aggregated);
+              }
+              else
+              {
+                prec_picked[s] = precursor_exp[s];
+              }
             }
           }
 
@@ -849,10 +863,17 @@ protected:
 #pragma omp for schedule(dynamic, 1)
           for (SignedSize s = 0; s < static_cast<SignedSize>(ms1_exp.size()); ++s)
           {
-            MSSpectrum aggregated;
-            aggregateSpectrum_(ms1_exp, static_cast<Size>(s), picker_im, aggregated);
-            picker_im.pickIMTraces(aggregated);
-            ms1_picked[s] = std::move(aggregated);
+            if (IMTypes::determineIMFormat(ms1_exp[s]) != IMFormat::CENTROIDED)
+            {
+              MSSpectrum aggregated;
+              aggregateSpectrum_(ms1_exp, static_cast<Size>(s), picker_im, aggregated);
+              picker_im.pickIMTraces(aggregated);
+              ms1_picked[s] = std::move(aggregated);
+            }
+            else
+            {
+              ms1_picked[s] = ms1_exp[s];
+            }
           }
         }
 
