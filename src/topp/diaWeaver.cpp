@@ -14,6 +14,7 @@
 #include <OpenMS/SYSTEM/File.h>
 #include <OpenMS/APPLICATIONS/diaWeaver.h>
 #include <OpenMS/PROCESSING/CENTROIDING/PeakPickerIM.h>
+#include <OpenMS/IONMOBILITY/IMTypes.h>
 #include <OpenMS/PROCESSING/CENTROIDING/PeakPickerHiRes.h>
 #include <OpenMS/FEATUREFINDER/MassTraceDetection.h>
 #include <OpenMS/FEATUREFINDER/ElutionPeakDetection.h>
@@ -710,7 +711,10 @@ protected:
           {
             if (im_info.available)
             {
-              picker_im.pickIMTraces(ms2_exp[s]);
+              if (IMTypes::determineIMFormat(ms2_exp[s]) != IMFormat::CENTROIDED)
+              {
+                picker_im.pickIMTraces(ms2_exp[s]);
+              }
             }
             else
             {
@@ -780,7 +784,10 @@ protected:
             {
               if (im_info.available)
               {
-                picker_im.pickIMTraces(precursor_exp[s]);
+                if (IMTypes::determineIMFormat(precursor_exp[s]) != IMFormat::CENTROIDED)
+                {
+                  picker_im.pickIMTraces(precursor_exp[s]);
+                }
               }
               else
               {
@@ -872,7 +879,10 @@ protected:
           {
             if (im_info.available)
             {
-              picker_im.pickIMTraces(ms1_exp[s]);
+              if (IMTypes::determineIMFormat(ms1_exp[s]) != IMFormat::CENTROIDED)
+              {
+                picker_im.pickIMTraces(ms1_exp[s]);
+              }
             }
             else
             {
