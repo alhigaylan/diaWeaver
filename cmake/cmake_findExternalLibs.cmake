@@ -198,6 +198,19 @@ endif()
  endif()
 
 #------------------------------------------------------------------------------
+# opentims++ (Bruker TimsTOF .d support, header-only; timsdata.so loaded at runtime)
+if (WITH_OPENTIMS)
+  find_path(OPENTIMS_INCLUDE_DIR
+    NAMES opentims++/opentims.h
+    HINTS ${OPENTIMS_DIR} $ENV{OPENTIMS_DIR}
+    DOC "Path to opentims++ include directory (containing the opentims++/ subdirectory)")
+  if (NOT OPENTIMS_INCLUDE_DIR)
+    message(FATAL_ERROR "opentims++ headers not found. Set OPENTIMS_DIR to the directory containing opentims++/opentims.h")
+  endif()
+  message(STATUS "Found opentims++ headers: ${OPENTIMS_INCLUDE_DIR}")
+endif()
+
+#------------------------------------------------------------------------------
 # Done finding contrib libraries
 #------------------------------------------------------------------------------
 

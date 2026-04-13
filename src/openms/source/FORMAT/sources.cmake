@@ -100,11 +100,15 @@ ZlibCompression.cpp
 )
 
 if (WITH_HDF5)
-  list(APPEND sources_list HDF5Connector.cpp)  
+  list(APPEND sources_list HDF5Connector.cpp)
 endif()
 
 if (WITH_PARQUET)
-  list(APPEND sources_list QuantmsIO.cpp)  
+  list(APPEND sources_list QuantmsIO.cpp)
+endif()
+
+if (WITH_OPENTIMS)
+  list(APPEND sources_list BrukerTimsFile.cpp)
 endif()
 
 ### add path to the filenames

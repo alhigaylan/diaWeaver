@@ -109,6 +109,7 @@ openms_add_library(TARGET_NAME  OpenMS
                                      ${CMAKE_CURRENT_BINARY_DIR}/include
                    PRIVATE_INCLUDES ${EOL_BSPLINE_INCLUDE_DIRECTORY}
                                     ${ISOSPEC_INCLUDE_DIRECTORY}
+                                    $<$<BOOL:${WITH_OPENTIMS}>:${OPENTIMS_INCLUDE_DIR}>
                    EXTERNAL_INCLUDES
                    LINK_LIBRARIES OpenSwathAlgo
                                   ${OPENMS_DEP_LIBRARIES}
@@ -129,6 +130,11 @@ endif()
 # propagate Parquet support to the code (used to gate tools in ToolHandler, etc.)
 if (WITH_PARQUET)
     target_compile_definitions(OpenMS PUBLIC WITH_PARQUET=1)
+endif()
+
+# propagate Bruker TimsTOF support to the code
+if (WITH_OPENTIMS)
+    target_compile_definitions(OpenMS PUBLIC WITH_OPENTIMS=1)
 endif()
 
 

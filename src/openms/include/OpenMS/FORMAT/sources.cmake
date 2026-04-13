@@ -112,7 +112,11 @@ ZlibCompression.h
 )
 
 if (WITH_HDF5)
-  list(APPEND sources_list_h HDF5Connector.h)  
+  list(APPEND sources_list_h HDF5Connector.h)
+endif()
+
+if (WITH_OPENTIMS)
+  list(APPEND sources_list_h BrukerTimsFile.h)
 endif()
 
 ### add path to the filenames
