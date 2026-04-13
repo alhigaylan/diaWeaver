@@ -565,11 +565,16 @@ protected:
 
     if (is_bruker)
     {
+#ifdef WITH_OPENTIMS
       OPENMS_LOG_INFO << "Detected Bruker .d directory. Loading with BrukerTimsFile..." << std::endl;
       BrukerTimsFile btf;
       btf.load(in, bruker_exp);
       DiaWeaver::determineWindows(bruker_exp, windows);
       im_info = DiaWeaver::determineIMInfo(bruker_exp, windows);
+#else
+      OPENMS_LOG_ERROR << "Bruker .d input requires OpenMS to be built with OpenTIMS support (WITH_OPENTIMS)." << std::endl;
+      return ILLEGAL_PARAMETERS;
+#endif
     }
     else
     {
@@ -998,6 +1003,7 @@ protected:
     // ------------------------------
     if (is_bruker)
     {
+#ifdef WITH_OPENTIMS
 #pragma omp parallel for schedule(dynamic, 1)
       for (SignedSize idx = 0; idx < static_cast<SignedSize>(total_windows); ++idx)
       {
@@ -1011,6 +1017,7 @@ protected:
         process_window_content(w, ms2_exp, ms1_exp,
                                 save_precursors ? &precursor_exp : nullptr);
       }
+#endif
     }
     else
     {
