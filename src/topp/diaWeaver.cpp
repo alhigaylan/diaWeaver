@@ -132,7 +132,11 @@ protected:
       "",
       "Input DIA file (mzML or Bruker .d directory)",
       true);
-    setValidFormats_("in", {"mzML", "d"});
+    setValidFormats_("in", { "mzML",
+#ifdef WITH_OPENTIMS
+      "d",
+#endif
+    });
 
     registerOutputPrefix_(
       "out",
@@ -151,9 +155,24 @@ protected:
     registerFlag_(
       "aggregate_across_scans",
       "If set, aggregate signal across neighboring scans using Gaussian weighting before peak picking. "
-      "This can improve signal-to-noise for low-intensity peaks (requires IM data).", false);
+      "This can improve signal-to-noise for low-intensity peaks (requires IM data). "
+      "Not used for Bruker .d input — use bruker:dia_ms2_n_neighbors instead.", false);
 
-    registerSubsection_("PeakPickerIM", "Parameters for ion mobility peak picking (used when input has IM data)");
+#ifdef WITH_OPENTIMS
+    registerTOPPSubsection_("bruker", "Options for Bruker TimsTOF .d input (requires WITH_OPENTIMS)");
+    registerIntOption_("bruker:dia_ms2_n_neighbors", "<int>", 0,
+      "DIA MS2 frame aggregation: number of adjacent frames on each side to sum per SWATH window. "
+      "0 = disabled (raw per-frame export), 1 = 3-frame sum, 2 = 5-frame sum. "
+      "Boosts signal-to-noise by summing intensity across neighboring RT frames before centroiding. "
+      "Equivalent to aggregate_across_scans for mzML input.", false);
+    setMinInt_("bruker:dia_ms2_n_neighbors", 0);
+    registerIntOption_("bruker:dia_ms2_min_support", "<int>", 1,
+      "DIA MS2 denoising: minimum occupied neighbor cells in a 3x3 (m/z x IM) grid to retain a peak "
+      "(center cell excluded). Applied after frame aggregation. Only effective when dia_ms2_n_neighbors > 0.", false);
+    setMinInt_("bruker:dia_ms2_min_support", 1);
+#endif
+
+    registerSubsection_("PeakPickerIM", "Parameters for ion mobility peak picking (used for mzML input with IM data)");
 
     registerSubsection_("PeakPickerHiRes", "Parameters for high-resolution peak picking (used when input has no IM data)");
 
@@ -567,8 +586,15 @@ protected:
     {
 #ifdef WITH_OPENTIMS
       OPENMS_LOG_INFO << "Detected Bruker .d directory. Loading with BrukerTimsFile..." << std::endl;
+      BrukerTimsFile::Config btf_config;
+      btf_config.dia_ms2_n_neighbors = getIntOption_("bruker:dia_ms2_n_neighbors");
+      btf_config.dia_ms2_min_support = getIntOption_("bruker:dia_ms2_min_support");
+      btf_config.dia_ms2_centroid = true;  // always use Bruker 2D centroiding; diaWeaver skips pickIMTraces for IM_CENTROIDED spectra
+      OPENMS_LOG_INFO << "Bruker DIA config: dia_ms2_n_neighbors=" << btf_config.dia_ms2_n_neighbors
+                      << ", dia_ms2_min_support=" << btf_config.dia_ms2_min_support
+                      << ", dia_ms2_centroid=true" << std::endl;
       BrukerTimsFile btf;
-      btf.load(in, bruker_exp);
+      btf.load(in, bruker_exp, btf_config);
       DiaWeaver::determineWindows(bruker_exp, windows);
       im_info = DiaWeaver::determineIMInfo(bruker_exp, windows);
 #else
@@ -600,16 +626,23 @@ protected:
 
     if (im_info.available)
     {
-      OPENMS_LOG_INFO << "Ion mobility data detected. Using PeakPickerIM (mobilogram method)." << std::endl;
-      if (aggregate_scans)
+      if (is_bruker)
       {
-        OPENMS_LOG_INFO << "Aggregation across scans enabled. Signal will be boosted before peak picking." << std::endl;
+        OPENMS_LOG_INFO << "Ion mobility data detected. Using Bruker built-in 2D centroiding (dia_ms2_centroid=true)." << std::endl;
+      }
+      else
+      {
+        OPENMS_LOG_INFO << "Ion mobility data detected. Using PeakPickerIM (mobilogram method)." << std::endl;
+        if (aggregate_scans)
+        {
+          OPENMS_LOG_INFO << "Aggregation across scans enabled. Signal will be boosted before peak picking." << std::endl;
+        }
       }
     }
     else
     {
       OPENMS_LOG_INFO << "No ion mobility data detected. Using PeakPickerHiRes." << std::endl;
-      if (aggregate_scans)
+      if (!is_bruker && aggregate_scans)
       {
         OPENMS_LOG_WARN << "aggregate_across_scans is set but no IM data detected. Aggregation will be skipped." << std::endl;
       }
@@ -682,8 +715,11 @@ protected:
     {
       std::vector<MassTrace> ms2_traces;
 
-      // Apply peak picking to MS2 spectra
-      if (aggregate_scans && im_info.available)
+      // Apply peak picking to MS2 spectra.
+      // For Bruker .d input, centroiding was already done by BrukerTimsFile (dia_ms2_centroid=true),
+      // so spectra are IM_CENTROIDED and the pickIMTraces call below is skipped automatically.
+      // aggregate_scans is only for mzML; Bruker aggregation is controlled by dia_ms2_n_neighbors.
+      if (!is_bruker && aggregate_scans && im_info.available)
       {
         // Parallel aggregation + peak picking into a separate output experiment.
         // ms2_exp stays immutable (raw data) so aggregateSpectrum always reads
@@ -768,7 +804,7 @@ protected:
         // Local alias so the rest of this block can use precursor_exp unchanged.
         MSExperiment& precursor_exp = *precursor_exp_ptr;
 
-        if (aggregate_scans && im_info.available)
+        if (!is_bruker && aggregate_scans && im_info.available)
         {
           // Parallel aggregation + peak picking (same pattern as MS2)
           MSExperiment prec_picked;
@@ -867,7 +903,7 @@ protected:
       }
 
       // Apply peak picking to MS1 spectra
-      if (aggregate_scans && im_info.available)
+      if (!is_bruker && aggregate_scans && im_info.available)
       {
         // Parallel aggregation + peak picking (same pattern as MS2)
         MSExperiment ms1_picked;
