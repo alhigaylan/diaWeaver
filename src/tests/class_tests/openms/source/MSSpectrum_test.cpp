@@ -1394,9 +1394,12 @@ END_SECTION
 
 START_SECTION(void setIMFormat(IMFormat imf))
 {
-  // test invalid format validation
+  // setIMFormat no longer throws for any valid IMFormat value
   MSSpectrum spec;
-  TEST_EXCEPTION(Exception::InvalidValue, spec.setIMFormat(IMFormat::MIXED)); // this should trigger the validation check because a single spectrum can't be mixed
+  spec.setIMFormat(IMFormat::IM_PEAK);
+  TEST_EQUAL(spec.getIMFormat(), IMFormat::IM_PEAK)
+  spec.setIMFormat(IMFormat::IM_SPECTRUM);
+  TEST_EQUAL(spec.getIMFormat(), IMFormat::IM_SPECTRUM)
 }
 END_SECTION
 

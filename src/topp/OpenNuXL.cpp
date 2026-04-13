@@ -4554,36 +4554,32 @@ static void scoreXLIons_(
 
   std::tuple<IMFormat, DriftTimeUnit> getMS2IMType(const MSExperiment& spectra)
   {
-    IMFormat IM_format = IMTypes::determineIMFormat(spectra);  
+    IMFormat IM_format = IMTypes::determineIMFormat(spectra, 2);
     DriftTimeUnit IM_unit = DriftTimeUnit::NONE;
-    if (IM_format == IMFormat::MULTIPLE_SPECTRA)
+    if (IM_format == IMFormat::IM_SPECTRUM)
     {
       OPENMS_LOG_INFO << "Ion Mobility annotated at the spectrum level." << std::endl;
 
-      auto im_it = std::find_if_not(spectra.begin(), spectra.end(), 
-        [](const MSSpectrum& s) 
+      auto im_it = std::find_if_not(spectra.begin(), spectra.end(),
+        [](const MSSpectrum& s)
         {  // skip non-MS2 spectra and spectra without DriftTime annotation
-          if (s.getMSLevel() != 2) 
-            return true; 
-          return s.getDriftTimeUnit() == DriftTimeUnit::NONE; 
+          if (s.getMSLevel() != 2)
+            return true;
+          return s.getDriftTimeUnit() == DriftTimeUnit::NONE;
         });
 
       if (im_it != spectra.end())
       {
-        IM_unit = im_it->getDriftTimeUnit();      
+        IM_unit = im_it->getDriftTimeUnit();
       }
     }
     else if (IM_format == IMFormat::NONE)
     {
       OPENMS_LOG_INFO << "No Ion Mobility annotated at the spectrum level." << std::endl;
     }
-    else if (IM_format == IMFormat::CONCATENATED)
+    else if (IM_format == IMFormat::IM_PEAK)
     {
-      OPENMS_LOG_INFO << "Concatenated Ion Mobility not supported. IM values need to be annotated at the spectrum level." << std::endl;
-    }
-    else if (IM_format == IMFormat::MIXED)
-    {
-      OPENMS_LOG_INFO << "Mixed Ion Mobility not supported. IM values need to be annotated at the spectrum level." << std::endl;
+      OPENMS_LOG_INFO << "Per-peak Ion Mobility (IM_PEAK) not supported by OpenNuXL. IM values need to be annotated at the spectrum level." << std::endl;
     }
     return make_tuple(IM_format, IM_unit);
   }
