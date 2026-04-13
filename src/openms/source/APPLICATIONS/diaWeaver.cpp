@@ -1019,6 +1019,181 @@ void DiaWeaver::extractSingleMS1Window(
 }
 
 // ========================================================================
+// In-memory MSExperiment implementations
+// ========================================================================
+
+// ----------------------------------------------------------------------
+// Extract MS2 spectra for a single window (in-memory version)
+// ----------------------------------------------------------------------
+void DiaWeaver::extractSingleMS2Window(
+  const MSExperiment& raw,
+  const DIAWindow& window,
+  const std::vector<Size>& indices,
+  const IMInfo& im_info,
+  MSExperiment& out_ms2,
+  MSExperiment* out_precursor)
+{
+  out_ms2.clear(true);
+  const bool save_precursors = (out_precursor != nullptr);
+  if (save_precursors)
+  {
+    out_precursor->clear(true);
+  }
+
+  for (Size idx : indices)
+  {
+    const MSSpectrum& orig_spec = raw[idx];
+
+    MSSpectrum frag_spec;
+    frag_spec.setRT(orig_spec.getRT());
+    frag_spec.setMSLevel(1);
+
+    MSSpectrum prec_spec;
+    if (save_precursors)
+    {
+      prec_spec.setRT(orig_spec.getRT());
+      prec_spec.setMSLevel(1);
+    }
+
+    MSSpectrum::FloatDataArray frag_im_fda;
+    MSSpectrum::FloatDataArray prec_im_fda;
+    const MSSpectrum::FloatDataArray* im_array = nullptr;
+
+    if (im_info.available && orig_spec.getFloatDataArrays().size() > im_info.ms2_im_index)
+    {
+      frag_im_fda.setName(im_info.getIMArrayName());
+      im_array = &orig_spec.getFloatDataArrays()[im_info.ms2_im_index];
+
+      if (save_precursors)
+      {
+        prec_im_fda.setName(im_info.getIMArrayName());
+      }
+    }
+
+    for (Size i = 0; i < orig_spec.size(); ++i)
+    {
+      const double mz = orig_spec[i].getMZ();
+      const bool in_precursor_window = (mz >= window.lower_mz && mz <= window.upper_mz);
+
+      if (in_precursor_window)
+      {
+        if (save_precursors)
+        {
+          prec_spec.push_back(orig_spec[i]);
+          if (im_array)
+          {
+            prec_im_fda.push_back((*im_array)[i]);
+          }
+        }
+      }
+      else
+      {
+        frag_spec.push_back(orig_spec[i]);
+        if (im_array)
+        {
+          frag_im_fda.push_back((*im_array)[i]);
+        }
+      }
+    }
+
+    if (!frag_spec.empty())
+    {
+      if (im_array)
+      {
+        frag_spec.getFloatDataArrays().push_back(std::move(frag_im_fda));
+      }
+      frag_spec.sortByPosition();
+      out_ms2.addSpectrum(frag_spec);
+    }
+
+    if (save_precursors && !prec_spec.empty())
+    {
+      if (im_array)
+      {
+        prec_spec.getFloatDataArrays().push_back(std::move(prec_im_fda));
+      }
+      prec_spec.sortByPosition();
+      out_precursor->addSpectrum(prec_spec);
+    }
+  }
+
+  out_ms2.sortSpectra();
+  if (save_precursors)
+  {
+    out_precursor->sortSpectra();
+  }
+}
+
+// ----------------------------------------------------------------------
+// Extract MS1 spectra for a single window (in-memory version)
+// ----------------------------------------------------------------------
+void DiaWeaver::extractSingleMS1Window(
+  const MSExperiment& raw,
+  const DIAWindow& window,
+  const IMInfo& im_info,
+  MSExperiment& out_ms1)
+{
+  out_ms1.clear(true);
+
+  for (Size i = 0; i < raw.size(); ++i)
+  {
+    const MSSpectrum& spec = raw[i];
+    if (spec.getMSLevel() != 1) continue;
+
+    MSSpectrum new_spec;
+    new_spec.setRT(spec.getRT());
+
+    MSSpectrum::FloatDataArray im_fda;
+    if (im_info.available)
+    {
+      im_fda.setName(im_info.getIMArrayName());
+    }
+
+    const MSSpectrum::FloatDataArray* im_array = nullptr;
+    if (im_info.available && spec.getFloatDataArrays().size() > im_info.ms1_im_index)
+    {
+      im_array = &spec.getFloatDataArrays()[im_info.ms1_im_index];
+    }
+
+    for (Size k = 0; k < spec.size(); ++k)
+    {
+      const double mz = spec[k].getMZ();
+
+      if (mz < window.lower_mz || mz > window.upper_mz)
+      {
+        continue;
+      }
+
+      if (im_array && window.hasIonMobility())
+      {
+        const double im = (*im_array)[k];
+        if (im < window.lower_im || im > window.upper_im)
+        {
+          continue;
+        }
+      }
+
+      new_spec.push_back(spec[k]);
+      if (im_array)
+      {
+        im_fda.push_back((*im_array)[k]);
+      }
+    }
+
+    if (new_spec.empty()) continue;
+
+    if (im_array)
+    {
+      new_spec.getFloatDataArrays().push_back(std::move(im_fda));
+    }
+    new_spec.sortByPosition();
+    out_ms1.addSpectrum(new_spec);
+  }
+
+  out_ms1.sortSpectra();
+}
+
+// ========================================================================
 // CachedmzML implementations for fast binary I/O with parallel processing
 // ========================================================================
 

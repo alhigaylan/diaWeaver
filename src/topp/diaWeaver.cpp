@@ -8,6 +8,7 @@
 
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
 #include <OpenMS/FORMAT/MzMLFile.h>
+#include <OpenMS/FORMAT/BrukerTimsFile.h>
 #include <OpenMS/KERNEL/OnDiscMSExperiment.h>
 #include <OpenMS/KERNEL/FeatureMap.h>
 #include <OpenMS/KERNEL/MassTrace.h>
@@ -129,9 +130,9 @@ protected:
       "in",
       "<file>",
       "",
-      "Input DIA mzML file",
+      "Input DIA file (mzML or Bruker .d directory)",
       true);
-    setValidFormats_("in", {"mzML"});
+    setValidFormats_("in", {"mzML", "d"});
 
     registerOutputPrefix_(
       "out",
@@ -543,41 +544,54 @@ protected:
     File::makeDir(out);
 
     // ------------------------------
-    // Step 1: Use OnDiscMSExperiment for memory-efficient metadata access
-    // This determines DIA windows and IM info without loading all peak data
+    // Step 1: Open/load input and determine DIA windows + IM info.
+    // For mzML: use OnDiscMSExperiment (metadata-only access, memory-efficient).
+    // For Bruker .d: load the full experiment into memory via BrukerTimsFile,
+    //   which already emits properly-tagged MS2 spectra with isolation windows.
     // ------------------------------
-    OPENMS_LOG_INFO << "Opening file for metadata access..." << std::endl;
+    OPENMS_LOG_INFO << "Opening file..." << std::endl;
 
     // Start timing
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    OnDiscMSExperiment on_disc;
-    if (!on_disc.openFile(in))
-    {
-      OPENMS_LOG_ERROR << "Failed to open file as indexed mzML." << std::endl;
-      return INPUT_FILE_NOT_FOUND;
-    }
+    const bool is_bruker = File::isDirectory(in);
 
-    // Determine DIA windows from MS2 metadata (efficient - no peak data loaded)
+    // Data sources — only one is populated depending on input type.
+    MSExperiment bruker_exp;    // populated for .d input
+    OnDiscMSExperiment on_disc; // populated for mzML input
+
     DiaWeaver::WindowMap windows;
-    DiaWeaver::determineWindows(on_disc, windows);
+    DiaWeaver::IMInfo im_info;
 
-    // Determine IM info (loads only representative spectra)
-    DiaWeaver::IMInfo im_info = DiaWeaver::determineIMInfo(on_disc, windows);
+    if (is_bruker)
+    {
+      OPENMS_LOG_INFO << "Detected Bruker .d directory. Loading with BrukerTimsFile..." << std::endl;
+      BrukerTimsFile btf;
+      btf.load(in, bruker_exp);
+      DiaWeaver::determineWindows(bruker_exp, windows);
+      im_info = DiaWeaver::determineIMInfo(bruker_exp, windows);
+    }
+    else
+    {
+      if (!on_disc.openFile(in))
+      {
+        OPENMS_LOG_ERROR << "Failed to open file as indexed mzML." << std::endl;
+        return INPUT_FILE_NOT_FOUND;
+      }
+      DiaWeaver::determineWindows(on_disc, windows);
+      im_info = DiaWeaver::determineIMInfo(on_disc, windows);
+    }
 
     // Convert map to vector for OpenMP indexed access
     std::vector<std::pair<DiaWeaver::DIAWindow, std::vector<Size>>> window_vec(
       windows.begin(), windows.end());
     const Size total_windows = window_vec.size();
 
-    // Note: OnDiscMSExperiment provides memory-efficient on-demand spectrum loading
-    // Each thread will get its own copy via firstprivate (creates separate file handles)
-
     OPENMS_LOG_INFO << "Processing " << total_windows << " DIA windows";
 #ifdef _OPENMP
     OPENMS_LOG_INFO << " using " << num_threads << " thread(s)";
 #endif
-    OPENMS_LOG_INFO << " with on-disc random access..." << std::endl;
+    OPENMS_LOG_INFO << (is_bruker ? " from in-memory Bruker experiment..." : " with on-disc random access...") << std::endl;
 
     if (im_info.available)
     {
@@ -647,22 +661,21 @@ protected:
     }
 
     omp_set_num_threads(outer_threads);
-#pragma omp parallel for schedule(dynamic, 1) firstprivate(on_disc)
 #endif
-    for (SignedSize idx = 0; idx < static_cast<SignedSize>(total_windows); ++idx)
+
+    // ------------------------------
+    // Per-window processing lambda.
+    // Called from both the mzML and Bruker parallel loops below.
+    // Receives already-extracted ms2_exp and ms1_exp so the lambda has
+    // no dependency on the input format.
+    // ------------------------------
+    auto process_window_content = [&](
+      const DiaWeaver::DIAWindow& w,
+      MSExperiment& ms2_exp,
+      MSExperiment& ms1_exp,
+      MSExperiment* precursor_exp_ptr)
     {
-      const DiaWeaver::DIAWindow& w = window_vec[idx].first;
-      const std::vector<Size>& indices = window_vec[idx].second;
-
-      // Thread-local buffers
-      MSExperiment ms2_exp;
-      MSExperiment ms1_exp;
-      MSExperiment precursor_exp;
-      std::vector<MassTrace> ms2_traces;  // MS2 mass traces for clustering
-
-      // Extract MS2 (on-demand from disk - each thread has its own file handle)
-      DiaWeaver::extractSingleMS2Window(on_disc, w, indices, im_info, ms2_exp,
-                                         save_precursors ? &precursor_exp : nullptr);
+      std::vector<MassTrace> ms2_traces;
 
       // Apply peak picking to MS2 spectra
       if (aggregate_scans && im_info.available)
@@ -745,8 +758,11 @@ protected:
       }
 
       // Apply peak picking to precursors
-      if (save_precursors && !precursor_exp.empty())
+      if (save_precursors && precursor_exp_ptr != nullptr && !precursor_exp_ptr->empty())
       {
+        // Local alias so the rest of this block can use precursor_exp unchanged.
+        MSExperiment& precursor_exp = *precursor_exp_ptr;
+
         if (aggregate_scans && im_info.available)
         {
           // Parallel aggregation + peak picking (same pattern as MS2)
@@ -844,9 +860,6 @@ protected:
           }
         }
       }
-
-      // Extract MS1 (on-demand from disk - each thread has its own file handle)
-      DiaWeaver::extractSingleMS1Window(on_disc, w, im_info, ms1_exp);
 
       // Apply peak picking to MS1 spectra
       if (aggregate_scans && im_info.available)
@@ -967,13 +980,52 @@ protected:
       }
 
       // Progress logging (thread-safe)
-#ifdef _OPENMP
 #pragma omp critical (progress_log)
-#endif
       {
         ++processed;
         OPENMS_LOG_INFO << "Processed window " << processed << "/" << total_windows
                         << " (m/z: " << w.lower_mz << "-" << w.upper_mz << ")" << std::endl;
+      }
+    }; // end process_window_content lambda
+
+    // ------------------------------
+    // Step 3: Process windows in parallel.
+    // Two loop variants share the same lambda body above.
+    //   Bruker .d: bruker_exp is a const ref — safe for concurrent reads, no firstprivate needed.
+    //   mzML:      on_disc requires per-thread file handles via firstprivate.
+    // Pseudo spectra are consumed (written to disk) inside the lambda immediately
+    // after each window is processed, so no bulky in-memory accumulation occurs.
+    // ------------------------------
+    if (is_bruker)
+    {
+#pragma omp parallel for schedule(dynamic, 1)
+      for (SignedSize idx = 0; idx < static_cast<SignedSize>(total_windows); ++idx)
+      {
+        const DiaWeaver::DIAWindow& w = window_vec[idx].first;
+        const std::vector<Size>& indices = window_vec[idx].second;
+
+        MSExperiment ms2_exp, ms1_exp, precursor_exp;
+        DiaWeaver::extractSingleMS2Window(bruker_exp, w, indices, im_info, ms2_exp,
+                                           save_precursors ? &precursor_exp : nullptr);
+        DiaWeaver::extractSingleMS1Window(bruker_exp, w, im_info, ms1_exp);
+        process_window_content(w, ms2_exp, ms1_exp,
+                                save_precursors ? &precursor_exp : nullptr);
+      }
+    }
+    else
+    {
+#pragma omp parallel for schedule(dynamic, 1) firstprivate(on_disc)
+      for (SignedSize idx = 0; idx < static_cast<SignedSize>(total_windows); ++idx)
+      {
+        const DiaWeaver::DIAWindow& w = window_vec[idx].first;
+        const std::vector<Size>& indices = window_vec[idx].second;
+
+        MSExperiment ms2_exp, ms1_exp, precursor_exp;
+        DiaWeaver::extractSingleMS2Window(on_disc, w, indices, im_info, ms2_exp,
+                                           save_precursors ? &precursor_exp : nullptr);
+        DiaWeaver::extractSingleMS1Window(on_disc, w, im_info, ms1_exp);
+        process_window_content(w, ms2_exp, ms1_exp,
+                                save_precursors ? &precursor_exp : nullptr);
       }
     }
 

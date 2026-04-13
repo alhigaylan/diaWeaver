@@ -256,6 +256,49 @@ namespace OpenMS
       MSExperiment& out_ms1);
 
     // ========================================================================
+    // In-memory MSExperiment overloads for data already loaded into memory
+    // (e.g. from BrukerTimsFile::load). Const ref is safe across threads.
+    // ========================================================================
+
+    /**
+      @brief Extract MS2 spectra for a single window (in-memory version)
+
+      Indexes directly into the loaded MSExperiment. Safe to call from multiple
+      threads simultaneously since the source experiment is not modified.
+
+      @param raw Input MSExperiment (fully loaded, e.g. from BrukerTimsFile)
+      @param window The DIA window to extract
+      @param indices Spectrum indices belonging to this window
+      @param im_info Pre-computed ion mobility info (from determineIMInfo)
+      @param out_ms2 Output MSExperiment for fragment ions
+      @param out_precursor Optional output MSExperiment for unfragmented precursors
+    */
+    static void extractSingleMS2Window(
+      const MSExperiment& raw,
+      const DIAWindow& window,
+      const std::vector<Size>& indices,
+      const IMInfo& im_info,
+      MSExperiment& out_ms2,
+      MSExperiment* out_precursor = nullptr);
+
+    /**
+      @brief Extract MS1 spectra for a single window (in-memory version)
+
+      Indexes directly into the loaded MSExperiment. Safe to call from multiple
+      threads simultaneously since the source experiment is not modified.
+
+      @param raw Input MSExperiment (fully loaded, e.g. from BrukerTimsFile)
+      @param window The DIA window to extract
+      @param im_info Pre-computed ion mobility info (from determineIMInfo)
+      @param out_ms1 Output MSExperiment for filtered MS1 spectra
+    */
+    static void extractSingleMS1Window(
+      const MSExperiment& raw,
+      const DIAWindow& window,
+      const IMInfo& im_info,
+      MSExperiment& out_ms1);
+
+    // ========================================================================
     // CachedmzML overloads for fast binary I/O with parallel processing
     // Each thread should create its own CachedmzML instance for thread safety
     // ========================================================================
