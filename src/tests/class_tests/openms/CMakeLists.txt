@@ -55,6 +55,10 @@ endforeach(_class_test)
 # StopWatch_test needs to be run alone to avoid timing errors
 set_tests_properties(StopWatch_test PROPERTIES RUN_SERIAL 1)
 
+if (TARGET BrukerTimsFile_test AND WITH_OPENTIMS)
+  target_link_libraries(BrukerTimsFile_test opentims_cpp sqlite3)
+endif()
+
 # This test loads real Bruker .d files (DDA + DIA) including frame aggregation
 # and a peptide search engine run, so it needs a generous timeout.
 set_tests_properties(BrukerTimsFile_test PROPERTIES TIMEOUT 1200)
