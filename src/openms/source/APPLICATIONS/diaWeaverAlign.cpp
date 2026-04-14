@@ -2027,8 +2027,9 @@ namespace OpenMS
     // recomputed fresh per sub-component at every level.
     //
     // Implemented as an explicit worklist (iterative) to avoid deep call stacks.
-    // Singletons produced by cutting — or isolated from the start — are gated
-    // by the same singleton_min_frags criterion used in groupFeatures.
+    // Singletons produced by cutting, or isolated from the start, are always
+    // retained: every spectrum_id reaching this function already had cross-file
+    // evidence in groupFeatures, so no score gate is applied here.
     // =========================================================================
     struct Sub_
     {
@@ -2054,13 +2055,15 @@ namespace OpenMS
       std::vector<MstEdge_>& edges = item.edges;
 
       // --- Singleton base case ---------------------------------------------
+      // No score gate here: every spectrum_id that reaches splitByOverlap_
+      // already cleared the groupFeatures Union-Find quality bar (≥ min_fragment_overlap
+      // shared bins with at least one cross-file partner). Applying singleton_min_frags
+      // again would double-gate spectrum_ids that had genuine cross-file evidence but
+      // ended up isolated because splitByOverlap_'s overlap-coefficient threshold is
+      // stricter than groupFeatures' count threshold.  The singleton_min_frags gate
+      // belongs in groupFeatures for TRUE singletons (no cross-file partner at all).
       if (fcs.size() == 1)
       {
-        uint32_t max_score = 0;
-        for (int li : file_clusters[fcs[0]].local_idxs)
-          max_score = std::max(max_score, traces[ti[li]].apex_score);
-        if (max_score < singleton_min_frags) continue;
-
         Sub_ s;
         s.fc_idxs = fcs;
         for (int li : file_clusters[fcs[0]].local_idxs)
@@ -2180,7 +2183,7 @@ namespace OpenMS
     //   4. Fragment overlap coefficient >= min_overlap_similarity.
     //
     // Exactly one qualifying sub → attach (updates local_idx, fc_idxs, min_overlap).
-    // Zero or two-or-more qualifying subs → singleton, gated by singleton_min_frags.
+    // Zero or two-or-more qualifying subs → reported as singleton (no score gate).
     // =========================================================================
     if (two_stage)
     {
@@ -2232,20 +2235,15 @@ namespace OpenMS
         }
         else
         {
-          // Ambiguous or no match: make this ref file-cluster a singleton.
-          uint32_t max_score = 0;
+          // Ambiguous or no match: report as singleton.  No score gate — same
+          // reasoning as the Phase 3 singleton base case above.
+          Sub_ s;
+          s.fc_idxs     = {rfc_idx};
           for (int li : rfc.local_idxs)
-            max_score = std::max(max_score, traces[ti[li]].apex_score);
-          if (max_score >= singleton_min_frags)
-          {
-            Sub_ s;
-            s.fc_idxs     = {rfc_idx};
-            for (int li : rfc.local_idxs)
-              s.local_idx.push_back(li);
-            s.union_bins  = rfc.union_fp;
-            s.min_overlap = 1.0f;
-            subs.push_back(std::move(s));
-          }
+            s.local_idx.push_back(li);
+          s.union_bins  = rfc.union_fp;
+          s.min_overlap = 1.0f;
+          subs.push_back(std::move(s));
         }
       }
     }
