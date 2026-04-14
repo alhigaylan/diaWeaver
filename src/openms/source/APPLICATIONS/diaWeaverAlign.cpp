@@ -1741,7 +1741,8 @@ namespace OpenMS
     uint32_t                                     isotope_error_tol,
     bool                                         use_im,
     uint32_t                                     singleton_min_frags,
-    double                                       min_consensus_fraction)
+    double                                       min_consensus_fraction,
+    Size                                         query_source_file_idx)
   {
     const int N = static_cast<int>(group.spectrum_ids.size());
 
@@ -1854,6 +1855,44 @@ namespace OpenMS
     if (M < 2) return {}; // nothing to cross-cluster
 
     // =========================================================================
+    // Two-stage MST: when query_source_file_idx is valid, partition file-clusters
+    // into "ref" (same source file as the peak-picked query) and "other".
+    // Phase 2+3 (MST + divisive recursion) runs on the "other" set only —
+    // self-referential ref spectrum_ids would otherwise inflate every cross-file
+    // edge weight and make Kruskal's cuts arbitrary.  Stage 2 (after the
+    // worklist) then greedily attaches each ref file-cluster to the best
+    // Stage 1 sub-cluster using exact precursor m/z + fragment overlap, or
+    // promotes it to a singleton when no unambiguous match is found.
+    // Falls back to the standard all-file MST when fewer than 2 non-ref
+    // file-clusters remain.
+    // =========================================================================
+    std::vector<int> ref_fc_idxs;
+    std::vector<int> act_fc_idxs;  // active set fed into Phase 2+3
+
+    if (query_source_file_idx != static_cast<Size>(-1))
+    {
+      std::vector<int> other_tmp;
+      for (int fc = 0; fc < M; ++fc)
+      {
+        const int rep_li = file_clusters[fc].local_idxs[0];
+        (spectrum_entries[group.spectrum_ids[rep_li]].source_file_idx == query_source_file_idx
+           ? ref_fc_idxs : other_tmp).push_back(fc);
+      }
+      // Two-stage only meaningful when >= 2 non-ref file-clusters remain for MST.
+      if (!ref_fc_idxs.empty() && static_cast<int>(other_tmp.size()) >= 2)
+        act_fc_idxs = std::move(other_tmp);
+    }
+    if (act_fc_idxs.empty())
+    {
+      // Fallback: all file-clusters participate; Stage 2 attachment is skipped.
+      act_fc_idxs.resize(static_cast<Size>(M));
+      std::iota(act_fc_idxs.begin(), act_fc_idxs.end(), 0);
+      ref_fc_idxs.clear();
+    }
+    const bool two_stage = !ref_fc_idxs.empty();
+    const int  Ma        = static_cast<int>(act_fc_idxs.size());
+
+    // =========================================================================
     // Phase 2: Build weighted eligibility graph + maximum spanning forest.
     //
     // Same positional checks as before (RT, IM, precursor m/z). Edge weight is
@@ -1883,16 +1922,18 @@ namespace OpenMS
 
     struct MstEdge_ { int i, j; float w; };
     std::vector<MstEdge_> all_edges;
-    all_edges.reserve(static_cast<Size>(M) * (M - 1) / 2);
+    all_edges.reserve(static_cast<Size>(Ma) * (Ma - 1) / 2);
 
-    for (int i = 0; i < M; ++i)
+    for (int ai = 0; ai < Ma; ++ai)
     {
+      const int            i     = act_fc_idxs[ai];
       const int            rep_i = file_clusters[i].local_idxs[0];
       const SpectrumEntry&  se_i = spectrum_entries[group.spectrum_ids[rep_i]];
       const double           rt_i = traces[ti[rep_i]].apex_rt;
 
-      for (int j = i + 1; j < M; ++j)
+      for (int aj = ai + 1; aj < Ma; ++aj)
       {
+        const int            j     = act_fc_idxs[aj];
         const int            rep_j = file_clusters[j].local_idxs[0];
         const SpectrumEntry&  se_j = spectrum_entries[group.spectrum_ids[rep_j]];
 
@@ -1932,7 +1973,7 @@ namespace OpenMS
     };
 
     std::vector<MstEdge_> mst_edges;
-    mst_edges.reserve(static_cast<Size>(M - 1));
+    mst_edges.reserve(static_cast<Size>(Ma - 1));
     for (const MstEdge_& e : all_edges)
     {
       int ri = kuf_find(e.i), rj = kuf_find(e.j);
@@ -1948,7 +1989,7 @@ namespace OpenMS
     // 1-node component and are handled as singletons in Phase 3.
     std::vector<int> comp_id(M, -1);
     int n_comps = 0;
-    for (int i = 0; i < M; ++i)
+    for (int i : act_fc_idxs)
     {
       if (comp_id[i] != -1) continue;
       std::vector<int> stk = {i};
@@ -1967,7 +2008,7 @@ namespace OpenMS
 
     std::vector<std::vector<int>>      comp_fc(n_comps);
     std::vector<std::vector<MstEdge_>> comp_edges(n_comps);
-    for (int i = 0; i < M; ++i) comp_fc[comp_id[i]].push_back(i);
+    for (int i : act_fc_idxs) comp_fc[comp_id[i]].push_back(i);
     for (const MstEdge_& e : mst_edges) comp_edges[comp_id[e.i]].push_back(e);
 
     // =========================================================================
@@ -2126,6 +2167,90 @@ namespace OpenMS
     }
 
     // =========================================================================
+    // Stage 2: Attach query-source file-clusters to Stage 1 sub-clusters.
+    //
+    // For each ref file-cluster, search all Stage 1 subs for the single best
+    // match by three criteria (all must pass):
+    //   1. Same precursor charge.
+    //   2. Ion mobility within im_tolerance (when IM data is present).
+    //   3. Exact precursor m/z match (k=0 only, within precursor_ppm_tolerance).
+    //      Isotope-offset matches are intentionally excluded: a ref file-cluster
+    //      that is one isotope peak away from every Stage 1 sub is ambiguous and
+    //      becomes a singleton rather than being force-attached.
+    //   4. Fragment overlap coefficient >= min_overlap_similarity.
+    //
+    // Exactly one qualifying sub → attach (updates local_idx, fc_idxs, min_overlap).
+    // Zero or two-or-more qualifying subs → singleton, gated by singleton_min_frags.
+    // =========================================================================
+    if (two_stage)
+    {
+      for (int rfc_idx : ref_fc_idxs)
+      {
+        const FileCluster_& rfc   = file_clusters[rfc_idx];
+        const int  rep_li         = rfc.local_idxs[0];
+        const SpectrumEntry& se_r = spectrum_entries[group.spectrum_ids[rep_li]];
+
+        int   best_s    = -1;
+        float best_ov   = 0.0f;
+        bool  ambiguous = false;
+
+        for (int s = 0; s < static_cast<int>(subs.size()); ++s)
+        {
+          const Sub_& sub = subs[s];
+
+          // Representative SpectrumEntry for this sub-cluster.
+          const int sub_rep_li     = sub.local_idx[0];
+          const SpectrumEntry& se_s = spectrum_entries[group.spectrum_ids[sub_rep_li]];
+
+          // Charge must match.
+          if (se_r.precursor_charge != se_s.precursor_charge) continue;
+
+          // Ion mobility match (when present).
+          if (use_im && std::abs(se_r.drift_time - se_s.drift_time) > im_tolerance) continue;
+
+          // Exact precursor m/z only (k=0); isotope offsets → singleton.
+          const double mz_diff = se_r.precursor_mz - se_s.precursor_mz;
+          const double mean_mz = (se_r.precursor_mz + se_s.precursor_mz) * 0.5;
+          if (std::abs(mz_diff) > precursor_ppm_tolerance * mean_mz / 1e6) continue;
+
+          // Fragment overlap check against the Stage 1 sub's union fingerprint.
+          const float ov = compute_overlap(rfc.union_fp, sub.union_bins);
+          if (ov < static_cast<float>(min_overlap_similarity)) continue;
+
+          if (best_s == -1) { best_s = s; best_ov = ov; }
+          else              { ambiguous = true; break; }
+        }
+
+        if (!ambiguous && best_s != -1)
+        {
+          // Unambiguous match: attach ref file-cluster to the Stage 1 sub.
+          Sub_& sub = subs[best_s];
+          sub.fc_idxs.push_back(rfc_idx);
+          for (int li : rfc.local_idxs)
+            sub.local_idx.push_back(li);
+          sub.min_overlap = std::min(sub.min_overlap, best_ov);
+        }
+        else
+        {
+          // Ambiguous or no match: make this ref file-cluster a singleton.
+          uint32_t max_score = 0;
+          for (int li : rfc.local_idxs)
+            max_score = std::max(max_score, traces[ti[li]].apex_score);
+          if (max_score >= singleton_min_frags)
+          {
+            Sub_ s;
+            s.fc_idxs     = {rfc_idx};
+            for (int li : rfc.local_idxs)
+              s.local_idx.push_back(li);
+            s.union_bins  = rfc.union_fp;
+            s.min_overlap = 1.0f;
+            subs.push_back(std::move(s));
+          }
+        }
+      }
+    }
+
+    // =========================================================================
     // Assemble one FeatureGroup per sub-cluster.
     //
     //   shared_fragments      — bins seen by >=2 individual members
@@ -2251,7 +2376,8 @@ namespace OpenMS
                                  double   min_overlap_similarity,
                                  double   min_within_file_jaccard,
                                  uint32_t singleton_min_frags,
-                                 double   min_consensus_fraction) const
+                                 double   min_consensus_fraction,
+                                 Size     query_source_file_idx) const
   {
     if (traces.empty() || precursor_offsets_.empty()) return {};
 
@@ -2598,7 +2724,8 @@ namespace OpenMS
                                     rt_tolerance, im_tolerance,
                                     precursor_ppm_tolerance, isotope_error_tol,
                                     use_im, singleton_min_frags,
-                                    min_consensus_fraction);
+                                    min_consensus_fraction,
+                                    query_source_file_idx);
         OPENMS_LOG_DEBUG << "[DiaWeaverAlign::groupFeatures] sub-clustered group of "
                          << group.spectrum_ids.size() << " → " << subs.size()
                          << " sub-group(s)" << std::endl;

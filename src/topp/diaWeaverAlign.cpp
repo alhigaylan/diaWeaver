@@ -196,6 +196,18 @@ protected:
     setMinInt_("singleton_min_frags", 0);
 
     registerIntOption_(
+      "query_source_file_idx",
+      "<index>",
+      -1,
+      "Zero-based index into '-in' of the pseudo-MS2 file derived from the same sample as "
+      "the peak-picked query ('-in_query'). When set, spectrum_ids from that file are excluded "
+      "from driving the MST connectivity (Stage 1) and are instead attached afterwards to the "
+      "best-matching Stage 1 sub-cluster using exact precursor m/z and fragment overlap. "
+      "Set to -1 (default) to disable.",
+      false);
+    setMinInt_("query_source_file_idx", -1);
+
+    registerIntOption_(
       "apex_candidate_count",
       "<n>",
       3,
@@ -264,6 +276,9 @@ protected:
     const double     min_overlap         = getDoubleOption_("min_overlap_similarity");
     const double     min_file_jaccard    = getDoubleOption_("min_within_file_jaccard");
     const uint32_t   singleton_min_frags = static_cast<uint32_t>(getIntOption_("singleton_min_frags"));
+    const int        query_src_raw       = getIntOption_("query_source_file_idx");
+    const Size       query_src_file_idx  = (query_src_raw < 0) ? static_cast<Size>(-1)
+                                                                : static_cast<Size>(query_src_raw);
     const uint32_t   apex_cand_count     = static_cast<uint32_t>(getIntOption_("apex_candidate_count"));
     const double     apex_min_sep_s      = getDoubleOption_("apex_min_separation_s");
 
@@ -555,7 +570,8 @@ protected:
         }
       }
 
-      const auto groups = aligner.groupFeatures(traces, rt_tol, min_frags, im_tol, prec_ppm, iso_err_tol, min_overlap, min_file_jaccard, singleton_min_frags);
+      const auto groups = aligner.groupFeatures(traces, rt_tol, min_frags, im_tol, prec_ppm, iso_err_tol, min_overlap, min_file_jaccard, singleton_min_frags,
+                                                 0.3, query_src_file_idx);
       OPENMS_LOG_INFO << "    Feature groups (>=2 members): " << groups.size() << std::endl;
 
       const DiaWeaver::DIAWindow* decoy_win =

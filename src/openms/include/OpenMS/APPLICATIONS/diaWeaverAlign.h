@@ -386,7 +386,8 @@ namespace OpenMS
                                              double   min_overlap_similarity    = 0.7,
                                              double   min_within_file_jaccard   = 0.7,
                                              uint32_t singleton_min_frags       = 50,
-                                             double   min_consensus_fraction    = 0.3) const;
+                                             double   min_consensus_fraction    = 0.3,
+                                             Size     query_source_file_idx     = static_cast<Size>(-1)) const;
 
     /**
       @brief Returns the spectrum_ids stored in a given precursor (m/z bin, IM bin) cell.
@@ -551,7 +552,8 @@ namespace OpenMS
       uint32_t                                     isotope_error_tol,
       bool                                         use_im,
       uint32_t                                     singleton_min_frags,
-      double                                       min_consensus_fraction);
+      double                                       min_consensus_fraction,
+      Size                                         query_source_file_idx = static_cast<Size>(-1));
 
     // --- DIA window bounds (stored in .dwaindex for self-describing files) ---
     double window_lower_mz_{-1.0};
