@@ -8,6 +8,8 @@
 
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
 #include <OpenMS/FORMAT/MzMLFile.h>
+#include <OpenMS/FORMAT/FileHandler.h>
+#include <OpenMS/FORMAT/FileTypes.h>
 #include <OpenMS/KERNEL/OnDiscMSExperiment.h>
 #include <OpenMS/KERNEL/FeatureMap.h>
 #include <OpenMS/KERNEL/MassTrace.h>
@@ -23,6 +25,10 @@
 #include <OpenMS/FORMAT/DATAACCESS/MSDataWritingConsumer.h>
 #include <OpenMS/FORMAT/MSNumpressCoder.h>
 #include <OpenMS/METADATA/SourceFile.h>
+
+#ifdef WITH_OPENTIMS
+#include <OpenMS/FORMAT/BrukerTimsFile.h>
+#endif
 
 #include <cmath>
 #include <set>
@@ -123,15 +129,36 @@ protected:
     picker.aggregateScans(spectra_to_aggregate, weights, out);
   }
 
+#ifdef WITH_OPENTIMS
+  BrukerTimsFile::Config getBrukerConfig_()
+  {
+    BrukerTimsFile::Config c;
+    c.calibration_tolerance = getDoubleOption_("bruker:calibration_tolerance");
+    c.calibrate = (getStringOption_("bruker:calibrate") == "true");
+    String mode = getStringOption_("bruker:export_mode");
+    c.export_mode = (mode == "frame") ? BrukerTimsFile::Config::FRAME : BrukerTimsFile::Config::AUTO;
+    c.ms1_centroid_mz_ppm = static_cast<float>(getDoubleOption_("bruker:ms1_centroid_mz_ppm"));
+    c.ms1_centroid_im_pct = static_cast<float>(getDoubleOption_("bruker:ms1_centroid_im_pct"));
+    c.dia_ms2_n_neighbors = getIntOption_("bruker:dia_ms2_n_neighbors");
+    c.dia_ms2_min_support = getIntOption_("bruker:dia_ms2_min_support");
+    c.dia_ms2_centroid = (getStringOption_("bruker:dia_ms2_centroid") == "true");
+    return c;
+  }
+#endif
+
   void registerOptionsAndFlags_() override
   {
     registerInputFile_(
       "in",
       "<file>",
       "",
-      "Input DIA mzML file",
+      "Input DIA file (mzML or Bruker .d)",
       true);
-    setValidFormats_("in", {"mzML"});
+    setValidFormats_("in", {"mzML"
+#ifdef WITH_OPENTIMS
+      , "d"
+#endif
+    });
 
     registerOutputPrefix_(
       "out",
@@ -161,6 +188,38 @@ protected:
     registerSubsection_("MassTraceExtractor", "Parameters for MassTraceExtractor algorithm (mass trace detection on MS2 data)");
 
     registerSubsection_("ClusterMassTraces", "Parameters for clustering mass traces to create pseudo spectra");
+
+#ifdef WITH_OPENTIMS
+    registerTOPPSubsection_("bruker", "Options for reading Bruker TimsTOF .d files (requires WITH_OPENTIMS)");
+    registerStringOption_("bruker:export_mode", "<mode>", "frame", "Export mode: 'auto' detects DDA/DIA acquisition type, "
+      "'frame' returns raw 4D frames without signal processing.", false, true);
+    setValidStrings_("bruker:export_mode", {"auto", "frame"});
+    registerDoubleOption_("bruker:calibration_tolerance", "<float>", 0.0, "m/z recalibration tolerance (0 = library default)", false, true);
+    setMinFloat_("bruker:calibration_tolerance", 0.0);
+    registerStringOption_("bruker:calibrate", "<toggle>", "false", "Enable m/z recalibration (may fail on some datasets)", false, true);
+    setValidStrings_("bruker:calibrate", {"true", "false"});
+    registerDoubleOption_("bruker:ms1_centroid_mz_ppm", "<float>", 0.0,
+      "MS1 frame IM-centroiding m/z tolerance in ppm. Collapses the ion mobility dimension "
+      "by aggregating neighboring peaks directly on the raw gridded data (Sage algorithm, Lazear 2023). "
+      "Both this and bruker:ms1_centroid_im_pct must be > 0 to enable. Suggested value: 5.0.", false, true);
+    setMinFloat_("bruker:ms1_centroid_mz_ppm", 0.0);
+    registerDoubleOption_("bruker:ms1_centroid_im_pct", "<float>", 0.0,
+      "MS1 frame IM-centroiding ion mobility tolerance in percent. "
+      "Both this and bruker:ms1_centroid_mz_ppm must be > 0 to enable. Suggested value: 3.0.", false, true);
+    setMinFloat_("bruker:ms1_centroid_im_pct", 0.0);
+    registerIntOption_("bruker:dia_ms2_n_neighbors", "<int>", 0,
+      "DIA MS2 frame aggregation: number of adjacent frames on each side to sum per SWATH window. "
+      "0 = disabled (raw export), 1 = 3-frame sum, 2 = 5-frame sum.", false, true);
+    setMinInt_("bruker:dia_ms2_n_neighbors", 0);
+    registerIntOption_("bruker:dia_ms2_min_support", "<int>", 1,
+      "DIA MS2 denoising: minimum occupied neighbor cells in a 3x3 (m/z x IM) grid to keep a point. "
+      "Only effective when bruker:dia_ms2_n_neighbors > 0.", false, true);
+    setMinInt_("bruker:dia_ms2_min_support", 1);
+    registerStringOption_("bruker:dia_ms2_centroid", "<toggle>", "false",
+      "Apply 2D Gaussian smoothing + local maxima peak picking to the denoised DIA MS2 grid. "
+      "Produces IM_CENTROIDED spectra. Only effective when bruker:dia_ms2_n_neighbors > 0.", false, true);
+    setValidStrings_("bruker:dia_ms2_centroid", {"true", "false"});
+#endif
 
     registerIntOption_(
       "threads",
@@ -542,28 +601,65 @@ protected:
     }
     File::makeDir(out);
 
-    // ------------------------------
-    // Step 1: Use OnDiscMSExperiment for memory-efficient metadata access
-    // This determines DIA windows and IM info without loading all peak data
-    // ------------------------------
-    OPENMS_LOG_INFO << "Opening file for metadata access..." << std::endl;
-
     // Start timing
     auto start_time = std::chrono::high_resolution_clock::now();
 
-    OnDiscMSExperiment on_disc;
-    if (!on_disc.openFile(in))
-    {
-      OPENMS_LOG_ERROR << "Failed to open file as indexed mzML." << std::endl;
-      return INPUT_FILE_NOT_FOUND;
-    }
+    // Detect input file type
+    FileTypes::Type in_type = FileHandler::getTypeByFileName(in);
 
-    // Determine DIA windows from MS2 metadata (efficient - no peak data loaded)
+    // Bruker pre-extracted window data (populated only for .d files)
+    bool is_bruker = false;
+    DiaWeaver::WindowedExperiments bruker_ms2_windows, bruker_ms1_windows, bruker_precursor_windows;
+
+    // ------------------------------
+    // Step 1: Determine DIA windows and IM info
+    // ------------------------------
     DiaWeaver::WindowMap windows;
-    DiaWeaver::determineWindows(on_disc, windows);
+    DiaWeaver::IMInfo im_info;
 
-    // Determine IM info (loads only representative spectra)
-    DiaWeaver::IMInfo im_info = DiaWeaver::determineIMInfo(on_disc, windows);
+#ifdef WITH_OPENTIMS
+    if (in_type == FileTypes::BRUKER_TDF)
+    {
+      is_bruker = true;
+      OPENMS_LOG_INFO << "Bruker .d file detected. Loading via BrukerTimsFile..." << std::endl;
+
+      BrukerTimsFile tims_file;
+      tims_file.setLogType(log_type_);
+      auto bruker_config = getBrukerConfig_();
+
+      PeakMap bruker_exp;
+      tims_file.load(in, bruker_exp, bruker_config);
+
+      DiaWeaver::determineWindows(bruker_exp, windows);
+      im_info = DiaWeaver::determineIMInfo(bruker_exp, windows);
+
+      // Pre-extract all windows into memory (already in-memory anyway)
+      DiaWeaver::extractMS2Windows(bruker_exp, windows, bruker_ms2_windows,
+                                    save_precursors ? &bruker_precursor_windows : nullptr);
+      DiaWeaver::extractMS1Windows(bruker_exp, windows, bruker_ms1_windows);
+
+      OPENMS_LOG_INFO << "Loaded " << windows.size() << " DIA windows from Bruker .d file." << std::endl;
+    }
+#endif
+
+    OnDiscMSExperiment on_disc;
+    if (!is_bruker)
+    {
+      // ------------------------------
+      // mzML path: use OnDiscMSExperiment for memory-efficient metadata access
+      // This determines DIA windows and IM info without loading all peak data
+      // ------------------------------
+      OPENMS_LOG_INFO << "Opening file for metadata access..." << std::endl;
+
+      if (!on_disc.openFile(in))
+      {
+        OPENMS_LOG_ERROR << "Failed to open file as indexed mzML." << std::endl;
+        return INPUT_FILE_NOT_FOUND;
+      }
+
+      DiaWeaver::determineWindows(on_disc, windows);
+      im_info = DiaWeaver::determineIMInfo(on_disc, windows);
+    }
 
     // Convert map to vector for OpenMP indexed access
     std::vector<std::pair<DiaWeaver::DIAWindow, std::vector<Size>>> window_vec(
@@ -660,9 +756,30 @@ protected:
       MSExperiment precursor_exp;
       std::vector<MassTrace> ms2_traces;  // MS2 mass traces for clustering
 
-      // Extract MS2 (on-demand from disk - each thread has its own file handle)
-      DiaWeaver::extractSingleMS2Window(on_disc, w, indices, im_info, ms2_exp,
-                                         save_precursors ? &precursor_exp : nullptr);
+      // Extract spectra for this window
+      if (is_bruker)
+      {
+#ifdef WITH_OPENTIMS
+#pragma omp critical (bruker_window_access)
+        {
+          auto it_ms2 = bruker_ms2_windows.find(w);
+          if (it_ms2 != bruker_ms2_windows.end()) ms2_exp = std::move(it_ms2->second);
+          auto it_ms1 = bruker_ms1_windows.find(w);
+          if (it_ms1 != bruker_ms1_windows.end()) ms1_exp = std::move(it_ms1->second);
+          if (save_precursors)
+          {
+            auto it_prec = bruker_precursor_windows.find(w);
+            if (it_prec != bruker_precursor_windows.end()) precursor_exp = std::move(it_prec->second);
+          }
+        }
+#endif
+      }
+      else
+      {
+        // mzML path: on-demand from disk (each thread has its own file handle)
+        DiaWeaver::extractSingleMS2Window(on_disc, w, indices, im_info, ms2_exp,
+                                           save_precursors ? &precursor_exp : nullptr);
+      }
 
       // Apply peak picking to MS2 spectra
       if (aggregate_scans && im_info.available)
@@ -845,8 +962,11 @@ protected:
         }
       }
 
-      // Extract MS1 (on-demand from disk - each thread has its own file handle)
-      DiaWeaver::extractSingleMS1Window(on_disc, w, im_info, ms1_exp);
+      // MS1 already loaded for Bruker path; for mzML, extract on-demand from disk
+      if (!is_bruker)
+      {
+        DiaWeaver::extractSingleMS1Window(on_disc, w, im_info, ms1_exp);
+      }
 
       // Apply peak picking to MS1 spectra
       if (aggregate_scans && im_info.available)
