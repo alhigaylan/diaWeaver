@@ -42,7 +42,6 @@ FileInfo
 FileMerger
 FLASHDeconv
 FuzzyDiff
-GenericWrapper
 GNPSExport
 HighResPrecursorMassCorrector
 IDConflictResolver
@@ -103,7 +102,7 @@ PeakPickerHiRes
 PeakPickerIterative
 PeakPickerIM
 PeptideIndexer
-PeptideDataBaseSearchFI
+ProSE
 PercolatorAdapter
 PhosphoScoring
 ProteinInference
@@ -118,6 +117,7 @@ QCImporter
 QCMerger
 QCShrinker
 QualityControl
+Resampler
 RNADigestor
 RNAMassCalculator
 RNPxlXICFilter
@@ -156,25 +156,15 @@ if(NOT DISABLE_OPENSWATH)
   )
 endif(NOT DISABLE_OPENSWATH)
 
-if(WITH_PARQUET)
-  set(TOPP_executables
-    ${TOPP_executables}
-    QuantmsIOConverter
-  )
-endif(WITH_PARQUET)
-
-## all targets requiring OpenMS_GUI
-set(TOPP_executables_with_GUIlib
-ExecutePipeline
-Resampler
-# util category
-ImageCreator
-INIUpdater
+set(TOPP_executables
+  ${TOPP_executables}
+  QPXConverter
+  ParquetConverter
 )
 
 ### add filenames to Visual Studio solution tree
 set(sources_VS)
-foreach(i ${TOPP_executables} ${TOPP_executables_with_GUIlib})
+foreach(i ${TOPP_executables})
 	list(APPEND sources_VS "${i}.cpp")
 endforeach(i)
 

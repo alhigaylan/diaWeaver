@@ -14,10 +14,10 @@
 
 #include <OpenMS/CONCEPT/LogStream.h>
 #include <OpenMS/FORMAT/InspectOutfile.h>
+#include <OpenMS/METADATA/ProteinIdentification.h>
 #include <OpenMS/SYSTEM/File.h>
-#include <QtCore/QRegularExpression>
-
 #include <fstream>
+#include <regex>
 
 #ifdef __clang__
   #pragma clang diagnostic push
@@ -114,7 +114,7 @@ namespace OpenMS
     }
     else
     {
-      protein_identification.getSearchEngine() + "_" + datetime.getDate();
+      identifier = protein_identification.getSearchEngine() + "_" + datetime.getDate();
     }
     // to get the precursor retention time and mz values later, save the filename and the numbers of the scans
     vector<pair<String, vector<pair<Size, Size> > > > files_and_peptide_identification_with_scan_number;
@@ -1174,11 +1174,6 @@ namespace OpenMS
         continue;
       }
 
-      // check whether the line has enough columns
-      if (substrings.size() != number_of_columns)
-      {
-        continue;
-      }
       // take only those peptides whose p-value is less or equal the given threshold
       if (substrings[p_value_column].toFloat() > p_value_threshold)
       {
@@ -1206,14 +1201,14 @@ namespace OpenMS
     protein_identification.setSearchEngine("InsPecT");
     protein_identification.setSearchEngineVersion("unknown");
     // searching for something like this: InsPecT version 20060907, InsPecT version 20100331
-    QString response(cmd_output.toQString());
-    QRegularExpression rx("InsPecT (version|vesrion) (\\d+)"); // older versions of InsPecT have typo...
-    auto match = rx.match(response);
-    if (!match.hasMatch())
+    std::smatch match;
+    const std::string& response(cmd_output);
+    static const std::regex rx("InsPecT (version|vesrion) (\\d+)"); // older versions of InsPecT have typo...
+    if (!std::regex_search(response, match, rx))
     {
       return false;
     }
-    protein_identification.setSearchEngineVersion(match.captured(2));
+    protein_identification.setSearchEngineVersion(match[2].str());
     return true;
   }
 

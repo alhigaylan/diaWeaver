@@ -20,6 +20,7 @@
 #include <OpenMS/KERNEL/ConsensusMap.h>
 #include <OpenMS/KERNEL/FeatureMap.h>
 #include <OpenMS/FORMAT/FileHandler.h>
+#include <OpenMS/CONCEPT/LogStream.h>
 #include <OpenMS/ML/REGRESSION/LinearRegression.h>
 #include <OpenMS/KERNEL/RangeUtils.h>
 #include <OpenMS/KERNEL/ChromatogramTools.h>
@@ -44,8 +45,6 @@
 #include <boost/algorithm/string/split.hpp>
 #include <boost/algorithm/string/replace.hpp>
 #include <boost/algorithm/string/classification.hpp>
-
-#include <QDir>
 
 //std includes
 #include <cmath>
@@ -255,6 +254,20 @@ public:
 
     OPENMS_LOG_DEBUG << "Loading input..." << endl;
     file.loadExperiment(in_, exp, {FileTypes::MZML}, log_type_);
+
+    // Check for unsupported per-peak ion mobility data
+    for (const auto& spec : exp)
+    {
+      IMFormat im_format = IMTypes::determineIMFormat(spec);
+      if (im_format == IMFormat::IM_PEAK)
+      {
+        OPENMS_LOG_ERROR << "Error: Input contains per-peak ion mobility data (IM_PEAK, "
+                         << imPeakTypeToString(spec.getIMPeakType())
+                         << ") which is not supported by FeatureFinderMultiplex. "
+                         << "Preprocess with IonMobilityBinning or PeakPickerIM first." << std::endl;
+        return INCOMPATIBLE_INPUT_DATA;
+      }
+    }
 
     // Prepare algorithm parameters
     Param params = getParam_();

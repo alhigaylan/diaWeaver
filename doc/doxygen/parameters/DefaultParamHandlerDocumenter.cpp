@@ -58,6 +58,8 @@
 #include <OpenMS/ANALYSIS/QUANTITATION/TMTSixPlexQuantitationMethod.h>
 #include <OpenMS/ANALYSIS/QUANTITATION/TMTSixteenPlexQuantitationMethod.h>
 #include <OpenMS/ANALYSIS/QUANTITATION/TMTTenPlexQuantitationMethod.h>
+#include <OpenMS/ANALYSIS/QUANTITATION/TMTThirtyTwoPlexQuantitationMethod.h>
+#include <OpenMS/ANALYSIS/QUANTITATION/TMTThirtyFivePlexQuantitationMethod.h>
 #include <OpenMS/ML/SVM/SimpleSVM.h>
 #include <OpenMS/APPLICATIONS/MapAlignerBase.h>
 #include <OpenMS/CHEMISTRY/MASSDECOMPOSITION/MassDecompositionAlgorithm.h>
@@ -88,7 +90,6 @@
 #include <OpenMS/PROCESSING/SMOOTHING/GaussFilter.h>
 #include <OpenMS/PROCESSING/SMOOTHING/LowessSmoothing.h>
 #include <OpenMS/PROCESSING/SMOOTHING/SavitzkyGolayFilter.h>
-#include <OpenMS/PROCESSING/RESAMPLING/LinearResampler.h>
 #include <OpenMS/PROCESSING/FILTERING/NLargest.h>
 #include <OpenMS/PROCESSING/SCALING/Normalizer.h>
 #include <OpenMS/PROCESSING/SPECTRAMERGING/SpectraMerger.h>
@@ -383,10 +384,11 @@ int main(int argc, char** argv)
   DOCME(TMTTenPlexQuantitationMethod);
   DOCME(TMTSixteenPlexQuantitationMethod);
   DOCME(TMTEighteenPlexQuantitationMethod);
+  DOCME(TMTThirtyTwoPlexQuantitationMethod);
+  DOCME(TMTThirtyFivePlexQuantitationMethod);
   DOCME(ItraqEightPlexQuantitationMethod);
   DOCME(ItraqFourPlexQuantitationMethod);
   DOCME(LabeledPairFinder);
-  DOCME(LinearResampler);
   DOCME(MSPFile);
   DOCME(MapAlignmentAlgorithmPoseClustering);
   DOCME(SpectrumAnnotator);

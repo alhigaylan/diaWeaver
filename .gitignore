@@ -43,6 +43,14 @@ moc_*.cxx*
 # NB: this is the build dir not src/pyOpenMS which is tracked
 /pyOpenMS
 
+# .venv/venv everywhere
+**/.venv
+**/venv
+**/.pytest_cache
+**/.mypy_cache
+**/__pycache__/
+**/.py-build-cmake_cache
+
 qrc_resources.cxx
 resources.qrc.depends
 
@@ -259,6 +267,13 @@ settings.local.*
 .github_token
 github_token*
 
-# Claude/AI tokens
+# Claude/AI tokens and session files
 .claude_token
 .anthropic_key
+.claude/scheduled_tasks.lock
+
+# Link checker cache
+.lycheecache
+
+# Lock files from external tools
+*.fasta.lock

@@ -15,6 +15,8 @@
 #include <OpenMS/CONCEPT/UniqueIdGenerator.h>
 #include <OpenMS/PROCESSING/ID/IDFilter.h>
 #include <OpenMS/FORMAT/FileHandler.h>
+#include <OpenMS/METADATA/PeptideIdentificationList.h>
+#include <OpenMS/METADATA/ProteinIdentification.h>
 #include <OpenMS/FORMAT/ParamXMLFile.h>
 #include <OpenMS/KERNEL/MSExperiment.h>
 #include <OpenMS/MATH/StatisticFunctions.h>
@@ -340,7 +342,7 @@ namespace OpenMS
 
     ExternalProcess ep(lam_out, lam_err);
     OPENMS_LOG_DEBUG << "Running " << adapter_name << "..." << endl << endl;
-    const auto& rt = ep.run(adapter_name.toQString(), QStringList() << "-ini" << ini_path.toQString(), tmp_dir.getPath().toQString(), true);
+    const auto& rt = ep.run(adapter_name, {"-ini", ini_path}, tmp_dir.getPath(), true);
     if (rt != ExternalProcess::RETURNSTATE::SUCCESS)
     { // error occurred
       OPENMS_LOG_ERROR << "An error occurred while running " << adapter_name << "." << endl;

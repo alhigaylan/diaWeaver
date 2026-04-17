@@ -38,7 +38,60 @@ on:
 
 # A workflow run is made up of one or more jobs that can run sequentially or in parallel
 jobs:
+  # NOTE: This job is temporary until we get rid of contrib.
+  prepare-contrib-for-windows:
+    runs-on: windows-2025
+    steps:
+      - name: Clone OpenMS
+        uses: actions/checkout@v6
+      - name: Set up Visual Studio shell
+        uses: egor-tensin/vs-shell@v2
+        with: { arch: x64 }
+
+      - name: Identify contrib submodule revision for cache key
+        id: contrib-rev
+        shell: bash
+        run: |
+          rev=$(git submodule status --cached -- contrib | sed -E 's/^-?//' | cut -d' ' -f1)
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+
+      - name: Cache contrib
+        id: cache-contrib
+        uses: actions/cache@v5
+        with:
+          path: contrib/build
+          key: ${{ runner.os }}-${{ steps.contrib-rev.outputs.rev }}
+
+      - name: Fetch contrib if not in cache
+        if: steps.cache-contrib.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          git submodule update --init -- contrib
+          mkdir -p contrib/build
+
+      - name: Build contrib if not in cache
+        if: steps.cache-contrib.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $NPROC = $env:NUMBER_OF_PROCESSORS
+          if (-not $NPROC) { $NPROC = 4 }
+          $env:CMAKE_BUILD_PARALLEL_LEVEL = $NPROC
+          Set-Location "${{ github.workspace }}\contrib\build"
+          cmake -G"Visual Studio 17 2022" -Ax64 -DBUILD_TYPE=ALL "${{ github.workspace }}\contrib"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload Contrib
+        uses: actions/upload-artifact@v7
+        with:
+          name: contrib-${{ steps.contrib-rev.outputs.rev }}
+          path: |
+            contrib/build/lib/
+            contrib/build/bin/
+            contrib/build/include/
+          retention-days: 7
+
   build-and-test:
+    needs: prepare-contrib-for-windows
     strategy:
       fail-fast: false
       matrix:
@@ -99,8 +152,9 @@ jobs:
 
     - id: set-vars
       name: Set extra variables
+      env:
+        DO_PACKAGE: ${{ (inputs.package == true || steps.extract_branch.outputs.RUN_NAME == 'nightly' || startsWith(steps.extract_branch.outputs.RUN_NAME, 'release/')) && matrix.compiler != 'clang++' }}
       run: |
-        DO_PACKAGE=$( [[ ( "${{ inputs.package }}" || "${{ steps.extract_branch.outputs.RUN_NAME }}" == "nightly" || "${{ steps.extract_branch.outputs.RUN_NAME }}" =~ release/* ) && "${{ matrix.compiler }}" != "clang++" ]] && echo true || echo false)
         echo $DO_PACKAGE
         if [[ "${{ matrix.os }}" == ubuntu-* ]]; then
           echo "tp_folder=Linux" >> $GITHUB_OUTPUT
@@ -150,7 +204,7 @@ jobs:
           if [[ "${{ matrix.compiler }}" == "xcode" ]]; then
             ls -la /Applications/Xcode*
             sudo xcode-select -s '/Applications/Xcode_${{ matrix.compiler_ver }}.app/Contents/Developer'
-            echo "cxx_compiler=clang++" >> $GITHUB_OUTPUT
+            echo "cxx_compiler=$(xcrun -f clang++)" >> $GITHUB_OUTPUT
           elif [[ "${{ matrix.compiler }}" == "clang++" ]]; then
             echo "cxx_compiler=$(brew --prefix llvm@${{ matrix.compiler_ver }})/bin/clang++" >> $GITHUB_OUTPUT
           else
@@ -221,7 +275,7 @@ jobs:
       with:
         auto-update-conda: true
         activate-environment: "ci"
-        python-version: 3.9
+        python-version: 3.11
         use-mamba: true
 
     - name: Install Dependencies via Conda
@@ -236,7 +290,7 @@ jobs:
         conda info
 
         # None of the other arrow sublibraries seemed necessary, but it's an easy addition.
-        conda install -c conda-forge libarrow libparquet -y
+        conda install -c conda-forge libarrow libparquet libzip -y
 
         # Set variables required for the following steps so they
         # don't need a conda environment or login shell:
@@ -320,32 +374,29 @@ jobs:
           # WARNING: Don't add any brew install commands here, edit
           # the following script instead:
           bash OpenMS/tools/ci/deps-macos.sh
-
+          brew install ccache
           echo "$(brew --prefix)/bin" >>"$GITHUB_PATH"
           echo "cmake_prefix=$(brew --prefix);$(brew --prefix libomp)" >>"$GITHUB_OUTPUT"
         fi
 
-    - name: Cache contrib (Windows)
+    - name: Build libcurl from source (Windows)
       if: startsWith(matrix.os, 'windows')
-      id: cache-contrib
-      uses: actions/cache@v4
-      with:
-        path: ${{ github.workspace }}/OpenMS/contrib
-        key: ${{ runner.os }}-contrib3
-    
-    - name: Download contrib build from archive (Windows)
-      if: startsWith(matrix.os, 'windows') && steps.cache-contrib.outputs.cache-hit != 'true'
       shell: bash
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
-          cd OpenMS/contrib
-          # Download the file using the URL fetched from GitHub
-          gh release download -R OpenMS/contrib --pattern 'contrib_build-Windows.tar.gz'
-          # Extract the archive
-          7z x -so contrib_build-Windows.tar.gz | 7z x -si -ttar
-          rm contrib_build-Windows.tar.gz
-          ls -la
+          curl -L -o curl-src.tar.gz https://curl.se/download/curl-8.12.1.tar.gz
+          tar xzf curl-src.tar.gz
+          cd curl-8.12.1
+          cmake -B build -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/OpenMS/contrib" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DCURL_USE_SCHANNEL=ON \
+            -DBUILD_CURL_EXE=OFF \
+            -DBUILD_TESTING=OFF \
+            -DCURL_DISABLE_LDAP=ON \
+            -DCURL_USE_LIBPSL=OFF
+          cmake --build build
+          cmake --install build
 
     - name: Setup ccache cache
       uses: actions/cache@v4
@@ -358,6 +409,21 @@ jobs:
           ${{ runner.os }}-${{ runner.arch }}-${{ matrix.compiler }}-${{ matrix.compiler_ver }}-ccache-develop
           ${{ runner.os }}-${{ runner.arch }}-${{ matrix.compiler }}-${{ matrix.compiler_ver }}-ccache-
 
+    - name: Identify contrib submodule revision for cache key
+      id: contrib-rev
+      shell: bash
+      run: |
+        cd OpenMS
+        rev=$(git submodule status --cached -- contrib | sed -E 's/^-?//' | cut -d' ' -f1)
+        echo "rev=$rev" >> "$GITHUB_OUTPUT"
+
+    - name: Download contrib artifact for Windows
+      if: runner.os == 'Windows'
+      uses: actions/download-artifact@v4
+      with:
+        name: contrib-${{ steps.contrib-rev.outputs.rev }}
+        path: OpenMS/contrib/build
+          
     - name: Add THIRDPARTY
       shell: bash
       run: |
@@ -399,25 +465,6 @@ jobs:
           # do not fail immediately
           set +e
 
-          # On Linux we always build pyOpenMS
-          if [[ "${{ matrix.os }}" == ubuntu-* ]]; then
-            export PYOPENMS=ON
-          fi
-
-          # Generate the CWL descriptors if we are going to build a package
-          if [[ "${{steps.set-vars.outputs.pkg_type}}" != "none" ]] ||
-             [[ "${PYOPENMS:-}" == "ON" ]]
-          then
-            python -m venv openms-cwl
-            source openms-cwl/bin/activate
-            pip install -q cwltool
-            export ENABLE_CWL=ON
-          fi
-
-          if [[ "${PYOPENMS:-}" == "ON" ]]; then
-            python -m pip install -r $GITHUB_WORKSPACE/OpenMS/src/pyOpenMS/requirements_bld.txt
-          fi
-
           # Create ccache directory if it doesn't exist
           mkdir -p ${{ github.workspace }}/.ccache
 
@@ -449,8 +496,10 @@ jobs:
           #  Problem: not all compilers are always in the PATH.
           CMAKE_CXX_COMPILER: ${{ steps.set-vars.outputs.cxx_compiler }}
           MACOSX_DEPLOYMENT_TARGET: ${{ startsWith(matrix.os, 'macos') && '14.0' || '' }}
+          PYOPENMS: "${{ startsWith(matrix.os, 'ubuntu') && matrix.compiler == 'g++' && 'ON' || 'OFF' }}"
+          NO_DEPENDENCIES: "${{ startsWith(matrix.os, 'ubuntu') && matrix.compiler == 'g++' && 'OFF' || 'ON' }}"
           CMAKE_PREFIX_PATH: "${{ steps.tools-prefix.outputs.cmake_prefix }};${{ steps.conda-setup.outputs.cmake_prefix }}"
-          OPENMS_CONTRIB_LIBS: "${{ github.workspace }}/OpenMS/contrib"
+          OPENMS_CONTRIB_LIBS: "${{ github.workspace }}/OpenMS/contrib/build"
           CI_PROVIDER: "GitHub-Actions"
           CMAKE_GENERATOR: "Ninja"
           SOURCE_DIRECTORY: "${{ github.workspace }}/OpenMS"
@@ -460,16 +509,14 @@ jobs:
           ENABLE_CLASS_TESTING: "ON"
           ENABLE_DOCS: ${{ steps.set-vars.outputs.enable_docs }}
           ENABLE_GCC_WERROR: "OFF" # TODO think about that
+          ENABLE_CWL: "${{ steps.set-vars.outputs.pkg_type != 'none' && 'ON' || 'OFF' }}"
           SEARCH_ENGINES_DIRECTORY: ${{ github.workspace }}/_thirdparty
           WITH_GUI: "ON"
-          WITH_PARQUET: "ON"
           SIGNING_IDENTITY: "-"
           ADDRESS_SANITIZER: "Off"
           BUILD_TYPE: "Release"
-          OPENMP: "ON"
+          MT_ENABLE_OPENMP: "ON"
           BOOST_USE_STATIC: ${{ steps.set-vars.outputs.static_boost }}
-          COMPILE_PXDS: ${{ (startsWith(matrix.os, 'ubuntu') && github.event_name == 'pull_request' && github.event.pull_request.base.ref == 'develop' && runner.arch == 'arm64') && 'ON' || 'OFF' }}
-          #  BUILD_FLAGS: "-p:CL_MPCount=2" # For VS Generator and MSBuild
           BUILD_FLAGS: "-j${{ steps.cpu-cores.outputs.count }}" # Ninja will otherwise use all cores (doesn't go well in GHA).
           CMAKE_CXX_COMPILER_LAUNCHER: "ccache"
           CMAKE_C_COMPILER_LAUNCHER: "ccache"
@@ -486,17 +533,11 @@ jobs:
           USE_EXTERNAL_JSON: ${{ (startsWith(matrix.os, 'macos') || startsWith(matrix.os, 'windows')) && 'OFF' || 'ON' }}
           USE_EXTERNAL_SQLITECPP: ${{ startsWith(matrix.os, 'ubuntu') && 'ON' || 'OFF' }}
           USE_EXTERNAL_SIMDE: ${{ startsWith(matrix.os, 'ubuntu') && 'ON' || 'OFF' }}
-          # It's literally only Ubuntu's package manager that forcibly bundles nlohmann_json w/ arrow. The rest we can control via a cmake option in contrib +
-          # Note that apache arrow's brew/apt packages are DIFFERENT. I believe Ubuntu's packages have Nlohmann_JSON bundled with them, while 
-          # brew doesn't. As such, this results in compatibility issues between OpenMS' Nlohmann_JSON and Ubuntu's system packages. 
+          # Note: USE_EXTERNAL_SQLITECPP and USE_EXTERNAL_SIMDE are set but not passed to CMake
+          # (not in capture-env.sh) because Ubuntu's packages don't provide CMake config files. 
     - name: Test
       shell: bash
       run: |
-          # On Linux we always build pyOpenMS
-          if [[ "${{ matrix.os }}" == ubuntu-* ]]; then
-            export PYOPENMS=ON
-          fi
-
           ${{ steps.set-vars.outputs.xvfb }} ctest --output-on-failure -V -S $GITHUB_WORKSPACE/OpenMS/tools/ci/citest.cmake
       env:
           SOURCE_DIRECTORY: "${{ github.workspace }}/OpenMS"
@@ -1149,15 +1190,8 @@ jobs:
           JSViewer_SHA=$(curl -s -X GET https://api.github.com/repos/genericworkflownodes/de.openms.knime.dynamicJSViewers/git/ref/heads/master |jq -r '.object.sha')
           CONTRIB_SHA=$(curl -s -X GET https://api.github.com/repos/OpenMS/OpenMS/contents/contrib\?ref\=${{ github.sha }} | jq -r ".sha")
           THIRDPARTY_SHA=$(curl -s -X GET https://api.github.com/repos/OpenMS/OpenMS/contents/THIRDPARTY\?ref\=${{ github.sha }} | jq -r ".sha")
-          PYDOCS_SHA=$(curl -s -X GET https://api.github.com/repos/OpenMS/OpenMS/contents/src/pyOpenMS/pyopenms-docs\?ref\=${{ github.sha }} | jq -r ".sha")
-          TUTORIAL_SHA=$(curl https://api.github.com/repos/OpenMS/Tutorials/git/refs/heads/master | jq -r ".object.sha")
-          DOCS_SHA=$(curl https://api.github.com/repos/OpenMS/OpenMS-docs/git/refs/heads/develop | jq -r ".object.sha")
-
           handleGitTag OpenMS/contrib $CONTRIB_SHA
-          handleGitTag OpenMS/pyopenms-docs $PYDOCS_SHA
           handleGitTag OpenMS/THIRDPARTY $THIRDPARTY_SHA
-          handleGitTag OpenMS/Tutorials $TUTORIAL_SHA
-          handleGitTag OpenMS/OpenMS-docs $DOCS_SHA
           handleGitTag OpenMS/de.openms.knime $DEOPENMS_SHA
           # Uncomment when permissions are fixed
           # handleGitTag genericworkflownodes/de.openms.knime.dynamicJSViewers $JSViewer_SHA

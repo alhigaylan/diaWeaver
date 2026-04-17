@@ -203,5 +203,8 @@ namespace OpenMS
 
     double aggregation_rt_fwhm_{1.0};   ///< Gaussian FWHM for RT-based weighting (in seconds)
     double aggregation_cutoff_{0.01};   ///< Weight cutoff for including spectra in aggregation
+
+    /// Flag to track if CCS tolerance warning has been shown (mutable for const methods)
+    mutable bool ccs_warning_shown_{false};
   };
 } // namespace OpenMS

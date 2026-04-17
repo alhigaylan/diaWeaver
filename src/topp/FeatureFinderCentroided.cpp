@@ -7,12 +7,15 @@
 // --------------------------------------------------------------------------
 
 #include <OpenMS/FORMAT/FileHandler.h>
+#include <OpenMS/CONCEPT/LogStream.h>
+#include <OpenMS/KERNEL/MSExperiment.h>
 #include <OpenMS/KERNEL/StandardTypes.h>
 #include <OpenMS/KERNEL/RangeUtils.h>
 #include <OpenMS/FEATUREFINDER/FeatureFinderAlgorithmPicked.h>
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
 #include <OpenMS/CONCEPT/Constants.h>
 #include <OpenMS/IONMOBILITY/IMDataConverter.h>
+#include <OpenMS/IONMOBILITY/IMTypes.h>
 #include <OpenMS/SYSTEM/File.h>
 #include <OpenMS/PROCESSING/FEATURE/FeatureOverlapFilter.h>
 
@@ -186,6 +189,20 @@ protected:
     if (exp.getSpectra().empty())
     {
       throw OpenMS::Exception::FileEmpty(__FILE__, __LINE__, __FUNCTION__, "Error: No MS1 spectra in input file.");
+    }
+
+    // Check for unsupported per-peak ion mobility data
+    for (const auto& spec : exp)
+    {
+      IMFormat im_format = IMTypes::determineIMFormat(spec);
+      if (im_format == IMFormat::IM_PEAK)
+      {
+        OPENMS_LOG_ERROR << "Error: Input contains per-peak ion mobility data (IM_PEAK, "
+                         << imPeakTypeToString(spec.getIMPeakType())
+                         << ") which is not supported by FeatureFinderCentroided. "
+                         << "Preprocess with IonMobilityBinning or PeakPickerIM first." << std::endl;
+        return INCOMPATIBLE_INPUT_DATA;
+      }
     }
 
     // determine type of spectral data (profile or centroided)

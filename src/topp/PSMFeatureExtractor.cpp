@@ -8,15 +8,14 @@
 #include <OpenMS/config.h>
 
 #include <OpenMS/FORMAT/FileHandler.h>
+#include <OpenMS/CONCEPT/LogStream.h>
+#include <OpenMS/METADATA/PeptideIdentificationList.h>
+#include <OpenMS/METADATA/ProteinIdentification.h>
 #include <OpenMS/DATASTRUCTURES/StringListUtils.h>
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
 #include <OpenMS/CONCEPT/ProgressLogger.h>
 #include <OpenMS/CONCEPT/Constants.h>
 #include <OpenMS/ANALYSIS/ID/PercolatorFeatureSetHelper.h>
-#include <QtCore/QFile>
-#include <QtCore/QDir>
-#include <QtCore/QProcess>
-
 #include <iostream>
 #include <cmath>
 #include <string>

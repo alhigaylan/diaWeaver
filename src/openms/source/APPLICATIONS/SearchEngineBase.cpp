@@ -11,6 +11,8 @@
 #include <OpenMS/ANALYSIS/ID/PeptideIndexing.h>
 #include <OpenMS/CONCEPT/LogStream.h>
 #include <OpenMS/FORMAT/FileHandler.h>
+#include <OpenMS/METADATA/PeptideIdentificationList.h>
+#include <OpenMS/METADATA/ProteinIdentification.h>
 #include <OpenMS/FORMAT/MzMLFile.h>
 #include <OpenMS/SYSTEM/File.h>
 
@@ -74,6 +76,9 @@ namespace OpenMS
       }
       case FileTypes::MGF:
         // no warning required. MGF files should be centroided by definition
+        break;
+      case FileTypes::BRUKER_TDF:
+        // no warning required. TimsTOF data is inherently centroided
         break;
       default:
         OPENMS_LOG_WARN << "Warning: make sure that MS" << ms_level << " spectra in '" << inputfile_name << "' are centroided. Otherwise the results may be undefined!";

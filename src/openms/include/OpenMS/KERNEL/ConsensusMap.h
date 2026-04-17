@@ -12,16 +12,14 @@
 #include <OpenMS/CONCEPT/UniqueIdIndexer.h>
 #include <OpenMS/KERNEL/RangeManager.h>
 #include <OpenMS/KERNEL/ConsensusFeature.h>
-#include <OpenMS/KERNEL/MSExperiment.h>
 
 #include <OpenMS/METADATA/DocumentIdentifier.h>
 #include <OpenMS/METADATA/MetaInfoInterface.h>
 #include <OpenMS/METADATA/PeptideIdentificationList.h>
-#include <OpenMS/METADATA/PeptideIdentification.h>
+#include <OpenMS/METADATA/ProteinIdentification.h>
 #include <OpenMS/METADATA/ID/IdentificationData.h>
 
 #include <OpenMS/CONCEPT/Types.h>
-#include <OpenMS/CONCEPT/LogStream.h>
 #include <OpenMS/DATASTRUCTURES/ExposedVector.h>
 #include <OpenMS/DATASTRUCTURES/String.h>
 #include <OpenMS/DATASTRUCTURES/Utils/MapUtilities.h>
@@ -37,6 +35,7 @@ namespace OpenMS
   class PeptideHit;
   class ProteinIdentification;
   class DataProcessing;
+  class MSExperiment;
   namespace Logger
   {
     class LogStream;
@@ -77,7 +76,7 @@ public:
     };
 
     /// Description of the columns in a consensus map
-    struct  ColumnHeader :
+    struct OPENMS_DLLAPI ColumnHeader :
       public MetaInfoInterface
     {
       /// Default constructor
@@ -229,6 +228,12 @@ public:
 
     /// sets the protein identifications by moving
     void setProteinIdentifications(std::vector<ProteinIdentification>&& protein_identifications);
+
+    /// finds a protein identification by its identifier (returns nullptr if not found)
+    const ProteinIdentification* findProteinIdentification(const String& identifier) const;
+
+    /// finds a protein identification by its identifier (returns nullptr if not found)
+    ProteinIdentification* findProteinIdentification(const String& identifier);
 
     /// non-mutable access to the unassigned peptide identifications
     const PeptideIdentificationList& getUnassignedPeptideIdentifications() const;

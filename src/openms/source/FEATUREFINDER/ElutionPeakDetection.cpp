@@ -49,7 +49,7 @@ namespace OpenMS
   {
     // compute RMSE
     double squared_sum(0.0);
-    std::vector<double> smooth_ints(tr.getSmoothedIntensities());
+    const std::vector<double>& smooth_ints(tr.getSmoothedIntensities());
 
     for (Size i = 0; i < smooth_ints.size(); ++i)
     {
@@ -497,7 +497,7 @@ namespace OpenMS
         MassTrace new_mt(tmp_mt);
         new_mt.setSmoothedIntensities(smoothed_tmp);
         // copy ion mobility centroid and peak fwhm to split traces
-        new_mt.setCentroidIM(mt.getCentroidIM());
+        if (mt.containsIMData()) new_mt.setCentroidIM(mt.getCentroidIM());
         new_mt.fwhm_mz_avg = mt.fwhm_mz_avg;
         new_mt.fwhm_im_avg = mt.fwhm_im_avg;
 

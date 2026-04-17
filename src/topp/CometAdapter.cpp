@@ -15,6 +15,10 @@
 #include <OpenMS/FORMAT/MzMLFile.h>
 #include <OpenMS/FORMAT/PepXMLFile.h>
 #include <OpenMS/FORMAT/FileHandler.h>
+#include <OpenMS/CONCEPT/LogStream.h>
+#include <OpenMS/KERNEL/MSExperiment.h>
+#include <OpenMS/METADATA/PeptideIdentificationList.h>
+#include <OpenMS/METADATA/ProteinIdentification.h>
 #include <OpenMS/FORMAT/HANDLERS/IndexedMzMLDecoder.h>
 #include <OpenMS/FORMAT/DATAACCESS/MSDataWritingConsumer.h>
 #include <OpenMS/METADATA/SpectrumMetaDataLookup.h>
@@ -26,10 +30,18 @@
 #include <OpenMS/CHEMISTRY/ResidueModification.h>
 #include <OpenMS/SYSTEM/File.h>
 
-#include <fstream>
+#include <OpenMS/ANALYSIS/ID/CometModification.h>
 
-#include <QStringList>
-#include <QRegularExpression>
+#include <unordered_map>
+
+#ifdef WITH_OPENTIMS
+#include <OpenMS/FORMAT/BrukerTimsFile.h>
+#endif
+
+#include <fstream>
+#include <iomanip>
+#include <regex>
+#include <algorithm>
 
 using namespace OpenMS;
 using namespace std;
@@ -101,11 +113,28 @@ protected:
 
   map<string,int> num_enzyme_termini {{"semi",1},{"fully",2},{"C-term unspecific", 8},{"N-term unspecific",9}};
 
+#ifdef WITH_OPENTIMS
+  BrukerTimsFile::Config getBrukerConfig_()
+  {
+    BrukerTimsFile::Config c;
+    c.calibration_tolerance = getDoubleOption_("bruker:calibration_tolerance");
+    c.calibrate = (getStringOption_("bruker:calibrate") == "true");
+    String mode = getStringOption_("bruker:export_mode");
+    if (mode == "spectrum") c.export_mode = BrukerTimsFile::Config::SPECTRUM;
+    else c.export_mode = BrukerTimsFile::Config::AUTO;
+    return c;
+  }
+#endif
+
   void registerOptionsAndFlags_() override
   {
 
     registerInputFile_("in", "<file>", "", "Input file");
-    setValidFormats_("in", { "mzML" } );
+    setValidFormats_("in", { "mzML",
+#ifdef WITH_OPENTIMS
+      "d",
+#endif
+    });
     registerOutputFile_("out", "<file>", "", "Output file");
     setValidFormats_("out", { "idXML"} );
     registerInputFile_("database", "<file>", "", "FASTA file", true, false, {"skipexists"});
@@ -242,8 +271,19 @@ protected:
     registerStringOption_("require_variable_mod", "<bool>", "false", "If true, requires at least one variable modification per peptide", false, true);
     setValidStrings_("require_variable_mod", ListUtils::create<String>("true,false"));
 
+#ifdef WITH_OPENTIMS
+    registerTOPPSubsection_("bruker", "Options for reading Bruker TimsTOF .d files (requires WITH_OPENTIMS)");
+    registerStringOption_("bruker:export_mode", "<mode>", "auto", "Export mode: 'auto' detects DDA/DIA acquisition type, "
+      "'spectrum' forces per-precursor spectra (DDA style).", false, true);
+    setValidStrings_("bruker:export_mode", {"auto", "spectrum"});
+    registerDoubleOption_("bruker:calibration_tolerance", "<float>", 0.0, "m/z recalibration tolerance (0 = library default)", false, true);
+    setMinFloat_("bruker:calibration_tolerance", 0.0);
+    registerStringOption_("bruker:calibrate", "<toggle>", "false", "Enable m/z recalibration (may fail on some datasets)", false, true);
+    setValidStrings_("bruker:calibrate", {"true", "false"});
+#endif
+
     // register peptide indexing parameter (with defaults for this search engine) TODO: check if search engine defaults are needed
-    registerPeptideIndexingParameter_(PeptideIndexing().getParameters()); 
+    registerPeptideIndexingParameter_(PeptideIndexing().getParameters());
   }
 
   const vector<const ResidueModification*> getModifications_(const StringList& modNames)
@@ -290,10 +330,14 @@ protected:
     isotope_error["-1/0/1/2/3"] = 5;
 
     // comet_version is something like "# comet_version 2017.01 rev. 1"
-    QRegularExpression comet_version_regex("(\\d{4})\\.(\\d*)rev");
-    if (auto match = comet_version_regex.match(comet_version.toQString().remove(' ')); match.hasMatch())
+    // Remove spaces for matching
+    std::string version_no_spaces = comet_version;
+    version_no_spaces.erase(std::remove(version_no_spaces.begin(), version_no_spaces.end(), ' '), version_no_spaces.end());
+    std::regex comet_version_regex("(\\d{4})\\.(\\d*)rev");
+    std::smatch match;
+    if (std::regex_search(version_no_spaces, match, comet_version_regex))
     {
-      const int comet_year = match.captured(1).toInt();
+      const int comet_year = std::stoi(match[1].str());
       if (comet_version.hasSubstring("2024.01 rev. 0"))
       {
         OPENMS_LOG_WARN << "Comet v2024.01.0 is known to have several bugs (see https://github.com/UWPR/Comet/issues/63). Please use a different version if possible." << std::endl;
@@ -345,10 +389,6 @@ protected:
     //     e.g. 79.966331 STY 0 3 -1 0 0 97.976896
     vector<String> variable_modifications_names = getStringList_("variable_modifications");
     const vector<const ResidueModification*> variable_modifications = getModifications_(variable_modifications_names);
-    if (variable_modifications.size() > 9)
-    {
-      throw OpenMS::Exception::IllegalArgument(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION, "Error: Comet supports at most 9 variable modifications. " + String(variable_modifications.size()) + " provided.");
-    }
 
     IntList binary_modifications = getIntList_("binary_modifications");
     if (!binary_modifications.empty() && binary_modifications.size() != variable_modifications.size())
@@ -357,88 +397,45 @@ protected:
     }
 
     int max_variable_mods_in_peptide = getIntOption_("max_variable_mods_in_peptide");
-    Size var_mod_index = 0;
 
-    // write out user specified modifications
-    for (; var_mod_index < variable_modifications.size(); ++var_mod_index)
+    // Convert all modifications to CometModification objects
+    vector<CometModification> all_mods;
+    all_mods.reserve(variable_modifications.size());
+    for (Size i = 0; i < variable_modifications.size(); ++i)
     {
-      const ResidueModification* mod = variable_modifications[var_mod_index];
-      double mass = mod->getDiffMonoMass();
-      String residues = mod->getOrigin();
+      int binary_group = binary_modifications.empty() ? 0 : binary_modifications[i];
+      all_mods.emplace_back(variable_modifications[i], binary_group, max_variable_mods_in_peptide);
+    }
 
-      // support for binary groups, e.g. for SILAC
-      int binary_group{0};
-      if (!binary_modifications.empty())
-      {
-        binary_group = binary_modifications[var_mod_index];
-      }
+    // Merge compatible modifications (same mass, compatible terminal specificity)
+    vector<CometModification> merged_mods = CometModification::mergeModifications(all_mods);
 
-      //TODO support mod-specific limit (default for now is the overall max per peptide)
-      int max_current_mod_per_peptide = max_variable_mods_in_peptide;
-      //TODO support term-distances?
-      int term_distance = -1;
-      int nc_term = 0;
+    if (merged_mods.size() < all_mods.size())
+    {
+      OPENMS_LOG_INFO << "Merged " << all_mods.size() << " variable modifications into "
+                      << merged_mods.size() << " Comet entries." << std::endl;
+    }
 
-      //TODO support agglomeration of Modifications to same AA. Watch out for nc_term value then.
-      if (mod->getTermSpecificity() == ResidueModification::C_TERM)
-      {
-        if (mod->getOrigin() == 'X')
-        {
-          residues = "c";
-        } // else stays mod.getOrigin()
-        term_distance = 0;
-        // Since users need to specify mods that apply to multiple residues/terms separately
-        // 3 and -1 should be equal for now.
-        nc_term = 3;
-      }
-      else if (mod->getTermSpecificity() == ResidueModification::N_TERM)
-      {
-        if (mod->getOrigin() == 'X')
-        {
-          residues = "n";
-        } // else stays mod.getOrigin()
-        term_distance = 0;
-        // Since users need to specify mods that apply to multiple residues/terms separately
-        // 2 and -1 should be equal for now.
-        nc_term = 2;
-      }
-      else if (mod->getTermSpecificity() == ResidueModification::PROTEIN_N_TERM)
-      {
-        if (mod->getOrigin() == 'X')
-        {
-          residues = "n";
-        } // else stays mod.getOrigin()
-        term_distance = 0;
-        nc_term = 0;
-      }
-      else if (mod->getTermSpecificity() == ResidueModification::PROTEIN_C_TERM)
-      {
-        if (mod->getOrigin() == 'X')
-        {
-          residues = "c";
-        } // else stays mod.getOrigin()
-        term_distance = 0;
-        nc_term = 1;
-      }
+    // Check if we have too many modifications after merging
+    if (merged_mods.size() > 9)
+    {
+      throw OpenMS::Exception::IllegalArgument(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+        "Error: Comet supports at most 9 variable modification entries. After merging compatible modifications, "
+        + String(merged_mods.size()) + " entries remain. Consider using fewer distinct modification types.");
+    }
 
-      //TODO support required variable mods
-      bool required = false;
-
-      os << "variable_mod0" << var_mod_index+1 << " = " 
-         << mass << " " << residues << " " 
-         << binary_group << " " 
-         << max_current_mod_per_peptide << " " 
-         << term_distance << " " 
-         << nc_term << " " 
-         << required << " " 
-         << "0.0" // TODO: add neutral losses (from Residue or user defined?)
-         << "\n";
+    // Write out merged modifications
+    Size var_mod_index = 0;
+    for (; var_mod_index < merged_mods.size(); ++var_mod_index)
+    {
+      os << merged_mods[var_mod_index].toCometString(var_mod_index + 1) << "\n";
     }
 
     // fill remaining modification slots (if any) in Comet with "no modification"
     for (; var_mod_index < 9; ++var_mod_index)
     {
-      os << "variable_mod0" << var_mod_index+1 << " = " << "0.0 X 0 3 -1 0 0 0.0" << "\n";
+      os << "variable_mod" << std::setw(2) << std::setfill('0') << var_mod_index + 1
+         << " = " << "0.0 X 0 3 -1 0 0 0.0" << "\n";
     }
 
     os << "max_variable_mods_in_peptide = " << getIntOption_("max_variable_mods_in_peptide") << "\n";
@@ -648,7 +645,7 @@ protected:
 
     writeDebug_("Comet is writing the default parameter file...", 1);
     
-    TOPPBase::ExitCodes exit_code = runExternalProcess_(comet_executable.toQString(), QStringList() << "-p", tmp_dir.getPath().toQString());
+    TOPPBase::ExitCodes exit_code = runExternalProcess_(comet_executable, {"-p"}, tmp_dir.getPath());
     if (exit_code != EXECUTION_OK)
     {
       return exit_code; // will do the right thing, since it's correctly mapping TOPPBase exit codes
@@ -694,45 +691,102 @@ protected:
         tmp_file = default_params;
     }
 
-    // check for mzML index (comet requires one)
+    // Load input data — branch on file type
     MSExperiment exp;
-    MzMLFile mzml_file{};
     String input_file_with_index = inputfile_name;
-    if (!mzml_file.hasIndex(inputfile_name))
-    {
-      OPENMS_LOG_WARN << "The mzML file provided to CometAdapter is not indexed, but comet requires one. "
-                      << "We will add an index by writing a temporary file. If you run this analysis more often, consider indexing your mzML in advance!" << std::endl;
-      // Low memory conversion
-      // write mzML with index again
-      auto tmp_file = File::getTemporaryFile() + ".mzML";
-      PlainMSDataWritingConsumer consumer(tmp_file);
-      consumer.getOptions().addMSLevel(ms_level); // only load msLevel 2
-      bool skip_full_count = true;
-      mzml_file.transform(inputfile_name, &consumer, skip_full_count);
-      input_file_with_index = tmp_file;
-    }
 
-	// Load spectra metadata to map to idXML
-    mzml_file.getOptions().setMetadataOnly(false);
-	mzml_file.getOptions().setFillData(false);
-	mzml_file.getOptions().clearMSLevels();
-	// Ion mobility data is currently stored in MS2
-	mzml_file.getOptions().addMSLevel(2);
-    mzml_file.load(inputfile_name, exp);
+#ifdef WITH_OPENTIMS
+    const bool is_bruker_d = (FileHandler::getType(inputfile_name) == FileTypes::BRUKER_TDF);
+    if (is_bruker_d)
+    {
+      // Load .d via BrukerTimsFile. Skip MS1 loading for MS2 searches since
+      // Comet only searches MS2 — cuts load time substantially.
+      auto bruker_config = getBrukerConfig_();
+      if (ms_level == 2)
+        bruker_config.load_ms1 = false;
+      BrukerTimsFile tims_file;
+      tims_file.setLogType(log_type_);
+      tims_file.load(inputfile_name, exp, bruker_config);
+
+      // Filter to target MS level only (Comet only needs MS2). Redundant when
+      // load_ms1=false for MS2 searches but kept for safety / MS1 searches.
+      std::erase_if(exp.getSpectra(), [&](const MSSpectrum& s) { return s.getMSLevel() != static_cast<UInt>(ms_level); });
+
+      OPENMS_LOG_INFO << "Loaded " << exp.size() << " MS" << ms_level << " spectra from Bruker .d directory." << std::endl;
+
+      if (!exp.empty())
+      {
+        writeDebug_("First native ID from .d: " + exp[0].getNativeID(), 2);
+        writeDebug_("Last native ID from .d: " + exp[exp.size() - 1].getNativeID(), 2);
+      }
+
+      // Rewrite native IDs to "index=N" (monotonic) before the temp-mzML write.
+      //
+      // Bruker .d DDA native IDs are of the form "frame=F scan=S precursor=P".
+      // Comet's bundled mzParser (MSToolkit/saxmzmlhandler.cpp) greps for "scan="
+      // anywhere in the id and uses atoi of the following digits as its sort
+      // key. Because `scan=S` here is the TIMS isolation-window start (not a
+      // monotonic counter), mzParser detects "unsorted" scans and falls into
+      // a std::sort with a strict-weak-ordering-violating comparator
+      // (cindex::compare returns true for equal values) → undefined behavior
+      // → segfault in std::string shuffling.
+      //
+      // Workaround: rewrite native IDs to `index=N` (counter path, no atoi
+      // on scan=) before handing the mzML to Comet. Preserve the original
+      // native ID on each spectrum so post-Comet PSMs can be translated back.
+      size_t idx = 0;
+      for (auto& spec : exp.getSpectra())
+      {
+        spec.setMetaValue("original_native_id", spec.getNativeID());
+        spec.setNativeID("index=" + String(idx++));
+      }
+
+      // Write to temporary indexed mzML for Comet
+      auto tmp_mzml = File::getTemporaryFile() + ".mzML";
+      MzMLFile().store(tmp_mzml, exp);
+      input_file_with_index = tmp_mzml;
+
+      // Free peak data but keep spectrum metadata (native IDs, drift times)
+      // needed for IM annotation in post-processing.
+      for (auto& spec : exp.getSpectra()) { spec.clear(false); }
+    }
+    else
+#endif
+    {
+      // Existing mzML path
+      MzMLFile mzml_file{};
+      if (!mzml_file.hasIndex(inputfile_name))
+      {
+        OPENMS_LOG_WARN << "The mzML file provided to CometAdapter is not indexed, but comet requires one. "
+                        << "We will add an index by writing a temporary file. If you run this analysis more often, consider indexing your mzML in advance!" << std::endl;
+        auto tmp_file_mzml = File::getTemporaryFile() + ".mzML";
+        PlainMSDataWritingConsumer consumer(tmp_file_mzml);
+        consumer.getOptions().addMSLevel(ms_level);
+        bool skip_full_count = true;
+        mzml_file.transform(inputfile_name, &consumer, skip_full_count);
+        input_file_with_index = tmp_file_mzml;
+      }
+
+      // Load spectra metadata to map to idXML
+      mzml_file.getOptions().setMetadataOnly(false);
+      mzml_file.getOptions().setFillData(false);
+      mzml_file.getOptions().clearMSLevels();
+      mzml_file.getOptions().addMSLevel(ms_level);
+      mzml_file.load(inputfile_name, exp);
+    }
 
     //-------------------------------------------------------------
     // calculations
     //-------------------------------------------------------------
     String paramP = "-P" + tmp_file;
     String paramN = "-N" + FileHandler::stripExtension(FileHandler::stripExtension(tmp_pepxml));
-    QStringList arguments;
-    arguments << paramP.toQString() << paramN.toQString() << input_file_with_index.toQString();
+    std::vector<String> arguments = {paramP, paramN, input_file_with_index};
 
     //-------------------------------------------------------------
     // run comet
     //-------------------------------------------------------------
     // Comet execution with the executable and the arguments StringList
-    exit_code = runExternalProcess_(comet_executable.toQString(), arguments);
+    exit_code = runExternalProcess_(comet_executable, arguments);
     if (exit_code != EXECUTION_OK)
     {
       return exit_code;
@@ -782,13 +836,43 @@ protected:
     {
       protein_identifications[0].setMetaValue(Constants::UserParam::IM, exp.getSpectrum(0).getDriftTimeUnitAsString());
     }
+#ifdef WITH_OPENTIMS
+    else if (is_bruker_d)
+    {
+      OPENMS_LOG_WARN << "Warning: Bruker .d input but not all peptide IDs could be annotated with ion mobility values. "
+                      << "This may indicate a native ID mismatch between the .d data and Comet results." << std::endl;
+    }
+#endif
 
     // Parse FAIMS compensation voltage if present
     SpectrumMetaDataLookup::addMissingFAIMSToPeptideIDs(peptide_identifications, exp);
 
+#ifdef WITH_OPENTIMS
+    // Translate PSM spectrum references back from "index=N" (the rewritten form
+    // we handed to Comet to work around the mzParser sort bug) to the original
+    // Bruker native ID ("frame=F scan=S precursor=P"). Only the Bruker branch
+    // set original_native_id; the mzML branch has no-op for this loop.
+    if (is_bruker_d && !exp.empty() && exp[0].metaValueExists("original_native_id"))
+    {
+      // Build rewritten-id → original-id map once (O(N) vs O(N*M) linear scan).
+      std::unordered_map<String, String> id_map;
+      id_map.reserve(exp.size());
+      for (const auto& spec : exp.getSpectra())
+      {
+        if (spec.metaValueExists("original_native_id"))
+          id_map.emplace(spec.getNativeID(), spec.getMetaValue("original_native_id").toString());
+      }
+      for (auto& pid : peptide_identifications)
+      {
+        auto it = id_map.find(pid.getSpectrumReference());
+        if (it != id_map.end()) pid.setSpectrumReference(it->second);
+      }
+    }
+#endif
+
     // remove base_name meta value from peptide identifications
     for (auto& peptide_identification : peptide_identifications)
-    {      
+    {
       peptide_identification.removeMetaValue("base_name");
     }
 

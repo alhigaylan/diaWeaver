@@ -322,7 +322,8 @@ namespace OpenMS
       {
         float sn_by_matched_intensity = (match_intensity / ions.size()) /
                 ((sum_intensity-match_intensity) / (spec.size()-ions.size()));
-        if (spec.size() - ions.size() == 0)
+        // Avoid division by zero when all peaks are matched
+        if (spec.size() == ions.size())
         {
           sn_by_matched_intensity = 0;
         }
@@ -376,7 +377,7 @@ namespace OpenMS
       }
       //TODO add "FragmentArray"s
 
-      Param sap = sa.getParameters();
+      const Param& sap = sa.getParameters();
       pi.setMetaValue("fragment_match_tolerance", (double)sap.getValue("tolerance"));
     }  
   }

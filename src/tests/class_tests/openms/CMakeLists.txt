@@ -64,6 +64,8 @@ foreach(t ${Boost_dependent_tests})
 endforeach()
 
 target_link_libraries(Base64_test ZLIB::ZLIB)
+target_link_libraries(Libzip_test libzip::zip)
+target_link_libraries(ZipRandomAccessFile_test libzip::zip)
 target_link_libraries(LPWrapper_test CoinOR::CoinOR)
 target_link_libraries(SpectraSTSimilarityScore_test Eigen3::Eigen)
 target_link_libraries(BinnedSpectrum_test Eigen3::Eigen)
@@ -71,21 +73,92 @@ target_link_libraries(BilinearInterpolation_test Eigen3::Eigen)
 target_link_libraries(MatrixEigen_test Eigen3::Eigen)
 target_link_libraries(MRMScoring_test Eigen3::Eigen)
 
+
 if (WITH_HDF5)
   target_link_libraries(HDF5_test HDF5::HDF5)
 endif()
 
-if (WITH_PARQUET)
-  target_link_libraries(Arrow_test 
+target_link_libraries(Arrow_test
   ${OPENMS_ARROW_TARGET}
   ${OPENMS_PARQUET_TARGET}
+)
+target_link_libraries(MSExperimentArrowExport_test
+  ${OPENMS_ARROW_TARGET}
+  ${OPENMS_PARQUET_TARGET}
+)
+target_link_libraries(ConsensusMapArrowExport_test
+  ${OPENMS_ARROW_TARGET}
+  ${OPENMS_PARQUET_TARGET}
+)
+target_link_libraries(QPXFile_test
+  ${OPENMS_ARROW_TARGET}
+  ${OPENMS_PARQUET_TARGET}
+)
+target_link_libraries(ProteinIdentificationArrowIO_test
+  ${OPENMS_ARROW_TARGET}
+  ${OPENMS_PARQUET_TARGET}
+)
+target_link_libraries(FeatureMapArrowIO_test
+  ${OPENMS_ARROW_TARGET}
+  ${OPENMS_PARQUET_TARGET}
+)
+target_link_libraries(ConsensusMapArrowIO_test
+  ${OPENMS_ARROW_TARGET}
+  ${OPENMS_PARQUET_TARGET}
+)
+target_link_libraries(Libzip_test
+  ${OPENMS_ARROW_TARGET}
+  ${OPENMS_PARQUET_TARGET}
+)
+target_link_libraries(ZipRandomAccessFile_test
+  ${OPENMS_ARROW_TARGET}
+  ${OPENMS_PARQUET_TARGET}
+)
+
+if (TARGET TransitionParquetFile_test)
+  target_link_libraries(TransitionParquetFile_test
+    ${OPENMS_ARROW_TARGET}
+    ${OPENMS_PARQUET_TARGET}
   )
-  target_link_libraries(QuantmsIO_test 
-  ${OPENMS_ARROW_TARGET}
-  ${OPENMS_PARQUET_TARGET}
+endif()
+if (TARGET OpenSwathOSWParquetReader_test)
+  target_link_libraries(OpenSwathOSWParquetReader_test
+    ${OPENMS_ARROW_TARGET}
+    ${OPENMS_PARQUET_TARGET}
+  )
+endif()
+if (TARGET OpenSwathOSWParquetWriter_test)
+  target_link_libraries(OpenSwathOSWParquetWriter_test
+    ${OPENMS_ARROW_TARGET}
+    ${OPENMS_PARQUET_TARGET}
+  )
+endif()
+if (TARGET OpenSwathOSWParquetRoundTrip_test)
+  target_link_libraries(OpenSwathOSWParquetRoundTrip_test
+    ${OPENMS_ARROW_TARGET}
+    ${OPENMS_PARQUET_TARGET}
+  )
+endif()
+if (TARGET ArrowSchemaRegistry_test)
+  target_link_libraries(ArrowSchemaRegistry_test
+    ${OPENMS_ARROW_TARGET}
+    ${OPENMS_PARQUET_TARGET}
   )
 endif()
 
+if (TARGET BrukerTimsFile_test AND WITH_OPENTIMS)
+  target_link_libraries(BrukerTimsFile_test opentims::opentims_cpp sqlite3)
+endif()
+
+if (TARGET BrukerTimsFile_test AND OPENTIMS_DDA_TEST_DATA)
+  target_compile_definitions(BrukerTimsFile_test PRIVATE
+    OPENTIMS_DDA_TEST_DATA="${OPENTIMS_DDA_TEST_DATA}"
+    OPENTIMS_DIA_TEST_DATA="${OPENTIMS_DIA_TEST_DATA}"
+    OPENTIMS_TEST_FASTA="${OPENTIMS_TEST_FASTA}")
+  # This test loads real Bruker .d files (DDA + DIA) including frame aggregation
+  # and a peptide search engine run, so it needs a generous timeout.
+  set_tests_properties(BrukerTimsFile_test PROPERTIES TIMEOUT 1200)
+endif()
 
 #------------------------------------------------------------------------------
 # restore old compiler flags

@@ -288,7 +288,7 @@ namespace OpenMS
     {
       // copy non-IM or already framed spectra
       // throws Exception if spec has mixed IM format
-      if (IMTypes::determineIMFormat(spec) != IMFormat::MULTIPLE_SPECTRA)
+      if (IMTypes::determineIMFormat(spec) != IMFormat::IM_SPECTRUM)
       {
         processDriftTimeStack(stack, result); // clear current stack
         result.getSpectra().push_back(spec);
@@ -330,13 +330,17 @@ namespace OpenMS
   bool IMDataConverter::getIMUnit(const DataArrays::FloatDataArray& fda, DriftTimeUnit& unit)
   {
     const auto& cv = ControlledVocabulary::getPSIMSCV();
-    if (fda.getName().hasPrefix(Constants::UserParam::ION_MOBILITY))
-    { // fallback for non-standard IM arrays (as created by Mobi-DIK, or "Ion Mobility Centroid" from PeakPickerIM)
-      // MS:1002815 --> inverse reduced ion mobility, units VSSC
-      // MS:1003006 --> mean inverse reduced ion mobility array. units VSSC.
+    if (fda.getName().hasPrefix(Constants::UserParam::ION_MOBILITY) ||
+        fda.getName().hasPrefix(Constants::UserParam::INVERSE_REDUCED_ION_MOBILITY) ||
+        fda.getName().hasPrefix(Constants::UserParam::MEAN_INVERSE_REDUCED_ION_MOBILITY_ARRAY))
+    { // fallback for non-standard IM arrays (as created by Mobi-DIK, "Ion Mobility Centroid" from PeakPickerIM, "inverse reduced ion mobility" from MSConvert, or "mean inverse reduced ion mobility array" from Bruker)
       if (fda.getName().hasSubstring("MS:1002815"))
       {
         unit = DriftTimeUnit::VSSC;
+      }
+      else if (fda.getName().hasSubstring("MS:1002954"))
+      {
+        unit = DriftTimeUnit::CCS;
       }
       else
       {
@@ -357,6 +361,10 @@ namespace OpenMS
         else if (cv_term.units.find("UO:0000028") != cv_term.units.end())
         { // UO:0000028 ! millisecond
           unit = DriftTimeUnit::MILLISECOND;
+        }
+        else if (cv_term.units.find("UO:0000324") != cv_term.units.end())
+        { // UO:0000324 ! square angstrom (CCS)
+          unit = DriftTimeUnit::CCS;
         }
         else
         { // fallback

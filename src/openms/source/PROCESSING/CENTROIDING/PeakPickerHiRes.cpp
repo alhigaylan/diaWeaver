@@ -46,8 +46,8 @@ namespace OpenMS
     defaults_.setValidStrings("report_FWHM", {"true","false"});
     defaults_.setValue("report_FWHM_unit", "relative", "Unit of FWHM. Either absolute in the unit of input, e.g. 'm/z' for spectra, or relative as ppm (only sensible for spectra, not chromatograms).");
     defaults_.setValidStrings("report_FWHM_unit", {"relative","absolute"});
-    defaults_.setValue("one_sided", "false", "Allow PeakPickerHiRes to pick peaks not flanked by lower intensity neighbor peaks on both sides. Highly recommended for TimsTOF data");
-    defaults_.setValidStrings("one_sided", {"true","false"});
+    defaults_.setValue("allow_missing_flank", "false", "Allow peaks without flanking data points on both sides. This is useful for TimsTOF data where profile peaks may be missing the leading or trailing edge.", {"advanced"});
+    defaults_.setValidStrings("allow_missing_flank", {"true","false"});
 
     // parameters for STN estimator
     defaults_.insert("SignalToNoise:", SignalToNoiseEstimatorMedian< MSSpectrum >().getDefaults());
@@ -201,13 +201,16 @@ namespace OpenMS
       }
 
       // look for peak cores meeting MZ and intensity/SNT criteria
+      // When allow_missing_flank_ is false (default): require both neighbors (AND)
+      // When allow_missing_flank_ is true: allow peaks with only one neighbor (OR) - useful for TimsTOF data
+      bool spacing_ok = !check_spacings ||
+          (allow_missing_flank_ ? (has_left_neighbor || has_right_neighbor) : (has_left_neighbor && has_right_neighbor));
       if ((central_peak_int > left_neighbor_int) &&
           (central_peak_int > right_neighbor_int) &&
           (act_snt >= signal_to_noise_) &&
           (act_snt_l1 >= signal_to_noise_) &&
           (act_snt_r1 >= signal_to_noise_) &&
-          (!check_spacings ||
-           (one_sided_ ? (has_left_neighbor || has_right_neighbor) : (has_left_neighbor && has_right_neighbor))))
+          spacing_ok)
       {
         // special case: if a peak core is surrounded by more intense
         // satellite peaks (indicates oscillation rather than
@@ -225,13 +228,15 @@ namespace OpenMS
         bool has_left_neighbor_l2 = left_neighbor_mz - input[i - 2].getPos() < spacing_difference_ * min_spacing;
         bool has_right_neighbor_r2 = input[i + 2].getPos() - right_neighbor_mz < spacing_difference_ * min_spacing;
 
+        bool spacing_ok_l2r2 = !check_spacings ||
+            (allow_missing_flank_ ? (has_left_neighbor_l2 || has_right_neighbor_r2) : (has_left_neighbor_l2 && has_right_neighbor_r2));
         if ((i > 1) &&
           (i + 2 < input.size()) &&
           (left_neighbor_int < input[i - 2].getIntensity()) &&
           (right_neighbor_int < input[i + 2].getIntensity()) &&
           (act_snt_l2 >= signal_to_noise_) &&
           (act_snt_r2 >= signal_to_noise_) &&
-          (!check_spacings || (one_sided_ ? (has_left_neighbor_l2 || has_right_neighbor_r2) : (has_left_neighbor_l2 && has_right_neighbor_r2))))
+          spacing_ok_l2r2)
         {
           ++i;
           continue;
@@ -356,10 +361,12 @@ namespace OpenMS
         // Introducing a 'phantom' peak extending past 'peak_spline' range will throw an error.
         // We have to add a proper peak to peak_spline and have to decide what ion mobility value to assign to it.
 
-        // for now, simply replace mz value of missing neighbor with central mz peak.
-        if (one_sided_) {
-          left_neighbor_mz = (has_left_neighbor) ? left_neighbor_mz: central_peak_mz;
-          right_neighbor_mz = (has_right_neighbor) ? right_neighbor_mz: central_peak_mz;
+        // If a neighbor is missing, use central peak mz for spline bisection bounds
+        // Only apply when check_spacings is true, otherwise has_left/right_neighbor are uninitialized (false)
+        if (check_spacings)
+        {
+          left_neighbor_mz = (has_left_neighbor) ? left_neighbor_mz : central_peak_mz;
+          right_neighbor_mz = (has_right_neighbor) ? right_neighbor_mz : central_peak_mz;
         }
 
         double max_peak_mz = central_peak_mz;
@@ -643,7 +650,7 @@ namespace OpenMS
     ms_levels_ = getParameters().getValue("ms_levels");
     report_FWHM_ = getParameters().getValue("report_FWHM").toBool();
     report_FWHM_as_ppm_ = getParameters().getValue("report_FWHM_unit")!="absolute";
-    one_sided_ = getParameters().getValue("one_sided").toBool();
+    allow_missing_flank_ = getParameters().getValue("allow_missing_flank").toBool();
   }
 
 }

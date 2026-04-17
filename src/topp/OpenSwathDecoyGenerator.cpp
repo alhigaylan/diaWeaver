@@ -9,6 +9,8 @@
 #include <OpenMS/ANALYSIS/OPENSWATH/MRMDecoy.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/TransitionTSVFile.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/TransitionPQPFile.h>
+#include <OpenMS/ANALYSIS/OPENSWATH/DATAACCESS/DataAccessHelper.h>
+#include <OpenMS/ANALYSIS/OPENSWATH/TransitionParquetFile.h>
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
 #include <OpenMS/CONCEPT/ProgressLogger.h>
 #include <OpenMS/CONCEPT/Exception.h>
@@ -90,15 +92,17 @@ protected:
   {
     registerInputFile_("in", "<file>", "", "Input file");
     registerStringOption_("in_type", "<type>", "", "Input file type -- default: determined from file extension or content\n", false);
-    String formats("tsv,mrm,pqp,TraML");
-    setValidFormats_("in", ListUtils::create<String>(formats));
-    setValidStrings_("in_type", ListUtils::create<String>(formats));
+    StringList formats = {"tsv", "mrm", "pqp", "TraML"};
+    formats.push_back("oswpq");
+    setValidFormats_("in", formats);
+    setValidStrings_("in_type", formats);
 
-    formats = "tsv,pqp,TraML";
+    formats = {"tsv", "pqp", "TraML"};
+    formats.push_back("oswpq");
     registerOutputFile_("out", "<file>", "", "Output file");
-    setValidFormats_("out", ListUtils::create<String>(formats));
+    setValidFormats_("out", formats);
     registerStringOption_("out_type", "<type>", "", "Output file type -- default: determined from file extension or content\n", false);
-    setValidStrings_("out_type", ListUtils::create<String>(formats));
+    setValidStrings_("out_type", formats);
 
     registerStringOption_("method", "<type>", "shuffle", "Decoy generation method", false);
     setValidStrings_("method", ListUtils::create<String>(String("shuffle,pseudo-reverse,reverse,shift")));
@@ -194,8 +198,12 @@ protected:
     }
 
     // Use memory-efficient Light path for TSV/PQP → TSV/PQP conversions
-    bool use_light_path = (in_type == FileTypes::TSV || in_type == FileTypes::MRM || in_type == FileTypes::PQP)
-                       && (out_type == FileTypes::TSV || out_type == FileTypes::PQP);
+    bool use_light_path = (in_type == FileTypes::TSV || in_type == FileTypes::MRM || in_type == FileTypes::PQP
+                       || in_type == FileTypes::OSWPQ
+                       )
+                       && (out_type == FileTypes::TSV || out_type == FileTypes::PQP
+                       || out_type == FileTypes::OSWPQ
+                       );
 
     if (use_light_path)
     {
@@ -220,6 +228,11 @@ protected:
         pqp_reader.setLogType(log_type_);
         pqp_reader.setParameters(reader_parameters);
         pqp_reader.convertPQPToTargetedExperiment(in.c_str(), light_exp);
+      }
+      else if (in_type == FileTypes::OSWPQ)
+      {
+        TransitionParquetFile parquet_reader;
+        parquet_reader.convertParquetToTargetedExperiment(in, light_exp);
       }
 
       MRMDecoy decoys;
@@ -283,6 +296,11 @@ protected:
         pqp_writer.setLogType(log_type_);
         pqp_writer.convertLightTargetedExperimentToPQP(out.c_str(), light_merged);
       }
+      else if (out_type == FileTypes::OSWPQ)
+      {
+        TransitionParquetFile parquet_writer;
+        parquet_writer.convertLightTargetedExperimentToParquet(out, light_merged);
+      }
     }
     else
     {
@@ -312,6 +330,11 @@ protected:
           pqp_reader.setParameters(reader_parameters);
           pqp_reader.convertPQPToTargetedExperiment(tr_file, targeted_exp);
           pqp_reader.validateTargetedExperiment(targeted_exp);
+        }
+        else if (in_type == FileTypes::OSWPQ)
+        {
+          writeLogError_("Error: Parquet input is only supported for light-weight conversions.");
+          return PARSE_ERROR;
         }
         else if (in_type == FileTypes::TRAML)
         {
@@ -373,6 +396,13 @@ protected:
       else if (out_type == FileTypes::TRAML)
       {
         FileHandler().storeTransitions(out, targeted_merged, {FileTypes::TRAML});
+      }
+      else if (out_type == FileTypes::OSWPQ)
+      {
+        OpenSwath::LightTargetedExperiment light_exp;
+        OpenSwathDataAccessHelper::convertTargetedExp(targeted_merged, light_exp);
+        TransitionParquetFile parquet_writer;
+        parquet_writer.convertLightTargetedExperimentToParquet(out, light_exp);
       }
     }
 

@@ -354,7 +354,7 @@ private:
     bool report_chromatograms_;
 
     bool remove_single_traces_;
-    bool overlapping_features_;
+    bool has_im_data_ = false; ///< whether the input mass traces contain ion mobility data
     std::vector<const Element*> elements_;
   };
 

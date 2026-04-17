@@ -12,6 +12,7 @@
 #include <OpenMS/FEATUREFINDER/GaussTraceFitter.h>
 
 #include <OpenMS/FORMAT/FileHandler.h>
+#include <OpenMS/KERNEL/MSExperiment.h>
 #include <OpenMS/FORMAT/TextFile.h>
 #include <OpenMS/MATH/StatisticFunctions.h>
 #include <OpenMS/MATH/MathFunctions.h>
@@ -21,7 +22,7 @@
 #include <OpenMS/CHEMISTRY/ISOTOPEDISTRIBUTION/CoarseIsotopePatternGenerator.h>
 #include <OpenMS/CONCEPT/LogStream.h>
 #include <OpenMS/CONCEPT/Constants.h>
-#include <QtCore/QDir>
+#include <OpenMS/SYSTEM/File.h>
 
 #include <boost/math/special_functions/fpclassify.hpp> // isnan
 
@@ -229,8 +230,7 @@ namespace OpenMS
     //clean up / create folders for debug information
     if (debug_)
     {
-      QDir dir(".");
-      dir.mkpath("debug/features");
+      File::makeDir("debug/features");
       log_.open("debug/log.txt");
     }
 

@@ -42,9 +42,6 @@ message(STATUS "CTEST_SOURCE_DIRECTORY: ${CTEST_SOURCE_DIRECTORY}")
 message(STATUS "CTEST_BINARY_DIRECTORY: ${CTEST_BINARY_DIRECTORY}")
 
 set(OWN_OPTIONS "")
-if($ENV{CMAKE_GENERATOR} MATCHES ".*Visual Studio.*")
-  set(OWN_OPTIONS "-DCMAKE_CXX_RELEASE_FLAGS='/MD /Od /Ob0 /DNDEBUG /EHsc'")
-endif()
 
 # run the classical CTest suite
 ctest_start(Continuous) # TODO think about adding GROUP GitHub-Actions to separate visually
@@ -91,18 +88,6 @@ if("$ENV{ENABLE_STYLE_TESTING}" STREQUAL "OFF")
       set(_any_submit_failed 1)
     endif()
     math(EXPR _build_errors "${_build_errors} + ${_py_build_errors}")
-  endif()
-
-  # Only build compile_pxds if PYOPENMS is not ON (since it's already a subtarget of pyopenms)
-  if("$ENV{COMPILE_PXDS}" STREQUAL "ON" AND "$ENV{PYOPENMS}" STREQUAL "OFF")
-    ctest_build(BUILD "${CTEST_BINARY_DIRECTORY}" TARGET "compile_pxds" APPEND NUMBER_ERRORS _pdxs_build_errors)
-    ctest_submit(PARTS Build
-                 RETURN_VALUE _this_submit_ret
-                 CAPTURE_CMAKE_ERROR _this_submit_cmake_err)
-    if(NOT _this_submit_ret EQUAL 0 OR NOT _this_submit_cmake_err EQUAL 0)
-      set(_any_submit_failed 1)
-    endif()
-    math(EXPR _build_errors "${_build_errors} + ${_pdxs_build_errors}")
   endif()
 
   # Generate and validate the CWL files if "ENABLE_CWL_GENERATION" is set

@@ -11,6 +11,8 @@
 #include <OpenMS/CONCEPT/Constants.h>
 
 #include <OpenMS/FORMAT/FileHandler.h>
+#include <OpenMS/CONCEPT/LogStream.h>
+#include <OpenMS/KERNEL/MSExperiment.h>
 
 #include <numeric>
 #include <boost/math/special_functions/factorials.hpp>
@@ -647,7 +649,7 @@ namespace OpenMS
 
     for (Size id_idx = 0; id_idx < overall_results.size(); ++id_idx)
     {
-      SpectralMatch current_id(overall_results[id_idx]);
+      const SpectralMatch& current_id(overall_results[id_idx]);
 
       MzTabSmallMoleculeSectionRow mztab_row_record;
 

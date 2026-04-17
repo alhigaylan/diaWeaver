@@ -30,6 +30,10 @@
 #include <OpenMS/FORMAT/ConsensusXMLFile.h>
 #include <OpenMS/FORMAT/ExperimentalDesignFile.h>
 #include <OpenMS/FORMAT/FileHandler.h>
+#include <OpenMS/CONCEPT/LogStream.h>
+#include <OpenMS/METADATA/PeptideIdentificationList.h>
+#include <OpenMS/METADATA/ProteinIdentification.h>
+#include <OpenMS/KERNEL/ConsensusMap.h>
 #include <OpenMS/FORMAT/MzMLFile.h>
 #include <OpenMS/FORMAT/MzTabFile.h>
 #include <OpenMS/KERNEL/MSExperiment.h>
@@ -42,6 +46,10 @@
 #endif
 
 #include <memory> // for std::unique_ptr
+
+#include <OpenMS/FORMAT/ConsensusMapArrowExport.h>
+#include <OpenMS/FORMAT/ProteinGroupArrowExport.h>
+#include <OpenMS/FORMAT/QPXFile.h>
 
 using namespace OpenMS;
 using namespace std;
@@ -187,6 +195,8 @@ protected:
     setValidFormats_("out", {"consensusXML"});
     registerOutputFile_("out_mzTab", "<file>", "", "output mzTab file with quantitative information");
     setValidFormats_("out_mzTab", {"mzTab"});
+
+    registerOutputDir_("out_qpx", "<directory>", "", "Output directory for QPX Parquet files (quantms.feature.parquet, quantms.psm.parquet, quantms.pg.parquet)", false, false);
     registerFlag_("calculate_id_purity", "Calculate the purity of the precursor ion based on the MS1 spectrum. Only used for MS3, otherwise it is the same as the quant. precursor purity.");
     //registerIntOption_("max_parallel_files", "<num>", 1, "Maximum number of files to load in parallel.", false);
     registerDoubleOption_("psm_score", "<score>", NAN, "The score which should be reached by a peptide hit to be kept.  (use 'NAN' to disable this filter)", false);
@@ -877,7 +887,48 @@ protected:
     prot_quantifier.annotateQuantificationsToProteins(
       protein_quants, inferred_proteins, true);
 
-    // TODO also allow storing mzTab and even better, parquet
+    {
+      String out_qpx = getOutputDirOption("out_qpx");
+      if (!out_qpx.empty())
+      {
+        OPENMS_LOG_INFO << "Exporting QPX Parquet files to: " << out_qpx << std::endl;
+
+        // Feature-level export
+        if (!ConsensusMapArrowExport::exportToParquet(cmap, out_qpx + "/quantms.feature.parquet"))
+        {
+          OPENMS_LOG_ERROR << "Failed to write features Parquet file" << std::endl;
+          return CANNOT_WRITE_OUTPUT_FILE;
+        }
+
+        // PSM-level export: collect all peptide IDs from consensus map
+        PeptideIdentificationList all_pepids;
+        for (const auto& feature : cmap)
+        {
+          for (const auto& pepid : feature.getPeptideIdentifications())
+          {
+            all_pepids.push_back(pepid);
+          }
+        }
+        for (const auto& pepid : cmap.getUnassignedPeptideIdentifications())
+        {
+          all_pepids.push_back(pepid);
+        }
+
+        if (!QPXFile::exportToParquet(cmap.getProteinIdentifications(), all_pepids, out_qpx + "/quantms.psm.parquet"))
+        {
+          OPENMS_LOG_ERROR << "Failed to write PSM Parquet file" << std::endl;
+          return CANNOT_WRITE_OUTPUT_FILE;
+        }
+
+        // Protein group export
+        if (!ProteinGroupArrowExport::exportToParquet(cmap, out_qpx + "/quantms.pg.parquet"))
+        {
+          OPENMS_LOG_ERROR << "Failed to write protein groups Parquet file" << std::endl;
+          return CANNOT_WRITE_OUTPUT_FILE;
+        }
+      }
+    }
+
     FileHandler().storeConsensusFeatures(out, cmap);
     
     String out_mzTab = getStringOption_("out_mzTab");

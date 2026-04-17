@@ -11,6 +11,7 @@
 #include <OpenMS/CHEMISTRY/ProteaseDB.h>
 #include <OpenMS/CONCEPT/UniqueIdGenerator.h>
 #include <OpenMS/FORMAT/FileHandler.h>
+#include <OpenMS/METADATA/ProteinIdentification.h>
 #include <OpenMS/FORMAT/IdXMLFile.h>
 #include <OpenMS/KERNEL/FeatureMap.h>
 #include <OpenMS/METADATA/DataProcessing.h>
@@ -896,7 +897,7 @@ namespace OpenMS::Internal
     os << indent << "\t\t\t<charge>" << feat.getCharge() << "</charge>\n";
 
     // write convex hull
-    vector<ConvexHull2D> hulls = feat.getConvexHulls();
+    const vector<ConvexHull2D>& hulls = feat.getConvexHulls();
 
     Size hulls_count = hulls.size();
 

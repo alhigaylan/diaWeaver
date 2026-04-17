@@ -220,7 +220,7 @@ using namespace OpenMS;
     unprocessed_spectra.clear(true);
 
     // Precursor Purity precalculation
-    map<String, PrecursorPurity::PurityScores> precursor_purities = PrecursorPurity::computePrecursorPurities(picked_spectra, precursor_mass_tolerance_, precursor_mass_tolerance_unit_ppm_);
+    unordered_map<String, PrecursorPurity::PurityScores> precursor_purities = PrecursorPurity::computePrecursorPurities(picked_spectra, precursor_mass_tolerance_, precursor_mass_tolerance_unit_ppm_);
 
     // preprocess spectra (filter out 0 values, sort by position)
     progresslogger.startProgress(0, 1, "Filtering spectra...");
@@ -854,9 +854,9 @@ using namespace OpenMS;
             auto num_iso_peaks_array_it = getDataArrayByName(all_peaks.getIntegerDataArrays(), "iso_peak_count");
             DataArrays::IntegerDataArray num_iso_peaks_array = *num_iso_peaks_array_it;
             auto num_iso_peaks_array_linear_it = getDataArrayByName(linear_peaks.getIntegerDataArrays(), "iso_peak_count");
-            DataArrays::IntegerDataArray num_iso_peaks_array_linear = *num_iso_peaks_array_linear_it;
+            const DataArrays::IntegerDataArray& num_iso_peaks_array_linear = *num_iso_peaks_array_linear_it;
             auto num_iso_peaks_array_xlinks_it = getDataArrayByName(xlink_peaks.getIntegerDataArrays(), "iso_peak_count");
-            DataArrays::IntegerDataArray num_iso_peaks_array_xlinks = *num_iso_peaks_array_xlinks_it;
+            const DataArrays::IntegerDataArray& num_iso_peaks_array_xlinks = *num_iso_peaks_array_xlinks_it;
 
             csm.num_iso_peaks_mean = Math::mean(num_iso_peaks_array.begin(), num_iso_peaks_array.end());
 
