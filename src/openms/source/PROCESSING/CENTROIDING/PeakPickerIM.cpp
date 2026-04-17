@@ -937,7 +937,7 @@ namespace OpenMS
       picker_mz_p.setValue("signal_to_noise", 0.0);
       picker_mz_p.setValue("report_FWHM", "true");
       picker_mz_p.setValue("report_FWHM_unit", "relative");
-      picker_mz_p.setValue("one_sided", "true");
+      picker_mz_p.setValue("allow_missing_flank", "true");
       picker_mz.setParameters(picker_mz_p);
       MSSpectrum picked_spectrum;
       picker_mz.pick(summed_spectrum, picked_spectrum);
