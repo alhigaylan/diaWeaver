@@ -336,13 +336,13 @@ class OPENMS_DLLAPI ProSEAlgorithm :
       // Layout: doubles first, then floats, then int, then uint16_t — minimizes padding (40 bytes excluding AASequence)
       double score = 0; ///< main score
       double delta_mass = 0.0; ///< mass difference for open search (Da)
-      float prefix_fraction = 0; ///< fraction of annotated b-ions
-      float suffix_fraction = 0; ///< fraction of annotated y-ions
+      float prefix_fraction = 0; ///< fraction of annotated prefix ions (a/b/c)
+      float suffix_fraction = 0; ///< fraction of annotated suffix ions (x/y/z)
       float mean_error = 0.0f; ///< mean absolute fragment mass error
       int isotope_error = 0; ///< isotope offset used for this PSM
       uint16_t applied_charge = 0; ///< precursor charge used for this PSM
-      uint16_t matched_b_ions = 0; ///< number of matched b-ions
-      uint16_t matched_y_ions = 0; ///< number of matched y-ions
+      uint16_t matched_prefix_ions = 0; ///< number of matched prefix ions (a/b/c)
+      uint16_t matched_suffix_ions = 0; ///< number of matched suffix ions (x/y/z)
 
       static bool hasBetterScore(const AnnotatedHit_& a, const AnnotatedHit_& b)
       {
@@ -435,6 +435,13 @@ class OPENMS_DLLAPI ProSEAlgorithm :
     String peptide_motif_;
 
     Size report_top_hits_;
+
+    bool add_a_ions_{false};
+    bool add_b_ions_{true};
+    bool add_c_ions_{false};
+    bool add_x_ions_{false};
+    bool add_y_ions_{true};
+    bool add_z_ions_{false};
 
     bool calibration_enabled_{false};
     double calibration_subset_ratio_{0.1};
