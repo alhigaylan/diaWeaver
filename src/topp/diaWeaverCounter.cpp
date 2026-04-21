@@ -115,11 +115,11 @@ protected:
                           "Fragment ion m/z tolerance for trace matching (ppm)", false);
     setMinFloat_("mz_tolerance", 0.0);
 
-    registerDoubleOption_("rt_tolerance", "<s>", 30.0,
+    registerDoubleOption_("rt_tolerance", "<s>", 15.0,
                           "RT window (±) around the peptide apex for trace matching (seconds)", false);
     setMinFloat_("rt_tolerance", 0.0);
 
-    registerDoubleOption_("im_tolerance", "<1/K0>", 0.05,
+    registerDoubleOption_("im_tolerance", "<1/K0>", 0.02,
                           "Ion mobility tolerance (post-filter; applied only when IM data are present)", false);
     setMinFloat_("im_tolerance", 0.0);
 
