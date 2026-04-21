@@ -112,15 +112,15 @@ protected:
     setValidFormats_("out_peptides", {"tsv"});
 
     registerDoubleOption_("mz_tolerance", "<ppm>", 20.0,
-                          "Fragment ion m/z tolerance for trace matching (ppm)", false);
+                          "Fragment ion m/z tolerance (±, ppm)", false);
     setMinFloat_("mz_tolerance", 0.0);
 
     registerDoubleOption_("rt_tolerance", "<s>", 15.0,
-                          "RT window (±) around the peptide apex for trace matching (seconds)", false);
+                          "RT tolerance (±, seconds) around the peptide apex", false);
     setMinFloat_("rt_tolerance", 0.0);
 
     registerDoubleOption_("im_tolerance", "<1/K0>", 0.02,
-                          "Ion mobility tolerance (post-filter; applied only when IM data are present)", false);
+                          "Ion mobility tolerance (±, 1/K0; applied only when IM data are present)", false);
     setMinFloat_("im_tolerance", 0.0);
 
     registerSubsection_("MassTraceDetection",
