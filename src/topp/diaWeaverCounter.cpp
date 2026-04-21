@@ -123,10 +123,6 @@ protected:
                           "Ion mobility tolerance (post-filter; applied only when IM data are present)", false);
     setMinFloat_("im_tolerance", 0.0);
 
-    registerIntOption_("max_fragment_charge", "<z>", 2,
-                       "Maximum fragment ion charge state to generate", false);
-    setMinInt_("max_fragment_charge", 1);
-
     registerSubsection_("MassTraceDetection",
                         "Parameters forwarded to the internal MassTraceDetection algorithm");
   }
@@ -270,7 +266,6 @@ protected:
     const double mz_tol_ppm    = getDoubleOption_("mz_tolerance");
     const double rt_tol        = getDoubleOption_("rt_tolerance");
     const double im_tol        = getDoubleOption_("im_tolerance");
-    const int    max_frag_z    = getIntOption_("max_fragment_charge");
 
     // ------------------------------------------------------------------
     // Step 1: Load mzML and filter to MS2 spectra
@@ -381,9 +376,8 @@ protected:
       // Need at least 2 residues for any b/y ion
       if (aa_seq.size() < 2) continue;
 
-      // Fragment charge capped at precursor_charge - 1 (min 1)
-      const int eff_max_z = (pep.charge > 1) ?
-                              min(max_frag_z, pep.charge - 1) : 1;
+      // Fragment charges 1 .. precursor_charge (same charge as precursor is valid)
+      const int eff_max_z = max(1, pep.charge);
 
       PeakSpectrum theo_spec;
       tsg.getSpectrum(theo_spec, aa_seq, 1, eff_max_z);
