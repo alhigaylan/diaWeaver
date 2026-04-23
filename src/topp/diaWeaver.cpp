@@ -195,7 +195,7 @@ protected:
 
 #ifdef WITH_OPENTIMS
     registerTOPPSubsection_("bruker", "Options for reading Bruker TimsTOF .d files (requires WITH_OPENTIMS)");
-    registerStringOption_("bruker:export_mode", "<mode>", "frame", "Export mode: 'auto' detects DDA/DIA acquisition type, "
+    registerStringOption_("bruker:export_mode", "<mode>", "auto", "Export mode: 'auto' detects DDA/DIA acquisition type, "
       "'frame' returns raw 4D frames without signal processing.", false, true);
     setValidStrings_("bruker:export_mode", {"auto", "frame"});
     registerDoubleOption_("bruker:calibration_tolerance", "<float>", 0.0, "m/z recalibration tolerance (0 = library default)", false, true);
@@ -826,7 +826,7 @@ protected:
 #pragma omp for schedule(dynamic, 1)
           for (SignedSize s = 0; s < static_cast<SignedSize>(ms2_exp.size()); ++s)
           {
-            if (IMTypes::determineIMFormat(ms2_exp[s]) != IMFormat::CENTROIDED)
+            if (ms2_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
             {
               MSSpectrum aggregated;
               aggregateSpectrum_(ms2_exp, static_cast<Size>(s), picker_im, aggregated);
@@ -863,7 +863,7 @@ protected:
           {
             if (im_info.available)
             {
-              if (IMTypes::determineIMFormat(ms2_exp[s]) != IMFormat::CENTROIDED)
+              if (ms2_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
               {
                 picker_im.pickIMTraces(ms2_exp[s]);
               }
@@ -906,7 +906,7 @@ protected:
 #pragma omp for schedule(dynamic, 1)
             for (SignedSize s = 0; s < static_cast<SignedSize>(precursor_exp.size()); ++s)
             {
-              if (IMTypes::determineIMFormat(precursor_exp[s]) != IMFormat::CENTROIDED)
+              if (precursor_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
               {
                 MSSpectrum aggregated;
                 aggregateSpectrum_(precursor_exp, static_cast<Size>(s), picker_im, aggregated);
@@ -943,7 +943,7 @@ protected:
             {
               if (im_info.available)
               {
-                if (IMTypes::determineIMFormat(precursor_exp[s]) != IMFormat::CENTROIDED)
+                if (precursor_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
                 {
                   picker_im.pickIMTraces(precursor_exp[s]);
                 }
@@ -1011,7 +1011,7 @@ protected:
 #pragma omp for schedule(dynamic, 1)
           for (SignedSize s = 0; s < static_cast<SignedSize>(ms1_exp.size()); ++s)
           {
-            if (IMTypes::determineIMFormat(ms1_exp[s]) != IMFormat::CENTROIDED)
+            if (ms1_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
             {
               MSSpectrum aggregated;
               aggregateSpectrum_(ms1_exp, static_cast<Size>(s), picker_im, aggregated);
@@ -1048,7 +1048,7 @@ protected:
           {
             if (im_info.available)
             {
-              if (IMTypes::determineIMFormat(ms1_exp[s]) != IMFormat::CENTROIDED)
+              if (ms1_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
               {
                 picker_im.pickIMTraces(ms1_exp[s]);
               }
