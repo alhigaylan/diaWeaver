@@ -179,6 +179,30 @@ protected:
       "MS1 frame IM-centroiding ion mobility tolerance in percent. Both this and ms1_centroid_mz_ppm "
       "must be > 0 to enable. Suggested value: 3.0.", false, true);
     setMinFloat_("bruker:ms1_centroid_im_pct", 0.0);
+    registerIntOption_("bruker:ms1_n_neighbors", "<int>", 0,
+      "MS1 frame aggregation: number of adjacent MS1 frames on each side to sum. "
+      "0 = disabled (raw export), 1 = 3-frame sum, 2 = 5-frame sum. "
+      "Applies to both DIA and DDA; ignored in FRAME export mode.", false, true);
+    setMinInt_("bruker:ms1_n_neighbors", 0);
+    setMaxInt_("bruker:ms1_n_neighbors", 50);
+    registerIntOption_("bruker:ms1_min_support", "<int>", 0,
+      "MS1 denoising: minimum occupied neighbor cells in a 3x3 (m/z x IM) grid to keep a point. "
+      "Applied after aggregation. 0 = disabled, 8 = all 8 neighbors required (strictest). "
+      "Only effective when ms1_n_neighbors > 0. Appropriate for dense survey runs; disable for "
+      "rare-species discovery.", false, true);
+    setMinInt_("bruker:ms1_min_support", 0);
+    setMaxInt_("bruker:ms1_min_support", 8);
+    registerDoubleOption_("bruker:ms1_max_rt_distance_sec", "<float>", 0.0,
+      "Cap the RT distance (seconds) between a neighbor MS1 frame and the center frame during "
+      "aggregation. 0.0 = no cap. Recommended for DDA (e.g. 5.0) where MS1 frame cadence is "
+      "irregular. The center frame is always included regardless of this cap.", false, true);
+    setMinFloat_("bruker:ms1_max_rt_distance_sec", 0.0);
+    registerIntOption_("bruker:ms1_centroid_max_peaks", "<int>", 100000,
+      "Cap on the number of centroided peaks retained per MS1 spectrum. Top-intensity peaks "
+      "are kept; low-intensity tail is dropped if the limit is hit (a warning is logged in that "
+      "case). Only effective when MS1 centroiding is enabled via ms1_centroid_mz_ppm/pct. Raise "
+      "for aggregated MS1 (ms1_n_neighbors > 0) on dense surveys; lower to trim long-tail noise.", false, true);
+    setMinInt_("bruker:ms1_centroid_max_peaks", 1);
     registerIntOption_("bruker:dia_ms2_n_neighbors", "<int>", 0,
       "DIA MS2 frame aggregation: number of adjacent frames on each side to sum per SWATH window. "
       "0 = disabled (raw export), 1 = 3-frame sum, 2 = 5-frame sum. "
@@ -222,6 +246,10 @@ protected:
     else c.export_mode = BrukerTimsFile::Config::AUTO;
     c.ms1_centroid_mz_ppm = static_cast<float>(getDoubleOption_("bruker:ms1_centroid_mz_ppm"));
     c.ms1_centroid_im_pct = static_cast<float>(getDoubleOption_("bruker:ms1_centroid_im_pct"));
+    c.ms1_n_neighbors         = getIntOption_("bruker:ms1_n_neighbors");
+    c.ms1_min_support         = getIntOption_("bruker:ms1_min_support");
+    c.ms1_max_rt_distance_sec = getDoubleOption_("bruker:ms1_max_rt_distance_sec");
+    c.ms1_centroid_max_peaks  = getIntOption_("bruker:ms1_centroid_max_peaks");
     c.dia_ms2_n_neighbors = getIntOption_("bruker:dia_ms2_n_neighbors");
     c.dia_ms2_min_support = getIntOption_("bruker:dia_ms2_min_support");
     c.dia_ms2_centroid = (getStringOption_("bruker:dia_ms2_centroid") == "true");
