@@ -13,13 +13,16 @@
 
 For each peptide identified at 1% FDR from an external search engine (DIA-NN, Spectronaut, etc.),
 this tool generates theoretical b/y fragment ions using TheoreticalSpectrumGenerator and maps them
-to MS2 mass traces detected in the raw DIA data. A 2D KD-tree (RT x m/z) accelerates the mapping,
-with an optional post-filter on ion mobility when IM data are present.
+to MS2 mass traces detected in the raw DIA data via MassTraceDetection + ElutionPeakDetection.
+A 2D KD-tree (RT x m/z) accelerates the mapping, with an optional post-filter on ion mobility.
 
-Output metrics:
-- Per-trace: number of peptides claiming each trace (orphan / unique / ambiguous)
-- Per-peptide: number of theoretical ions matched to traces and fragment coverage (%)
-- Console summary of trace accounting statistics
+The best representative trace per fragment ion is selected by apex SNR (from ElutionPeakDetection).
+When multiple peptides claim the same trace, a collision row is written to out_collisions.
+
+Output files:
+- out_traces    : per-trace accountability (orphan / unique / ambiguous)
+- out_peptides  : per-peptide fragment ion coverage (optional)
+- out_collisions: long-format collision table, one row per (trace, peptide, ion) (optional)
 
 <B>The command line parameters of this tool are:</B>
 @verbinclude TOPP_diaWeaverCounter.cli
@@ -32,6 +35,7 @@ Output metrics:
 #include <OpenMS/KERNEL/MSExperiment.h>
 #include <OpenMS/KERNEL/MassTrace.h>
 #include <OpenMS/FEATUREFINDER/MassTraceDetection.h>
+#include <OpenMS/FEATUREFINDER/ElutionPeakDetection.h>
 #include <OpenMS/CHEMISTRY/TheoreticalSpectrumGenerator.h>
 #include <OpenMS/CHEMISTRY/AASequence.h>
 #include <OpenMS/DATASTRUCTURES/KDTree.h>
@@ -79,6 +83,16 @@ struct PeptideEntry
   String id;             // row identifier (used in output, e.g. "row 42")
 };
 
+// ---------------------------------------------------------------------------
+// Best trace selected for a specific (peptide, ion) pair
+// ---------------------------------------------------------------------------
+struct IonBestMatch
+{
+  Size   best_trace_idx = 0;
+  double best_snr       = -1.0;
+  Size   n_traces       = 0;   // total traces that matched this ion
+};
+
 // ===========================================================================
 
 class TOPPDiaWeaverCounter : public TOPPBase
@@ -111,6 +125,12 @@ protected:
                         "Leave empty to skip.", false);
     setValidFormats_("out_peptides", {"tsv"});
 
+    registerOutputFile_("out_collisions", "<file>", "",
+                        "Long-format collision table: one row per (trace, peptide, ion) "
+                        "for every trace claimed by more than one peptide. "
+                        "Leave empty to skip.", false);
+    setValidFormats_("out_collisions", {"tsv"});
+
     registerDoubleOption_("mz_tolerance", "<ppm>", 20.0,
                           "Fragment ion m/z tolerance (±, ppm)", false);
     setMinFloat_("mz_tolerance", 0.0);
@@ -125,6 +145,9 @@ protected:
 
     registerSubsection_("MassTraceDetection",
                         "Parameters forwarded to the internal MassTraceDetection algorithm");
+
+    registerSubsection_("ElutionPeakDetection",
+                        "Parameters forwarded to the internal ElutionPeakDetection algorithm");
   }
 
   Param getSubsectionDefaults_(const String& section) const override
@@ -133,9 +156,14 @@ protected:
     {
       MassTraceDetection mtd;
       Param p = mtd.getDefaults();
-      p.setValue("mass_error_ppm",  10.0, "Allowed mass deviation (ppm)");
-      p.setValue("min_trace_length", 2.0, "Minimum trace length (seconds)");
+      p.setValue("mass_error_ppm",   10.0, "Allowed mass deviation (ppm)");
+      p.setValue("min_trace_length",  2.0, "Minimum trace length (seconds)");
       return p;
+    }
+    if (section == "ElutionPeakDetection")
+    {
+      ElutionPeakDetection epd;
+      return epd.getDefaults();
     }
     return Param();
   }
@@ -180,13 +208,16 @@ protected:
 
     // Map lowercased column name → internal field tag
     const map<String, String> aliases = {
-      {"sequence",              "seq"}, {"modified.sequence", "seq"},
+      {"sequence",              "seq"}, {"modified.sequence",    "seq"},
       {"stripped.sequence",     "seq"}, {"pep.strippedsequence", "seq"},
-      {"charge",                "charge"}, {"precursor.charge", "charge"},
+      {"charge",                "charge"}, {"precursor.charge",  "charge"},
       {"eg.precursorcharge",    "charge"},
-      {"rt",                    "rt"}, {"eg.apexrt", "rt"}, {"eg.meanapexrt", "rt"},
-      {"mz",                    "mz"}, {"precursor.mz", "mz"}, {"fg.precmz", "mz"},
-      {"im",                    "im"}, {"ionmobility", "im"}, {"eg.ionmobility", "im"}
+      {"rt",                    "rt"},  {"eg.apexrt",            "rt"},
+      {"eg.meanapexrt",         "rt"},
+      {"mz",                    "mz"},  {"precursor.mz",         "mz"},
+      {"fg.precmz",             "mz"},
+      {"im",                    "im"},  {"ionmobility",          "im"},
+      {"eg.ionmobility",        "im"}
     };
 
     // field tag → column index
@@ -258,14 +289,15 @@ protected:
 
   ExitCodes main_(int, const char**) override
   {
-    const String in_file          = getStringOption_("in");
-    const String in_ids_file      = getStringOption_("in_ids");
-    const String out_traces_file  = getStringOption_("out_traces");
-    const String out_pep_file     = getStringOption_("out_peptides");
+    const String in_file         = getStringOption_("in");
+    const String in_ids_file     = getStringOption_("in_ids");
+    const String out_traces_file = getStringOption_("out_traces");
+    const String out_pep_file    = getStringOption_("out_peptides");
+    const String out_coll_file   = getStringOption_("out_collisions");
 
-    const double mz_tol_ppm    = getDoubleOption_("mz_tolerance");
-    const double rt_tol        = getDoubleOption_("rt_tolerance");
-    const double im_tol        = getDoubleOption_("im_tolerance");
+    const double mz_tol_ppm = getDoubleOption_("mz_tolerance");
+    const double rt_tol     = getDoubleOption_("rt_tolerance");
+    const double im_tol     = getDoubleOption_("im_tolerance");
 
     // ------------------------------------------------------------------
     // Step 1: Load mzML and filter to MS2 spectra
@@ -289,20 +321,53 @@ protected:
     }
 
     // ------------------------------------------------------------------
-    // Step 2: Detect MS2 mass traces
+    // Step 2: Detect MS2 mass traces (MTD → EPD), matching diaWeaver's
+    //         runMassTraceExtractor_ pipeline. EPD adds smoothed
+    //         intensities required for apex SNR computation.
     // ------------------------------------------------------------------
+    ms2_exp.sortSpectra(true);
+
     MassTraceDetection mtd;
     mtd.setParameters(getParam_().copy("MassTraceDetection:", true));
 
+    vector<MassTrace> raw_traces;
+    OPENMS_LOG_INFO << "Running MassTraceDetection...\n";
+    mtd.run(ms2_exp, raw_traces);
+    OPENMS_LOG_INFO << "MTD: " << raw_traces.size() << " raw traces.\n";
+
+    ElutionPeakDetection epd;
+    epd.setParameters(getParam_().copy("ElutionPeakDetection:", true));
+
     vector<MassTrace> ms2_traces;
-    OPENMS_LOG_INFO << "Running MassTraceDetection on MS2 spectra...\n";
-    mtd.run(ms2_exp, ms2_traces);
-    OPENMS_LOG_INFO << "Detected " << ms2_traces.size() << " MS2 mass traces.\n";
+    OPENMS_LOG_INFO << "Running ElutionPeakDetection...\n";
+    epd.detectPeaks(raw_traces, ms2_traces);
+
+    if (epd.getParameters().getValue("width_filtering") == "auto")
+    {
+      vector<MassTrace> filtered;
+      epd.filterByPeakWidth(ms2_traces, filtered);
+      ms2_traces = move(filtered);
+    }
+
+    ms2_traces.erase(
+      remove_if(ms2_traces.begin(), ms2_traces.end(),
+                [](const MassTrace& t) { return t.getSize() == 0; }),
+      ms2_traces.end());
+
+    OPENMS_LOG_INFO << "After EPD: " << ms2_traces.size() << " traces.\n";
 
     if (ms2_traces.empty())
     {
-      OPENMS_LOG_WARN << "No MS2 mass traces detected. "
-                         "Consider relaxing MassTraceDetection parameters.\n";
+      OPENMS_LOG_WARN << "No MS2 mass traces remain after EPD. "
+                         "Consider relaxing MassTraceDetection / ElutionPeakDetection parameters.\n";
+    }
+
+    // Precompute apex SNR for every trace (requires smoothed intensities from EPD)
+    vector<double> trace_snr(ms2_traces.size(), 0.0);
+    for (Size i = 0; i < ms2_traces.size(); ++i)
+    {
+      if (!ms2_traces[i].getSmoothedIntensities().empty())
+        trace_snr[i] = epd.computeApexSNR(ms2_traces[i]);
     }
 
     // Check once whether any trace carries IM data
@@ -313,7 +378,7 @@ protected:
     }
 
     // ------------------------------------------------------------------
-    // Step 3: Build 2D KD-tree (RT x m/z) over detected MS2 traces
+    // Step 3: Build 2D KD-tree (RT x m/z) over detected MS2 traces.
     //         IM is stored in the node but used only as a post-filter.
     // ------------------------------------------------------------------
     TraceKDTree kd_tree;
@@ -340,16 +405,24 @@ protected:
     // ------------------------------------------------------------------
     // Step 5: Generate theoretical b/y ions and map to traces via KD-tree
     //
-    // trace_claims[i] = set of peptide indices that have at least one
-    //                   theoretical ion matching trace i within tolerances.
+    // trace_claims[i] = list of (pep_idx, ion_name) pairs that claimed trace i.
+    //                   Multiple entries from the same peptide (different ions)
+    //                   and from different peptides are all recorded.
+    //
+    // best_ion_match[(pep_idx, ion_name)] = trace with highest apex SNR
+    //                   among all traces that matched this ion.
     // ------------------------------------------------------------------
-    vector<set<Size>> trace_claims(ms2_traces.size());
-    vector<Size>      pep_n_ions(peptides.size(), 0);       // total theoretical ions
-    vector<Size>      pep_matched_traces(peptides.size(), 0); // distinct traces matched
+    vector<vector<pair<Size, String>>> trace_claims(ms2_traces.size());
+    map<pair<Size,String>, IonBestMatch> best_ion_match;
+
+    vector<Size>      pep_n_ions(peptides.size(), 0);
+    vector<Size>      pep_matched_ions(peptides.size(), 0);      // ions with >=1 trace
+    vector<Size>      pep_multi_trace_ions(peptides.size(), 0);  // ions with >1 trace
+    vector<set<Size>> pep_matched_trace_set(peptides.size());    // distinct traces matched
 
     TheoreticalSpectrumGenerator tsg;
-    // Use b and y ions only (defaults); no neutral losses for the baseline
     Param tsg_params = tsg.getDefaults();
+    tsg_params.setValue("add_metainfo", "true",  "");  // ion names needed for collision table
     tsg_params.setValue("add_a_ions",   "false", "");
     tsg_params.setValue("add_c_ions",   "false", "");
     tsg_params.setValue("add_x_ions",   "false", "");
@@ -360,6 +433,14 @@ protected:
     for (Size pep_idx = 0; pep_idx < peptides.size(); ++pep_idx)
     {
       const PeptideEntry& pep = peptides[pep_idx];
+
+      if (pep.charge < 1)
+      {
+        OPENMS_LOG_ERROR << "[diaWeaverCounter] Invalid charge " << pep.charge
+                         << " for peptide '" << pep.sequence << "' (" << pep.id
+                         << "). Charge must be >= 1. Aborting.\n";
+        return INPUT_FILE_CORRUPT;
+      }
 
       AASequence aa_seq;
       try
@@ -373,21 +454,20 @@ protected:
         continue;
       }
 
-      // Need at least 2 residues for any b/y ion
-      if (aa_seq.size() < 2) continue;
-
-      // Fragment charges 1 .. precursor_charge (same charge as precursor is valid)
-      const int eff_max_z = max(1, pep.charge);
+      if (aa_seq.size() < 2) continue;  // no b/y ions possible
 
       PeakSpectrum theo_spec;
-      tsg.getSpectrum(theo_spec, aa_seq, 1, eff_max_z);
+      tsg.getSpectrum(theo_spec, aa_seq, 1, pep.charge);
       pep_n_ions[pep_idx] = theo_spec.size();
 
-      set<Size> matched_for_pep;
+      // Ion names are in StringDataArrays[0] when add_metainfo = true
+      const PeakSpectrum::StringDataArray& ion_names =
+        theo_spec.getStringDataArrays().at(0);
 
       for (Size ion_i = 0; ion_i < theo_spec.size(); ++ion_i)
       {
         const double mz_theo   = theo_spec[ion_i].getMZ();
+        const String ion_name  = ion_names[ion_i];
         const double mz_tol_da = mz_theo * mz_tol_ppm * 1e-6;
 
         // Rectangular KD-tree region query: RT x m/z
@@ -400,33 +480,73 @@ protected:
         vector<MS2TraceNode> candidates;
         kd_tree.find_within_range(region, back_inserter(candidates));
 
+        // Collect valid trace indices after IM post-filter
+        vector<Size> valid_tidx;
         for (const auto& cand : candidates)
         {
-          // IM post-filter: only applied when both peptide and trace carry IM
           if (dataset_has_im && pep.im > 0.0 &&
               ms2_traces[cand.trace_idx].containsIMData())
           {
             if (std::abs(cand.im - pep.im) > im_tol) continue;
           }
+          valid_tidx.push_back(cand.trace_idx);
+        }
 
-          matched_for_pep.insert(cand.trace_idx);
-          trace_claims[cand.trace_idx].insert(pep_idx);
+        if (valid_tidx.empty()) continue;
+
+        ++pep_matched_ions[pep_idx];
+        if (valid_tidx.size() > 1) ++pep_multi_trace_ions[pep_idx];
+
+        auto ion_key = make_pair(pep_idx, ion_name);
+        IonBestMatch& best = best_ion_match[ion_key];
+        best.n_traces += valid_tidx.size();
+
+        for (Size tidx : valid_tidx)
+        {
+          trace_claims[tidx].emplace_back(pep_idx, ion_name);
+          pep_matched_trace_set[pep_idx].insert(tidx);
+
+          if (trace_snr[tidx] > best.best_snr)
+          {
+            best.best_snr       = trace_snr[tidx];
+            best.best_trace_idx = tidx;
+          }
         }
       }
-
-      pep_matched_traces[pep_idx] = matched_for_pep.size();
     }
 
     // ------------------------------------------------------------------
-    // Step 6: Aggregate trace-level metrics
+    // Step 6: Derive per-trace and per-peptide aggregate metrics
     // ------------------------------------------------------------------
+
+    // Number of unique peptides claiming each trace
+    vector<Size> trace_n_peptides(ms2_traces.size(), 0);
+    for (Size i = 0; i < ms2_traces.size(); ++i)
+    {
+      set<Size> unique_peps;
+      for (const auto& [pi, ion] : trace_claims[i])
+        unique_peps.insert(pi);
+      trace_n_peptides[i] = unique_peps.size();
+    }
+
+    // Per-peptide exclusive vs shared trace counts
+    vector<Size> pep_exclusive(peptides.size(), 0);
+    vector<Size> pep_shared(peptides.size(), 0);
+    for (Size pi = 0; pi < peptides.size(); ++pi)
+    {
+      for (Size tidx : pep_matched_trace_set[pi])
+      {
+        if (trace_n_peptides[tidx] == 1) ++pep_exclusive[pi];
+        else                              ++pep_shared[pi];
+      }
+    }
+
     Size n_orphan    = 0;
     Size n_unique    = 0;
     Size n_ambiguous = 0;
-
-    for (const auto& claims : trace_claims)
+    for (Size i = 0; i < ms2_traces.size(); ++i)
     {
-      switch (claims.size())
+      switch (trace_n_peptides[i])
       {
         case 0:  ++n_orphan;    break;
         case 1:  ++n_unique;    break;
@@ -453,35 +573,28 @@ protected:
         return CANNOT_WRITE_OUTPUT_FILE;
       }
 
-      ofs << "trace_idx\tcentroid_mz\tcentroid_rt\tcentroid_im\t"
-             "n_claiming_peptides\tstatus\tclaiming_peptide_ids\n";
+      ofs << "trace_idx\tcentroid_mz\tcentroid_rt\tcentroid_im\tapex_snr\t"
+             "n_claiming_peptides\tn_claiming_ions\tstatus\n";
 
       for (Size i = 0; i < ms2_traces.size(); ++i)
       {
         const auto& mt    = ms2_traces[i];
-        const Size  n_pep = trace_claims[i].size();
+        const Size  n_pep = trace_n_peptides[i];
 
         String status;
         if      (n_pep == 0) status = "orphan";
         else if (n_pep == 1) status = "unique";
         else                 status = "ambiguous";
 
-        // Collect comma-separated claiming peptide IDs
-        String pep_ids;
-        for (const Size pi : trace_claims[i])
-        {
-          if (!pep_ids.empty()) pep_ids += ",";
-          pep_ids += peptides[pi].id;
-        }
-
-        ofs << i                         << "\t"
-            << mt.getCentroidMZ()        << "\t"
-            << mt.getCentroidRT()        << "\t"
+        ofs << i                           << "\t"
+            << mt.getCentroidMZ()          << "\t"
+            << mt.getCentroidRT()          << "\t"
             << (mt.containsIMData() ?
                 String(mt.getCentroidIM()) : String("N/A")) << "\t"
-            << n_pep                     << "\t"
-            << status                    << "\t"
-            << pep_ids                   << "\n";
+            << trace_snr[i]                << "\t"
+            << n_pep                       << "\t"
+            << trace_claims[i].size()      << "\t"
+            << status                      << "\n";
       }
     }
 
@@ -498,23 +611,76 @@ protected:
       }
 
       ofs << "peptide_id\tsequence\tcharge\trt\t"
-             "n_theoretical_ions\tn_matched_traces\tcoverage_pct\n";
+             "n_theoretical_ions\tn_matched_ions\tn_multi_trace_ions\t"
+             "n_exclusive_traces\tn_shared_traces\tcoverage_pct\n";
 
       for (Size pi = 0; pi < peptides.size(); ++pi)
       {
-        const auto& pep      = peptides[pi];
-        const Size  n_theo   = pep_n_ions[pi];
-        const Size  n_match  = pep_matched_traces[pi];
-        const double cov_pct = n_theo > 0 ?
-                                 100.0 * static_cast<double>(n_match) / n_theo : 0.0;
+        const auto& pep     = peptides[pi];
+        const Size  n_theo  = pep_n_ions[pi];
+        const double cov    = n_theo > 0 ?
+                                100.0 * static_cast<double>(pep_matched_ions[pi]) / n_theo
+                                : 0.0;
 
-        ofs << pep.id       << "\t"
-            << pep.sequence << "\t"
-            << pep.charge   << "\t"
-            << pep.rt       << "\t"
-            << n_theo       << "\t"
-            << n_match      << "\t"
-            << cov_pct      << "\n";
+        ofs << pep.id                    << "\t"
+            << pep.sequence              << "\t"
+            << pep.charge                << "\t"
+            << pep.rt                    << "\t"
+            << n_theo                    << "\t"
+            << pep_matched_ions[pi]      << "\t"
+            << pep_multi_trace_ions[pi]  << "\t"
+            << pep_exclusive[pi]         << "\t"
+            << pep_shared[pi]            << "\t"
+            << cov                       << "\n";
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // Step 9: Write collision TSV (optional)
+    //
+    // Long format: one row per (trace, peptide, ion) for every trace
+    // claimed by more than one unique peptide.
+    //
+    // is_best = true  when this trace has the highest apex SNR among all
+    //                 traces that matched (peptide_id, ion_name).
+    // ------------------------------------------------------------------
+    if (!out_coll_file.empty())
+    {
+      ofstream ofs(out_coll_file.c_str());
+      if (!ofs.is_open())
+      {
+        OPENMS_LOG_ERROR << "Cannot write collision output: " << out_coll_file << "\n";
+        return CANNOT_WRITE_OUTPUT_FILE;
+      }
+
+      ofs << "trace_idx\ttrace_mz\ttrace_rt\ttrace_im\tapex_snr\t"
+             "n_claiming_peptides\tpeptide_id\tsequence\tion_name\tis_best\n";
+
+      for (Size i = 0; i < ms2_traces.size(); ++i)
+      {
+        if (trace_n_peptides[i] <= 1) continue;  // only collision traces
+
+        const auto& mt     = ms2_traces[i];
+        const String im_str = mt.containsIMData() ?
+                                String(mt.getCentroidIM()) : String("N/A");
+
+        for (const auto& [pi, ion_name] : trace_claims[i])
+        {
+          const auto ion_key = make_pair(pi, ion_name);
+          const bool is_best = best_ion_match.count(ion_key) &&
+                               best_ion_match.at(ion_key).best_trace_idx == i;
+
+          ofs << i                           << "\t"
+              << mt.getCentroidMZ()          << "\t"
+              << mt.getCentroidRT()          << "\t"
+              << im_str                      << "\t"
+              << trace_snr[i]                << "\t"
+              << trace_n_peptides[i]         << "\t"
+              << peptides[pi].id             << "\t"
+              << peptides[pi].sequence       << "\t"
+              << ion_name                    << "\t"
+              << (is_best ? "true" : "false") << "\n";
+        }
       }
     }
 
