@@ -202,14 +202,14 @@ protected:
     setMinFloat_("bruker:calibration_tolerance", 0.0);
     registerStringOption_("bruker:calibrate", "<toggle>", "false", "Enable m/z recalibration (may fail on some datasets)", false, true);
     setValidStrings_("bruker:calibrate", {"true", "false"});
-    registerDoubleOption_("bruker:ms1_centroid_mz_ppm", "<float>", 0.0,
+    registerDoubleOption_("bruker:ms1_centroid_mz_ppm", "<float>", 5.0,
       "MS1 frame IM-centroiding m/z tolerance in ppm. Collapses the ion mobility dimension "
       "by aggregating neighboring peaks directly on the raw gridded data (Sage algorithm, Lazear 2023). "
-      "Both this and bruker:ms1_centroid_im_pct must be > 0 to enable. Suggested value: 5.0.", false, true);
+      "Both this and bruker:ms1_centroid_im_pct must be > 0 to enable. Set to 0 to disable.", false, true);
     setMinFloat_("bruker:ms1_centroid_mz_ppm", 0.0);
-    registerDoubleOption_("bruker:ms1_centroid_im_pct", "<float>", 0.0,
+    registerDoubleOption_("bruker:ms1_centroid_im_pct", "<float>", 3.0,
       "MS1 frame IM-centroiding ion mobility tolerance in percent. "
-      "Both this and bruker:ms1_centroid_mz_ppm must be > 0 to enable. Suggested value: 3.0.", false, true);
+      "Both this and bruker:ms1_centroid_mz_ppm must be > 0 to enable. Set to 0 to disable.", false, true);
     setMinFloat_("bruker:ms1_centroid_im_pct", 0.0);
     registerIntOption_("bruker:ms1_n_neighbors", "<int>", 0,
       "MS1 frame aggregation: number of adjacent MS1 frames on each side to sum. "
@@ -243,7 +243,7 @@ protected:
       "DIA MS2 denoising: minimum occupied neighbor cells in a 3x3 (m/z x IM) grid to keep a point. "
       "Only effective when bruker:dia_ms2_n_neighbors > 0.", false, true);
     setMinInt_("bruker:dia_ms2_min_support", 1);
-    registerStringOption_("bruker:dia_ms2_centroid", "<toggle>", "false",
+    registerStringOption_("bruker:dia_ms2_centroid", "<toggle>", "true",
       "Apply 2D Gaussian smoothing + local maxima peak picking to the denoised DIA MS2 grid. "
       "Produces IM_CENTROIDED spectra. Only effective when bruker:dia_ms2_n_neighbors > 0.", false, true);
     setValidStrings_("bruker:dia_ms2_centroid", {"true", "false"});
