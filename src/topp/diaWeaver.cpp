@@ -637,6 +637,7 @@ protected:
 
     // Bruker pre-extracted window data (populated only for .d files)
     bool is_bruker = false;
+    bool bruker_im_centroiding = false; // true when Bruker built-in IM centroiding was applied during loading
     DiaWeaver::WindowedExperiments bruker_ms2_windows, bruker_ms1_windows, bruker_precursor_windows;
 
     // ------------------------------
@@ -654,6 +655,8 @@ protected:
       BrukerTimsFile tims_file;
       tims_file.setLogType(log_type_);
       auto bruker_config = getBrukerConfig_();
+
+      bruker_im_centroiding = (bruker_config.ms1_centroid_mz_ppm > 0.0f && bruker_config.ms1_centroid_im_pct > 0.0f);
 
       PeakMap bruker_exp;
       tims_file.load(in, bruker_exp, bruker_config);
@@ -705,10 +708,18 @@ protected:
 
     if (im_info.available)
     {
-      OPENMS_LOG_INFO << "Ion mobility data detected. Using PeakPickerIM (mobilogram method)." << std::endl;
-      if (aggregate_scans)
+      if (bruker_im_centroiding)
       {
-        OPENMS_LOG_INFO << "Aggregation across scans enabled. Signal will be boosted before peak picking." << std::endl;
+        OPENMS_LOG_INFO << "Bruker built-in IM centroiding was applied during .d loading. "
+                        << "Skipping PeakPickerIM mobilogram method — spectra are already centroided." << std::endl;
+      }
+      else
+      {
+        OPENMS_LOG_INFO << "Ion mobility data detected. Using PeakPickerIM (mobilogram method)." << std::endl;
+        if (aggregate_scans)
+        {
+          OPENMS_LOG_INFO << "Aggregation across scans enabled. Signal will be boosted before peak picking." << std::endl;
+        }
       }
     }
     else
@@ -810,7 +821,8 @@ protected:
       }
 
       // Apply peak picking to MS2 spectra
-      if (aggregate_scans && im_info.available)
+      // Skip mobilogram method when Bruker built-in IM centroiding was applied — spectra are already centroided
+      if (!bruker_im_centroiding && aggregate_scans && im_info.available)
       {
         // Parallel aggregation + peak picking into a separate output experiment.
         // ms2_exp stays immutable (raw data) so aggregateSpectrum always reads
@@ -842,7 +854,7 @@ protected:
 
         ms2_exp = std::move(ms2_picked);
       }
-      else
+      else if (!bruker_im_centroiding)
       {
         // Standard parallel peak picking (no aggregation)
 #pragma omp parallel num_threads(inner_threads)
@@ -997,7 +1009,8 @@ protected:
       }
 
       // Apply peak picking to MS1 spectra
-      if (aggregate_scans && im_info.available)
+      // Skip mobilogram method when Bruker built-in IM centroiding was applied — spectra are already centroided
+      if (!bruker_im_centroiding && aggregate_scans && im_info.available)
       {
         // Parallel aggregation + peak picking (same pattern as MS2)
         MSExperiment ms1_picked;
@@ -1027,7 +1040,7 @@ protected:
 
         ms1_exp = std::move(ms1_picked);
       }
-      else
+      else if (!bruker_im_centroiding)
       {
         // Standard parallel peak picking (no aggregation)
 #pragma omp parallel num_threads(inner_threads)
