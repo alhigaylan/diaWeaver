@@ -467,3 +467,82 @@ if (WITH_OPENTIMS)
   endif()
 endif()
 #------------------------------------------------------------------------------
+
+#------------------------------------------------------------------------------
+# redeem-properties (Rust staticlib for RT / CCS / MS2 prediction)
+if (WITH_REDEEM)
+  find_program(CARGO_EXECUTABLE cargo REQUIRED)
+
+  if (REDEEM_RUST_SOURCE_DIR)
+    get_filename_component(_REDEEM_RUST_ROOT "${REDEEM_RUST_SOURCE_DIR}" ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
+    set(_REDEEM_SOURCE_KIND "external")
+  else()
+    set(_REDEEM_RUST_ROOT "${CMAKE_SOURCE_DIR}/src/openms/extern/redeem")
+    set(_REDEEM_SOURCE_KIND "vendored")
+  endif()
+  set(_REDEEM_MANIFEST "${_REDEEM_RUST_ROOT}/redeem-openms-ffi/Cargo.toml")
+
+  if(NOT EXISTS "${_REDEEM_MANIFEST}")
+    message(FATAL_ERROR
+      "WITH_REDEEM=ON requires a redeem Rust source tree at ${_REDEEM_RUST_ROOT}. "
+      "Expected manifest ${_REDEEM_MANIFEST}. "
+      "Either vendor the prepared bundle into src/openms/extern/redeem or set REDEEM_RUST_SOURCE_DIR to a live redeem checkout / prepared bundle.")
+  endif()
+
+  file(GLOB_RECURSE _REDEEM_RUST_SOURCES CONFIGURE_DEPENDS
+    "${_REDEEM_RUST_ROOT}/Cargo.toml"
+    "${_REDEEM_RUST_ROOT}/Cargo.lock"
+    "${_REDEEM_RUST_ROOT}/.cargo/config.toml"
+    "${_REDEEM_RUST_ROOT}/redeem-openms-ffi/Cargo.toml"
+    "${_REDEEM_RUST_ROOT}/redeem-openms-ffi/src/*.rs"
+    "${_REDEEM_RUST_ROOT}/redeem-properties/Cargo.toml"
+    "${_REDEEM_RUST_ROOT}/redeem-properties/src/*.rs"
+    "${_REDEEM_RUST_ROOT}/redeem-properties/assets/*"
+    "${_REDEEM_RUST_ROOT}/redeem-properties/data/pretrained_models/*"
+    "${_REDEEM_RUST_ROOT}/vendor/*"
+  )
+
+  set(_REDEEM_CARGO_ARGS
+    build
+    --manifest-path "${_REDEEM_MANIFEST}"
+    --release
+    --locked
+  )
+
+  if (REDEEM_RUST_OFFLINE)
+    list(APPEND _REDEEM_CARGO_ARGS --offline)
+  endif()
+
+  if (REDEEM_USE_CUDA)
+    list(APPEND _REDEEM_CARGO_ARGS --features cuda)
+  endif()
+
+  if (MSVC)
+    set(_REDEEM_STATICLIB "${_REDEEM_RUST_ROOT}/target/release/redeem_openms_ffi.lib")
+  else()
+    set(_REDEEM_STATICLIB "${_REDEEM_RUST_ROOT}/target/release/libredeem_openms_ffi.a")
+  endif()
+
+  add_custom_command(
+    OUTPUT "${_REDEEM_STATICLIB}"
+    COMMAND "${CMAKE_COMMAND}" -E env
+      "CARGO_TARGET_DIR=${_REDEEM_RUST_ROOT}/target"
+      "${CARGO_EXECUTABLE}" ${_REDEEM_CARGO_ARGS}
+    WORKING_DIRECTORY "${_REDEEM_RUST_ROOT}"
+    DEPENDS ${_REDEEM_RUST_SOURCES}
+    COMMENT "Building redeem Rust FFI static library"
+    VERBATIM
+  )
+
+  add_custom_target(redeem_openms_ffi_build DEPENDS "${_REDEEM_STATICLIB}")
+
+  add_library(redeem_openms_ffi STATIC IMPORTED GLOBAL)
+  set_target_properties(redeem_openms_ffi PROPERTIES
+    IMPORTED_LOCATION "${_REDEEM_STATICLIB}"
+  )
+  add_dependencies(redeem_openms_ffi redeem_openms_ffi_build)
+  add_library(redeem::redeem_openms_ffi ALIAS redeem_openms_ffi)
+
+  message(STATUS "redeem: ${_REDEEM_SOURCE_KIND} Rust source enabled (${_REDEEM_RUST_ROOT}), offline=${REDEEM_RUST_OFFLINE}, cuda=${REDEEM_USE_CUDA}")
+endif()
+#------------------------------------------------------------------------------

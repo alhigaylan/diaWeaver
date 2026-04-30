@@ -51,6 +51,10 @@ foreach(i ${sources_list_h})
 	list(APPEND sources_h ${directory}/${i})
 endforeach(i)
 
+if (WITH_REDEEM)
+  list(APPEND sources_h ${directory}/RedeemBatchPredictor.h)
+endif()
+
 ### source group definition
 source_group("Header Files\\OpenMS\\ANALYSIS\\OPENSWATH" FILES ${sources_h})
 set_source_files_properties(${directory}/sources.cmake PROPERTIES HEADER_FILE_ONLY TRUE)

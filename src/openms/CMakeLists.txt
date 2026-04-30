@@ -100,6 +100,10 @@ if (WITH_OPENTIMS)
   list(APPEND OPENMS_DEP_PRIVATE_LIBRARIES opentims::opentims_cpp)
 endif()
 
+if (WITH_REDEEM)
+  list(APPEND OPENMS_DEP_PRIVATE_LIBRARIES redeem::redeem_openms_ffi)
+endif()
+
 if (ENABLE_TDL)
 set(OPENMS_DEP_PRIVATE_LIBRARIES
     ${OPENMS_DEP_PRIVATE_LIBRARIES}
@@ -168,6 +172,10 @@ target_compile_definitions(OpenMS PRIVATE BOOST_PROCESS_USE_STD_FS)
 
 if (WITH_OPENTIMS)
     target_compile_definitions(OpenMS PUBLIC WITH_OPENTIMS=1)
+endif()
+
+if (WITH_REDEEM)
+    target_compile_definitions(OpenMS PUBLIC WITH_REDEEM=1)
 endif()
 
 ## Enable test-only hooks when class tests are being built.

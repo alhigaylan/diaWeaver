@@ -51,6 +51,10 @@ foreach(i ${sources_list})
 	list(APPEND sources ${directory}/${i})
 endforeach(i)
 
+if (WITH_REDEEM)
+  list(APPEND sources ${directory}/RedeemBatchPredictor.cpp)
+endif()
+
 ### pass source file list to the upper instance
 set(OpenMS_sources ${OpenMS_sources} ${sources})
 
