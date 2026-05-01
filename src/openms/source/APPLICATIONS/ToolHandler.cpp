@@ -167,6 +167,7 @@ namespace OpenMS
     tools_map["QCMerger"] = Internal::ToolDescription("QCMerger", cat_QC);
     tools_map["QCShrinker"] = Internal::ToolDescription("QCExporter", cat_QC);
     tools_map["QualityControl"] = Internal::ToolDescription("QualityControl", cat_QC);
+    tools_map["RedeemTransitionPredictor"] = Internal::ToolDescription("RedeemTransitionPredictor", cat_targeted);
     tools_map["Resampler"] = Internal::ToolDescription("Resampler", cat_signal_proc_misc);
     tools_map["RNADigestor"] = Internal::ToolDescription("RNADigestor", cat_rna);
     tools_map["RNAMassCalculator"] = Internal::ToolDescription("RNAMassCalculator", cat_rna);
