@@ -141,8 +141,11 @@ namespace OpenMS
 
   private:
 
-    /// Apply Savitzky-Golay smoothing in-place to a collection of elution profiles
-    void applySGSmoothing_(std::vector<MasstraceCorrelator::MasstracePointsType>& profiles);
+    /// Replace profile intensities with EPD-smoothed values from ConsensusFeature MetaValues.
+    /// Warns and leaves profiles raw if smoothed_intensities MetaValue is absent.
+    void applySmoothedIntensities_(std::vector<MasstraceCorrelator::MasstracePointsType>& profiles,
+                                   const ConsensusMap& traces,
+                                   const String& label);
 
     /// Minimum Pearson correlation to match elution profiles
     double min_pearson_correlation_;

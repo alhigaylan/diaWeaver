@@ -247,6 +247,15 @@ protected:
           fcons.insert(fhandle);
         }
 
+        if (use_epd)
+        {
+          const std::vector<double>& smoothed = m_traces_final[i].getSmoothedIntensities();
+          if (!smoothed.empty())
+          {
+            fcons.setMetaValue("smoothed_intensities", DoubleList(smoothed.begin(), smoothed.end()));
+          }
+        }
+
         fcons.setMetaValue(3, m_traces_final[i].getLabel());
         fcons.setCharge(0);
         fcons.setWidth(m_traces_final[i].estimateFWHM(use_epd));

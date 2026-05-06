@@ -8,7 +8,6 @@
 
 #include <OpenMS/ANALYSIS/OPENSWATH/ClusterMassTracesByPrecursor.h>
 #include <OpenMS/CONCEPT/LogStream.h>
-#include <OpenMS/PROCESSING/SMOOTHING/SavitzkyGolayFilter.h>
 #include <OpenMS/CONCEPT/Constants.h>
 #include <OpenMS/IONMOBILITY/IMTypes.h>
 
@@ -99,11 +98,13 @@ namespace OpenMS
     defaults_.setValidStrings("output_fragment_scores", {"false", "true"});
 
     defaults_.setValue("smooth_ms1", "true",
-      "If true, apply Savitzky-Golay smoothing to MS1 elution profiles before correlation scoring.");
+      "If true, use EPD-smoothed intensities for MS1 elution profiles in correlation scoring. "
+      "Requires ElutionPeakDetection to have been run upstream. If smoothed data is absent, raw intensities are used.");
     defaults_.setValidStrings("smooth_ms1", {"false", "true"});
 
     defaults_.setValue("smooth_ms2", "false",
-      "If true, apply Savitzky-Golay smoothing to MS2 elution profiles before correlation scoring.");
+      "If true, use EPD-smoothed intensities for MS2 elution profiles in correlation scoring. "
+      "Requires ElutionPeakDetection to have been run upstream. If smoothed data is absent, raw intensities are used.");
     defaults_.setValidStrings("smooth_ms2", {"false", "true"});
 
     defaultsToParam_();
@@ -131,29 +132,32 @@ namespace OpenMS
     smooth_ms2_ = param_.getValue("smooth_ms2").toBool();
   }
 
-  void ClusterMassTracesByPrecursor::applySGSmoothing_(
-      std::vector<MasstraceCorrelator::MasstracePointsType>& profiles)
+  void ClusterMassTracesByPrecursor::applySmoothedIntensities_(
+      std::vector<MasstraceCorrelator::MasstracePointsType>& profiles,
+      const ConsensusMap& traces,
+      const String& label)
   {
-    SavitzkyGolayFilter sg_filter;
-    Param sg_params = sg_filter.getParameters();
-    sg_params.setValue("frame_length", 5);
-    sg_params.setValue("polynomial_order", 3);
-    sg_filter.setParameters(sg_params);
-
-    for (auto& trace : profiles)
+    if (traces.empty() || !traces[0].metaValueExists("smoothed_intensities"))
     {
-      MSSpectrum spec;
-      for (const auto& p : trace)
+      OPENMS_LOG_WARN << "[ClusterMassTracesByPrecursor] Smoothing requested for " << label
+                      << " but no EPD-smoothed intensities found in ConsensusMap. "
+                      << "Using raw intensities." << std::endl;
+      return;
+    }
+
+    for (Size i = 0; i < profiles.size(); ++i)
+    {
+      const DoubleList smoothed = traces[i].getMetaValue("smoothed_intensities");
+      if (smoothed.size() != profiles[i].size())
       {
-        Peak1D peak;
-        peak.setMZ(p.first);  // RT stored as m/z for the filter
-        peak.setIntensity(p.second);
-        spec.push_back(peak);
+        OPENMS_LOG_WARN << "[ClusterMassTracesByPrecursor] Size mismatch for " << label
+                        << " trace " << i << ": smoothed=" << smoothed.size()
+                        << " vs profile=" << profiles[i].size() << ". Skipping." << std::endl;
+        continue;
       }
-      sg_filter.filter(spec);
-      for (Size i = 0; i < trace.size(); ++i)
+      for (Size j = 0; j < profiles[i].size(); ++j)
       {
-        trace[i].second = spec[i].getIntensity();
+        profiles[i][j].second = smoothed[j];
       }
     }
   }
@@ -184,8 +188,8 @@ namespace OpenMS
     std::vector<double> fragment_rt;
     mtcorr.createConsensusMapCache(ms2_traces, fragment_profiles, max_intensities_ms2, fragment_rt);
 
-    if (smooth_ms1_) applySGSmoothing_(precursor_profiles);
-    if (smooth_ms2_) applySGSmoothing_(fragment_profiles);
+    if (smooth_ms1_) applySmoothedIntensities_(precursor_profiles, ms1_traces, "MS1");
+    if (smooth_ms2_) applySmoothedIntensities_(fragment_profiles, ms2_traces, "MS2");
 
     // Check if IM data exists in the input maps
     bool has_im_data = false;
@@ -320,7 +324,7 @@ namespace OpenMS
         precursor_im.push_back(0.0);
       }
 
-      // Extract elution profile from the monoisotopic mass trace (real intensity values)
+      // Extract elution profile from the monoisotopic mass trace
       MasstraceCorrelator::MasstracePointsType points;
 
       // Get the feature label and extract monoisotopic trace label (first part before '_')
@@ -337,9 +341,25 @@ namespace OpenMS
           if (it != trace_lookup.end())
           {
             const MassTrace& mono_trace = *(it->second);
-            for (const Peak2D& peak : mono_trace)
+            const std::vector<double>& smoothed = mono_trace.getSmoothedIntensities();
+            if (smooth_ms1_ && !smoothed.empty())
             {
-              points.push_back(std::make_pair(peak.getRT(), peak.getIntensity()));
+              for (Size j = 0; j < mono_trace.getSize(); ++j)
+              {
+                points.push_back(std::make_pair(mono_trace[j].getRT(), smoothed[j]));
+              }
+            }
+            else
+            {
+              if (smooth_ms1_ && i == 0)
+              {
+                OPENMS_LOG_WARN << "[ClusterMassTracesByPrecursor] Smoothing requested for MS1 "
+                                << "but no EPD-smoothed intensities found. Using raw intensities." << std::endl;
+              }
+              for (const Peak2D& peak : mono_trace)
+              {
+                points.push_back(std::make_pair(peak.getRT(), peak.getIntensity()));
+              }
             }
           }
         }
@@ -363,12 +383,29 @@ namespace OpenMS
     std::vector<double> fragment_im;
     std::vector<double> fragment_intensity;
 
+    if (smooth_ms2_ && !ms2_traces.empty() && ms2_traces[0].getSmoothedIntensities().empty())
+    {
+      OPENMS_LOG_WARN << "[ClusterMassTracesByPrecursor] Smoothing requested for MS2 "
+                      << "but no EPD-smoothed intensities found. Using raw intensities." << std::endl;
+    }
+
     for (const auto& trace : ms2_traces)
     {
       MasstraceCorrelator::MasstracePointsType points;
-      for (const Peak2D& peak : trace)
+      const std::vector<double>& smoothed = trace.getSmoothedIntensities();
+      if (smooth_ms2_ && !smoothed.empty())
       {
-        points.push_back(std::make_pair(peak.getRT(), peak.getIntensity()));
+        for (Size j = 0; j < trace.getSize(); ++j)
+        {
+          points.push_back(std::make_pair(trace[j].getRT(), smoothed[j]));
+        }
+      }
+      else
+      {
+        for (const Peak2D& peak : trace)
+        {
+          points.push_back(std::make_pair(peak.getRT(), peak.getIntensity()));
+        }
       }
       fragment_profiles.push_back(points);
 
@@ -378,9 +415,6 @@ namespace OpenMS
       fragment_im.push_back(has_im_data ? trace.getCentroidIM() : 0.0);
       fragment_intensity.push_back(trace.getIntensity(false));
     }
-
-    if (smooth_ms1_) applySGSmoothing_(precursor_profiles);
-    if (smooth_ms2_) applySGSmoothing_(fragment_profiles);
 
     // Run the core clustering algorithm
     clusterAndCreateSpectra_(
