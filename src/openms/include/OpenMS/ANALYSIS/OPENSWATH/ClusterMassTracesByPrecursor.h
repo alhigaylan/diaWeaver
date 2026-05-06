@@ -141,6 +141,9 @@ namespace OpenMS
 
   private:
 
+    /// Apply Savitzky-Golay smoothing in-place to a collection of elution profiles
+    void applySGSmoothing_(std::vector<MasstraceCorrelator::MasstracePointsType>& profiles);
+
     /// Minimum Pearson correlation to match elution profiles
     double min_pearson_correlation_;
 
@@ -182,6 +185,12 @@ namespace OpenMS
 
     /// Whether to output per-fragment scores as FloatDataArrays
     bool output_fragment_scores_;
+
+    /// Whether to apply Savitzky-Golay smoothing to MS1 elution profiles before correlation
+    bool smooth_ms1_;
+
+    /// Whether to apply Savitzky-Golay smoothing to MS2 elution profiles before correlation
+    bool smooth_ms2_;
   };
 
 } // namespace OpenMS

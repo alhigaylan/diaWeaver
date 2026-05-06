@@ -33,7 +33,9 @@ namespace OpenMS
     nr_precursors_per_fragment_(25),
     pearson_weight_(1.0),
     delta_rt_weight_(1.0),
-    delta_im_weight_(1.0)
+    delta_im_weight_(1.0),
+    smooth_ms1_(true),
+    smooth_ms2_(false)
   {
     defaults_.setValue("min_pearson_correlation", 0.7,
       "Minimal Pearson correlation score to match elution profiles to each other.");
@@ -96,6 +98,14 @@ namespace OpenMS
       "If true, output per-fragment scores (pearson_score, xcorr_lag, xcorr_lag_intensity, fragment_rt, fragment_ion_mobility, combined_score) as FloatDataArrays in the output spectra.");
     defaults_.setValidStrings("output_fragment_scores", {"false", "true"});
 
+    defaults_.setValue("smooth_ms1", "true",
+      "If true, apply Savitzky-Golay smoothing to MS1 elution profiles before correlation scoring.");
+    defaults_.setValidStrings("smooth_ms1", {"false", "true"});
+
+    defaults_.setValue("smooth_ms2", "false",
+      "If true, apply Savitzky-Golay smoothing to MS2 elution profiles before correlation scoring.");
+    defaults_.setValidStrings("smooth_ms2", {"false", "true"});
+
     defaultsToParam_();
   }
 
@@ -117,6 +127,35 @@ namespace OpenMS
     max_nr_ions_ = static_cast<Size>(static_cast<int>(param_.getValue("max_nr_ions")));
     use_combined_scores_ = param_.getValue("use_combined_scores").toBool();
     output_fragment_scores_ = param_.getValue("output_fragment_scores").toBool();
+    smooth_ms1_ = param_.getValue("smooth_ms1").toBool();
+    smooth_ms2_ = param_.getValue("smooth_ms2").toBool();
+  }
+
+  void ClusterMassTracesByPrecursor::applySGSmoothing_(
+      std::vector<MasstraceCorrelator::MasstracePointsType>& profiles)
+  {
+    SavitzkyGolayFilter sg_filter;
+    Param sg_params = sg_filter.getParameters();
+    sg_params.setValue("frame_length", 5);
+    sg_params.setValue("polynomial_order", 3);
+    sg_filter.setParameters(sg_params);
+
+    for (auto& trace : profiles)
+    {
+      MSSpectrum spec;
+      for (const auto& p : trace)
+      {
+        Peak1D peak;
+        peak.setMZ(p.first);  // RT stored as m/z for the filter
+        peak.setIntensity(p.second);
+        spec.push_back(peak);
+      }
+      sg_filter.filter(spec);
+      for (Size i = 0; i < trace.size(); ++i)
+      {
+        trace[i].second = spec[i].getIntensity();
+      }
+    }
   }
 
   void ClusterMassTracesByPrecursor::run(
@@ -145,31 +184,8 @@ namespace OpenMS
     std::vector<double> fragment_rt;
     mtcorr.createConsensusMapCache(ms2_traces, fragment_profiles, max_intensities_ms2, fragment_rt);
 
-    // Apply Savitzky-Golay smoothing to MS1 traces
-    SavitzkyGolayFilter sg_filter;
-    Param sg_params = sg_filter.getParameters();
-    sg_params.setValue("frame_length", 5);
-    sg_params.setValue("polynomial_order", 3);
-    sg_filter.setParameters(sg_params);
-
-    for (auto& trace : precursor_profiles)
-    {
-      MSSpectrum spec;
-      for (const auto& p : trace)
-      {
-        Peak1D peak;
-        peak.setMZ(p.first);  // Store RT as m/z for filtering
-        peak.setIntensity(p.second);
-        spec.push_back(peak);
-      }
-
-      sg_filter.filter(spec);
-
-      for (Size i = 0; i < trace.size(); ++i)
-      {
-        trace[i].second = spec[i].getIntensity();
-      }
-    }
+    if (smooth_ms1_) applySGSmoothing_(precursor_profiles);
+    if (smooth_ms2_) applySGSmoothing_(fragment_profiles);
 
     // Check if IM data exists in the input maps
     bool has_im_data = false;
@@ -362,6 +378,9 @@ namespace OpenMS
       fragment_im.push_back(has_im_data ? trace.getCentroidIM() : 0.0);
       fragment_intensity.push_back(trace.getIntensity(false));
     }
+
+    if (smooth_ms1_) applySGSmoothing_(precursor_profiles);
+    if (smooth_ms2_) applySGSmoothing_(fragment_profiles);
 
     // Run the core clustering algorithm
     clusterAndCreateSpectra_(
