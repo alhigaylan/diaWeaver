@@ -55,6 +55,11 @@ The input is a peptide-centric TSV with one row per precursor. The tool requires
 Optional metadata columns such as `protein_accession`, `gene_name`, `nce`, and
 `instrument` are carried through when present.
 
+Optionally, a second transition-level TSV can be supplied via `fine_tune_tsv` to
+fine-tune the loaded ReDeem models before prediction. Fine-tuning is performed
+in-place on the loaded RT, CCS, and MS2 models unless individual model types are
+disabled. Fine-tuned checkpoints can optionally be saved to explicit output paths.
+
 The output is an OpenSWATH-style transition TSV. The RT column is written as
 `RetentionTime` rather than `NormalizedRetentionTime`, since ReDeem currently
 predicts local chromatographic RT rather than iRT. Predicted ion mobility is
@@ -362,6 +367,44 @@ protected:
     registerInputFile_("rt_model", "<file>", "", "Optional explicit RT model path.", false, true);
     registerInputFile_("ccs_model", "<file>", "", "Optional explicit CCS model path.", false, true);
     registerInputFile_("ms2_model", "<file>", "", "Optional explicit MS2 model path.", false, true);
+
+    registerTOPPSubsection_("fine_tune", "Advanced options for optional ReDeem fine-tuning before prediction.");
+    registerInputFile_(
+      "fine_tune:tsv",
+      "<file>",
+      "",
+      "Optional transition-level TSV used to fine-tune the loaded ReDeem models before prediction. Expected format is one row per fragment transition, e.g. an OpenSWATH-style assay table. Required columns are a peptide column such as 'sequence' or 'modified_peptide_sequence' (using UniMod:X annotation) plus 'precursor_charge'. RT fine-tuning additionally requires 'retention_time'. CCS fine-tuning requires either 'ccs' or both 'ion_mobility' and 'precursor_mz'. MS2 fine-tuning requires fragment columns such as 'fragment_type', 'fragment_series_number', 'product_charge', and 'intensity'.",
+      false,
+      true);
+    setValidFormats_("fine_tune:tsv", {"tsv", "csv"});
+    registerInputFile_(
+      "fine_tune:validation_tsv",
+      "<file>",
+      "",
+      "Optional validation TSV used during ReDeem fine-tuning. Must use the same transition-level schema and required columns as fine_tune:tsv. When unset, the tool uses an internal validation split from fine_tune:tsv.",
+      false,
+      true);
+    setValidFormats_("fine_tune:validation_tsv", {"tsv", "csv"});
+    registerDoubleOption_("fine_tune:validation_fraction", "<float>", 0.2, "Validation fraction used when fine_tune:validation_tsv is not provided.", false, true);
+    setMinFloat_("fine_tune:validation_fraction", 0.0);
+    setMaxFloat_("fine_tune:validation_fraction", 0.95);
+    registerIntOption_("fine_tune:batch_size", "<int>", 64, "Batch size used during ReDeem fine-tuning.", false, true);
+    setMinInt_("fine_tune:batch_size", 1);
+    registerIntOption_("fine_tune:epochs", "<int>", 10, "Maximum number of fine-tuning epochs.", false, true);
+    setMinInt_("fine_tune:epochs", 1);
+    registerIntOption_("fine_tune:early_stopping_patience", "<int>", 5, "Early stopping patience in epochs during fine-tuning.", false, true);
+    setMinInt_("fine_tune:early_stopping_patience", 1);
+    registerDoubleOption_("fine_tune:learning_rate", "<float>", 1e-4, "Learning rate used during ReDeem fine-tuning.", false, true);
+    setMinFloat_("fine_tune:learning_rate", 0.0);
+    registerDoubleOption_("fine_tune:warmup_fraction", "<float>", 0.0, "Optional warmup fraction used during ReDeem fine-tuning.", false, true);
+    setMinFloat_("fine_tune:warmup_fraction", 0.0);
+    setMaxFloat_("fine_tune:warmup_fraction", 1.0);
+    registerFlag_("fine_tune:disable_rt", "Skip RT fine-tuning even when fine_tune:tsv is provided.", true);
+    registerFlag_("fine_tune:disable_ccs", "Skip CCS fine-tuning even when fine_tune:tsv is provided.", true);
+    registerFlag_("fine_tune:disable_ms2", "Skip MS2 fine-tuning even when fine_tune:tsv is provided.", true);
+    registerStringOption_("fine_tune:rt_model_out", "<file>", "", "Optional output path for the fine-tuned RT model (.safetensors).", false, true);
+    registerStringOption_("fine_tune:ccs_model_out", "<file>", "", "Optional output path for the fine-tuned CCS model (.safetensors).", false, true);
+    registerStringOption_("fine_tune:ms2_model_out", "<file>", "", "Optional output path for the fine-tuned MS2 model (.safetensors).", false, true);
   }
 
   ExitCodes main_(int, const char**) override
@@ -375,6 +418,20 @@ protected:
     const bool enable_ccs = !getFlag_("disable_ccs");
     const double library_intensity_scale = getDoubleOption_("library_intensity_scale");
     const double min_library_intensity = getDoubleOption_("min_library_intensity");
+    const String fine_tune_tsv = getStringOption_("fine_tune:tsv");
+    const String fine_tune_validation_tsv = getStringOption_("fine_tune:validation_tsv");
+    const String fine_tuned_rt_model = getStringOption_("fine_tune:rt_model_out");
+    const String fine_tuned_ccs_model = getStringOption_("fine_tune:ccs_model_out");
+    const String fine_tuned_ms2_model = getStringOption_("fine_tune:ms2_model_out");
+
+    if (fine_tune_tsv.empty() && (!fine_tune_validation_tsv.empty() || !fine_tuned_rt_model.empty() || !fine_tuned_ccs_model.empty() || !fine_tuned_ms2_model.empty()))
+    {
+      throw Exception::IllegalArgument(
+        __FILE__,
+        __LINE__,
+        OPENMS_PRETTY_FUNCTION,
+        "fine_tune:validation_tsv and fine_tune:*_model_out options require fine_tune:tsv.");
+    }
 
     CsvFile peptide_table(in, '\t');
     if (peptide_table.rowCount() < 2)
@@ -561,6 +618,55 @@ protected:
     config.device_preference = device;
 
     RedeemBatchPredictor predictor(config);
+
+    if (!fine_tune_tsv.empty())
+    {
+      RedeemFineTuneConfig fine_tune_config;
+      fine_tune_config.training_tsv_path = fine_tune_tsv;
+      if (!fine_tune_validation_tsv.empty())
+      {
+        fine_tune_config.validation_tsv_path = fine_tune_validation_tsv;
+      }
+      fine_tune_config.validation_fraction = getDoubleOption_("fine_tune:validation_fraction");
+      fine_tune_config.batch_size = static_cast<Size>(getIntOption_("fine_tune:batch_size"));
+      fine_tune_config.epochs = static_cast<Size>(getIntOption_("fine_tune:epochs"));
+      fine_tune_config.early_stopping_patience = static_cast<Size>(getIntOption_("fine_tune:early_stopping_patience"));
+      fine_tune_config.learning_rate = getDoubleOption_("fine_tune:learning_rate");
+      fine_tune_config.warmup_fraction = getDoubleOption_("fine_tune:warmup_fraction");
+      fine_tune_config.default_nce = default_nce;
+      fine_tune_config.default_instrument = default_instrument;
+      fine_tune_config.enable_rt = !getFlag_("fine_tune:disable_rt");
+      fine_tune_config.enable_ccs = enable_ccs && !getFlag_("fine_tune:disable_ccs");
+      fine_tune_config.enable_ms2 = !getFlag_("fine_tune:disable_ms2");
+
+      if (!fine_tuned_rt_model.empty())
+      {
+        fine_tune_config.rt_model_output_path = fine_tuned_rt_model;
+      }
+      if (!fine_tuned_ccs_model.empty())
+      {
+        fine_tune_config.ccs_model_output_path = fine_tuned_ccs_model;
+      }
+      if (!fine_tuned_ms2_model.empty())
+      {
+        fine_tune_config.ms2_model_output_path = fine_tuned_ms2_model;
+      }
+
+      if (!fine_tune_config.enable_rt && !fine_tune_config.enable_ccs && !fine_tune_config.enable_ms2)
+      {
+        throw Exception::IllegalArgument(
+          __FILE__,
+          __LINE__,
+          OPENMS_PRETTY_FUNCTION,
+          "fine_tune_tsv was provided, but all fine-tuning targets were disabled.");
+      }
+
+      writeLogInfo_(
+        "Fine-tuning ReDeem models from " + fine_tune_tsv
+        + " before transition prediction.\n");
+      predictor.fineTuneFromTransitionTsv(fine_tune_config);
+      writeLogInfo_("Finished ReDeem fine-tuning.\n");
+    }
 
     ofstream os(out.c_str());
     if (!os)

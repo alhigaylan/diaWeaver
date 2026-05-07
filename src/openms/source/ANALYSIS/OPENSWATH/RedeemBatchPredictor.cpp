@@ -45,6 +45,27 @@ namespace OpenMS
       const char* instrument;
     };
 
+    struct OpenMsRedeemFineTuneConfigFFI
+    {
+      const char* training_tsv_path;
+      const char* validation_tsv_path;
+      float validation_fraction;
+      size_t batch_size;
+      size_t validation_batch_size;
+      size_t epochs;
+      size_t early_stopping_patience;
+      double learning_rate;
+      double warmup_fraction;
+      int default_nce;
+      const char* default_instrument;
+      int enable_rt;
+      int enable_ccs;
+      int enable_ms2;
+      const char* rt_model_output_path;
+      const char* ccs_model_output_path;
+      const char* ms2_model_output_path;
+    };
+
     struct OpenMsRedeemBatchOutputFFI
     {
       size_t count;
@@ -65,6 +86,9 @@ namespace OpenMS
         const OpenMsRedeemPredictionInputFFI* inputs,
         size_t input_count,
         OpenMsRedeemBatchOutputFFI* output);
+      int openms_redeem_predictor_fine_tune_from_tsv(
+        void* predictor,
+        const OpenMsRedeemFineTuneConfigFFI* config);
       void openms_redeem_batch_output_free(OpenMsRedeemBatchOutputFFI* output);
       const char* openms_redeem_last_error();
     }
@@ -419,6 +443,84 @@ namespace OpenMS
     }
 
     return predictions;
+  }
+
+  void RedeemBatchPredictor::fineTuneFromTransitionTsv(const RedeemFineTuneConfig& config)
+  {
+    if (impl_ == nullptr || impl_->predictor == nullptr)
+    {
+      throw Exception::InvalidValue(
+        __FILE__,
+        __LINE__,
+        OPENMS_PRETTY_FUNCTION,
+        "null predictor",
+        "Redeem predictor has not been initialized.");
+    }
+    if (config.training_tsv_path.empty())
+    {
+      throw Exception::InvalidValue(
+        __FILE__,
+        __LINE__,
+        OPENMS_PRETTY_FUNCTION,
+        "",
+        "Redeem fine-tuning requires a non-empty training_tsv_path.");
+    }
+    if (!File::exists(config.training_tsv_path))
+    {
+      throw Exception::FileNotFound(
+        __FILE__,
+        __LINE__,
+        OPENMS_PRETTY_FUNCTION,
+        config.training_tsv_path);
+    }
+    if (config.validation_tsv_path.has_value() && !File::exists(*config.validation_tsv_path))
+    {
+      throw Exception::FileNotFound(
+        __FILE__,
+        __LINE__,
+        OPENMS_PRETTY_FUNCTION,
+        *config.validation_tsv_path);
+    }
+
+    const std::string training_tsv_path = config.training_tsv_path;
+    const std::string validation_tsv_path =
+      config.validation_tsv_path.has_value() ? std::string(*config.validation_tsv_path) : std::string();
+    const std::string default_instrument = config.default_instrument.empty()
+      ? std::string("Lumos")
+      : std::string(config.default_instrument);
+    const std::string rt_model_output_path =
+      config.rt_model_output_path.has_value() ? std::string(*config.rt_model_output_path) : std::string();
+    const std::string ccs_model_output_path =
+      config.ccs_model_output_path.has_value() ? std::string(*config.ccs_model_output_path) : std::string();
+    const std::string ms2_model_output_path =
+      config.ms2_model_output_path.has_value() ? std::string(*config.ms2_model_output_path) : std::string();
+
+    OpenMsRedeemFineTuneConfigFFI ffi_config
+    {
+      training_tsv_path.c_str(),
+      validation_tsv_path.empty() ? nullptr : validation_tsv_path.c_str(),
+      static_cast<float>(config.validation_fraction),
+      config.batch_size,
+      config.batch_size,
+      config.epochs,
+      config.early_stopping_patience,
+      config.learning_rate,
+      config.warmup_fraction,
+      config.default_nce,
+      default_instrument.c_str(),
+      config.enable_rt ? 1 : 0,
+      config.enable_ccs ? 1 : 0,
+      config.enable_ms2 ? 1 : 0,
+      rt_model_output_path.empty() ? nullptr : rt_model_output_path.c_str(),
+      ccs_model_output_path.empty() ? nullptr : ccs_model_output_path.c_str(),
+      ms2_model_output_path.empty() ? nullptr : ms2_model_output_path.c_str()
+    };
+
+    const int status = openms_redeem_predictor_fine_tune_from_tsv(impl_->predictor, &ffi_config);
+    if (status != 1)
+    {
+      throwRedeemError_("Redeem fine-tuning failed");
+    }
   }
 
   String RedeemBatchPredictor::canonicalizeModifiedPeptide(const String& modified_peptide)
