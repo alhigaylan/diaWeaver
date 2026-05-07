@@ -471,78 +471,203 @@ endif()
 #------------------------------------------------------------------------------
 # redeem-properties (Rust staticlib for RT / CCS / MS2 prediction)
 if (WITH_REDEEM)
-  find_program(CARGO_EXECUTABLE cargo REQUIRED)
-
-  if (REDEEM_RUST_SOURCE_DIR)
-    get_filename_component(_REDEEM_RUST_ROOT "${REDEEM_RUST_SOURCE_DIR}" ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
-    set(_REDEEM_SOURCE_KIND "external")
+  if (REDEEM_FFI_LIBRARY)
+    get_filename_component(_REDEEM_STATICLIB "${REDEEM_FFI_LIBRARY}" ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
+    if (NOT EXISTS "${_REDEEM_STATICLIB}")
+      message(FATAL_ERROR
+        "REDEEM_FFI_LIBRARY does not exist: ${_REDEEM_STATICLIB}")
+    endif()
+    set(_REDEEM_SOURCE_KIND "manual")
   else()
-    set(_REDEEM_RUST_ROOT "${CMAKE_SOURCE_DIR}/src/openms/extern/redeem")
-    set(_REDEEM_SOURCE_KIND "vendored")
+    if (NOT REDEEM_FFI_AUTO_DOWNLOAD)
+      message(FATAL_ERROR
+        "WITH_REDEEM=ON requires either REDEEM_FFI_LIBRARY to be set or REDEEM_FFI_AUTO_DOWNLOAD to be ON.")
+    endif()
+
+    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" _REDEEM_SYSTEM_PROCESSOR)
+    if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+      if (_REDEEM_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$")
+        set(_REDEEM_TARGET_TRIPLE "x86_64-unknown-linux-gnu")
+      elseif(_REDEEM_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+        set(_REDEEM_TARGET_TRIPLE "aarch64-unknown-linux-gnu")
+      else()
+        message(FATAL_ERROR
+          "WITH_REDEEM automatic bundle download does not support Linux processor '${CMAKE_SYSTEM_PROCESSOR}'. "
+          "Set REDEEM_FFI_LIBRARY manually.")
+      endif()
+      set(_REDEEM_ARCHIVE_EXT "tar.gz")
+    elseif(APPLE)
+      if (_REDEEM_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$")
+        set(_REDEEM_TARGET_TRIPLE "x86_64-apple-darwin")
+      elseif(_REDEEM_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+        set(_REDEEM_TARGET_TRIPLE "aarch64-apple-darwin")
+      else()
+        message(FATAL_ERROR
+          "WITH_REDEEM automatic bundle download does not support macOS processor '${CMAKE_SYSTEM_PROCESSOR}'. "
+          "Set REDEEM_FFI_LIBRARY manually.")
+      endif()
+      set(_REDEEM_ARCHIVE_EXT "tar.gz")
+    elseif(WIN32)
+      if (_REDEEM_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$")
+        set(_REDEEM_TARGET_TRIPLE "x86_64-pc-windows-msvc")
+      else()
+        message(FATAL_ERROR
+          "WITH_REDEEM automatic bundle download does not support Windows processor '${CMAKE_SYSTEM_PROCESSOR}'. "
+          "Set REDEEM_FFI_LIBRARY manually.")
+      endif()
+      set(_REDEEM_ARCHIVE_EXT "zip")
+    else()
+      message(FATAL_ERROR
+        "WITH_REDEEM automatic bundle download does not support platform '${CMAKE_SYSTEM_NAME}'. "
+        "Set REDEEM_FFI_LIBRARY manually.")
+    endif()
+
+    set(_REDEEM_BUNDLE_BASENAME "redeem-openms-ffi-${_REDEEM_TARGET_TRIPLE}")
+    set(_REDEEM_ARCHIVE_NAME "${_REDEEM_BUNDLE_BASENAME}.${_REDEEM_ARCHIVE_EXT}")
+
+    if (REDEEM_FFI_URL)
+      set(_REDEEM_ARCHIVE_URL "${REDEEM_FFI_URL}")
+    elseif(REDEEM_FFI_VERSION STREQUAL "latest")
+      set(_REDEEM_ARCHIVE_URL
+        "https://github.com/${REDEEM_FFI_GITHUB_REPOSITORY}/releases/latest/download/${_REDEEM_ARCHIVE_NAME}")
+    else()
+      set(_REDEEM_ARCHIVE_URL
+        "https://github.com/${REDEEM_FFI_GITHUB_REPOSITORY}/releases/download/${REDEEM_FFI_VERSION}/${_REDEEM_ARCHIVE_NAME}")
+    endif()
+
+    set(_REDEEM_DOWNLOAD_ROOT "${CMAKE_BINARY_DIR}/_deps/redeem-openms-ffi")
+    set(_REDEEM_ARCHIVE_PATH "${_REDEEM_DOWNLOAD_ROOT}/${_REDEEM_ARCHIVE_NAME}")
+    set(_REDEEM_EXTRACT_DIR "${_REDEEM_DOWNLOAD_ROOT}/${_REDEEM_BUNDLE_BASENAME}")
+
+    file(GLOB_RECURSE _REDEEM_EXISTING_LIBS LIST_DIRECTORIES false
+      "${_REDEEM_EXTRACT_DIR}/libredeem_openms_ffi.a"
+      "${_REDEEM_EXTRACT_DIR}/redeem_openms_ffi.lib")
+    if (NOT _REDEEM_EXISTING_LIBS)
+      file(MAKE_DIRECTORY "${_REDEEM_DOWNLOAD_ROOT}")
+
+      set(_REDEEM_LOCAL_ARCHIVE_CANDIDATE "")
+      if (REDEEM_FFI_URL)
+        if (EXISTS "${REDEEM_FFI_URL}")
+          get_filename_component(_REDEEM_LOCAL_ARCHIVE_CANDIDATE "${REDEEM_FFI_URL}" ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
+        elseif(REDEEM_FFI_URL MATCHES "^file://(.+)$" AND EXISTS "${CMAKE_MATCH_1}")
+          get_filename_component(_REDEEM_LOCAL_ARCHIVE_CANDIDATE "${CMAKE_MATCH_1}" ABSOLUTE)
+        endif()
+      endif()
+
+      if (_REDEEM_LOCAL_ARCHIVE_CANDIDATE)
+        file(COPY_FILE "${_REDEEM_LOCAL_ARCHIVE_CANDIDATE}" "${_REDEEM_ARCHIVE_PATH}" ONLY_IF_DIFFERENT)
+      else()
+        set(_REDEEM_DOWNLOAD_STATUS)
+        set(_REDEEM_DOWNLOAD_LOG)
+        file(DOWNLOAD
+          "${_REDEEM_ARCHIVE_URL}"
+          "${_REDEEM_ARCHIVE_PATH}"
+          SHOW_PROGRESS
+          STATUS _REDEEM_DOWNLOAD_STATUS
+          LOG _REDEEM_DOWNLOAD_LOG
+          TLS_VERIFY ON)
+        list(GET _REDEEM_DOWNLOAD_STATUS 0 _REDEEM_DOWNLOAD_STATUS_CODE)
+        list(GET _REDEEM_DOWNLOAD_STATUS 1 _REDEEM_DOWNLOAD_STATUS_TEXT)
+        if (NOT _REDEEM_DOWNLOAD_STATUS_CODE EQUAL 0)
+          message(FATAL_ERROR
+            "Failed to download redeem-openms-ffi bundle from ${_REDEEM_ARCHIVE_URL}: "
+            "[${_REDEEM_DOWNLOAD_STATUS_CODE}] ${_REDEEM_DOWNLOAD_STATUS_TEXT}\n${_REDEEM_DOWNLOAD_LOG}")
+        endif()
+      endif()
+
+      file(REMOVE_RECURSE "${_REDEEM_EXTRACT_DIR}")
+      file(MAKE_DIRECTORY "${_REDEEM_EXTRACT_DIR}")
+      file(ARCHIVE_EXTRACT
+        INPUT "${_REDEEM_ARCHIVE_PATH}"
+        DESTINATION "${_REDEEM_EXTRACT_DIR}")
+      file(REMOVE "${_REDEEM_ARCHIVE_PATH}")
+
+      file(GLOB_RECURSE _REDEEM_EXISTING_LIBS LIST_DIRECTORIES false
+        "${_REDEEM_EXTRACT_DIR}/libredeem_openms_ffi.a"
+        "${_REDEEM_EXTRACT_DIR}/redeem_openms_ffi.lib")
+    endif()
+
+    list(LENGTH _REDEEM_EXISTING_LIBS _REDEEM_EXISTING_LIB_COUNT)
+    if (_REDEEM_EXISTING_LIB_COUNT EQUAL 0)
+      message(FATAL_ERROR
+        "Downloaded redeem-openms-ffi bundle from ${_REDEEM_ARCHIVE_URL}, but no static library was found after extraction in ${_REDEEM_EXTRACT_DIR}.")
+    elseif(_REDEEM_EXISTING_LIB_COUNT GREATER 1)
+      message(FATAL_ERROR
+        "Downloaded redeem-openms-ffi bundle from ${_REDEEM_ARCHIVE_URL}, but multiple matching static libraries were found in ${_REDEEM_EXTRACT_DIR}: ${_REDEEM_EXISTING_LIBS}")
+    endif()
+
+    list(GET _REDEEM_EXISTING_LIBS 0 _REDEEM_STATICLIB)
+    set(_REDEEM_SOURCE_KIND "downloaded")
   endif()
-  set(_REDEEM_MANIFEST "${_REDEEM_RUST_ROOT}/redeem-openms-ffi/Cargo.toml")
 
-  if(NOT EXISTS "${_REDEEM_MANIFEST}")
-    message(FATAL_ERROR
-      "WITH_REDEEM=ON requires a redeem Rust source tree at ${_REDEEM_RUST_ROOT}. "
-      "Expected manifest ${_REDEEM_MANIFEST}. "
-      "Either vendor the prepared bundle into src/openms/extern/redeem or set REDEEM_RUST_SOURCE_DIR to a live redeem checkout / prepared bundle.")
+  set(_REDEEM_NATIVE_LIBS)
+
+  # Default native link libraries for common CPU-only builds of the Rust staticlib.
+  # If a packaged bundle provides a sibling metadata file generated from
+  # `cargo rustc -- --print native-static-libs`, use it to refine the link set.
+  if (WIN32)
+    list(APPEND _REDEEM_NATIVE_LIBS advapi32 bcrypt ntdll userenv ws2_32)
+  elseif(APPLE)
+    find_package(LibLZMA REQUIRED)
+    list(APPEND _REDEEM_NATIVE_LIBS LibLZMA::LibLZMA)
+  elseif(UNIX)
+    find_package(LibLZMA REQUIRED)
+    find_package(Threads REQUIRED)
+    list(APPEND _REDEEM_NATIVE_LIBS LibLZMA::LibLZMA Threads::Threads)
+    if (CMAKE_DL_LIBS)
+      list(APPEND _REDEEM_NATIVE_LIBS ${CMAKE_DL_LIBS})
+    endif()
+    list(APPEND _REDEEM_NATIVE_LIBS m rt util)
   endif()
 
-  file(GLOB_RECURSE _REDEEM_RUST_SOURCES CONFIGURE_DEPENDS
-    "${_REDEEM_RUST_ROOT}/Cargo.toml"
-    "${_REDEEM_RUST_ROOT}/Cargo.lock"
-    "${_REDEEM_RUST_ROOT}/.cargo/config.toml"
-    "${_REDEEM_RUST_ROOT}/redeem-openms-ffi/Cargo.toml"
-    "${_REDEEM_RUST_ROOT}/redeem-openms-ffi/src/*.rs"
-    "${_REDEEM_RUST_ROOT}/redeem-properties/Cargo.toml"
-    "${_REDEEM_RUST_ROOT}/redeem-properties/src/*.rs"
-    "${_REDEEM_RUST_ROOT}/redeem-properties/assets/*"
-    "${_REDEEM_RUST_ROOT}/redeem-properties/data/pretrained_models/*"
-    "${_REDEEM_RUST_ROOT}/vendor/*"
-  )
+  get_filename_component(_REDEEM_STATICLIB_DIR "${_REDEEM_STATICLIB}" DIRECTORY)
+  set(_REDEEM_NATIVE_LIBS_FILE "${_REDEEM_STATICLIB_DIR}/redeem-openms-ffi.native-static-libs.txt")
+  if (EXISTS "${_REDEEM_NATIVE_LIBS_FILE}")
+    file(READ "${_REDEEM_NATIVE_LIBS_FILE}" _REDEEM_NATIVE_LIBS_RAW)
+    string(REGEX REPLACE "[\r\n\t ]+" ";" _REDEEM_NATIVE_LIBS_TOKENS "${_REDEEM_NATIVE_LIBS_RAW}")
+    set(_REDEEM_NATIVE_LIBS_FROM_METADATA)
+    foreach(_REDEEM_TOKEN IN LISTS _REDEEM_NATIVE_LIBS_TOKENS)
+      if (_REDEEM_TOKEN STREQUAL "")
+        continue()
+      endif()
 
-  set(_REDEEM_CARGO_ARGS
-    build
-    --manifest-path "${_REDEEM_MANIFEST}"
-    --release
-    --locked
-  )
+      if (_REDEEM_TOKEN MATCHES "^-l(.+)$")
+        set(_REDEEM_TOKEN_NAME "${CMAKE_MATCH_1}")
+      else()
+        set(_REDEEM_TOKEN_NAME "${_REDEEM_TOKEN}")
+      endif()
 
-  if (REDEEM_RUST_OFFLINE)
-    list(APPEND _REDEEM_CARGO_ARGS --offline)
+      if (_REDEEM_TOKEN_NAME STREQUAL "lzma")
+        find_package(LibLZMA REQUIRED)
+        list(APPEND _REDEEM_NATIVE_LIBS_FROM_METADATA LibLZMA::LibLZMA)
+      elseif(_REDEEM_TOKEN_NAME STREQUAL "pthread")
+        find_package(Threads REQUIRED)
+        list(APPEND _REDEEM_NATIVE_LIBS_FROM_METADATA Threads::Threads)
+      elseif(_REDEEM_TOKEN_NAME STREQUAL "dl")
+        if (CMAKE_DL_LIBS)
+          list(APPEND _REDEEM_NATIVE_LIBS_FROM_METADATA ${CMAKE_DL_LIBS})
+        endif()
+      elseif(_REDEEM_TOKEN_NAME MATCHES "^(c|gcc_s|System)$")
+        continue()
+      else()
+        list(APPEND _REDEEM_NATIVE_LIBS_FROM_METADATA "${_REDEEM_TOKEN_NAME}")
+      endif()
+    endforeach()
+
+    if (_REDEEM_NATIVE_LIBS_FROM_METADATA)
+      set(_REDEEM_NATIVE_LIBS ${_REDEEM_NATIVE_LIBS_FROM_METADATA})
+    endif()
   endif()
 
-  if (REDEEM_USE_CUDA)
-    list(APPEND _REDEEM_CARGO_ARGS --features cuda)
-  endif()
-
-  if (MSVC)
-    set(_REDEEM_STATICLIB "${_REDEEM_RUST_ROOT}/target/release/redeem_openms_ffi.lib")
-  else()
-    set(_REDEEM_STATICLIB "${_REDEEM_RUST_ROOT}/target/release/libredeem_openms_ffi.a")
-  endif()
-
-  add_custom_command(
-    OUTPUT "${_REDEEM_STATICLIB}"
-    COMMAND "${CMAKE_COMMAND}" -E env
-      "CARGO_TARGET_DIR=${_REDEEM_RUST_ROOT}/target"
-      "${CARGO_EXECUTABLE}" ${_REDEEM_CARGO_ARGS}
-    WORKING_DIRECTORY "${_REDEEM_RUST_ROOT}"
-    DEPENDS ${_REDEEM_RUST_SOURCES}
-    COMMENT "Building redeem Rust FFI static library"
-    VERBATIM
-  )
-
-  add_custom_target(redeem_openms_ffi_build DEPENDS "${_REDEEM_STATICLIB}")
+  list(REMOVE_DUPLICATES _REDEEM_NATIVE_LIBS)
 
   add_library(redeem_openms_ffi STATIC IMPORTED GLOBAL)
   set_target_properties(redeem_openms_ffi PROPERTIES
     IMPORTED_LOCATION "${_REDEEM_STATICLIB}"
+    INTERFACE_LINK_LIBRARIES "${_REDEEM_NATIVE_LIBS}"
   )
-  add_dependencies(redeem_openms_ffi redeem_openms_ffi_build)
   add_library(redeem::redeem_openms_ffi ALIAS redeem_openms_ffi)
 
-  message(STATUS "redeem: ${_REDEEM_SOURCE_KIND} Rust source enabled (${_REDEEM_RUST_ROOT}), offline=${REDEEM_RUST_OFFLINE}, cuda=${REDEEM_USE_CUDA}")
+  message(STATUS "redeem: ${_REDEEM_SOURCE_KIND} prebuilt static library enabled (${_REDEEM_STATICLIB})")
 endif()
 #------------------------------------------------------------------------------
