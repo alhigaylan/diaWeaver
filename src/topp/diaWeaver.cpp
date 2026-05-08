@@ -1165,10 +1165,13 @@ protected:
 
     pseudo_exp.sortSpectra(false);  // Sort by RT
 
-    // Re-assign native IDs after sorting
+    // Re-assign native IDs after sorting; also set MSn spectrum type and positive polarity
+    // so downstream tools (e.g. FragPipe/MSFragger) recognise these as valid MS2 spectra.
     for (Size i = 0; i < pseudo_exp.size(); ++i)
     {
       pseudo_exp[i].setNativeID("scan=" + String(i + 1));
+      pseudo_exp[i].getInstrumentSettings().setScanMode(InstrumentSettings::ScanMode::MSNSPECTRUM);
+      pseudo_exp[i].getInstrumentSettings().setPolarity(IonSource::Polarity::POSITIVE);
     }
 
     // Configure numpress compression to reduce file size
