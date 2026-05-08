@@ -188,7 +188,7 @@ namespace OpenMS
 
     double sum_tolerance_mz_{1.0};
     double gauss_ppm_tolerance_{5.0};
-    double mobilogram_sampling_grid_{0.03};
+    double mobilogram_sampling_grid_{0.01};
     int sgolay_frame_length_{5};
     int sgolay_polynomial_order_{3};
     bool include_unclaimed_{false};

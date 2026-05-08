@@ -697,7 +697,7 @@ namespace OpenMS
     {
       // --- PickIMTraces parameters ---
       defaults_.setValue("pickIMTraces:sum_tolerance_mz",          1.0,  "Tolerance for summing adjacent m/z peaks (ppm)");
-      defaults_.setValue("pickIMTraces:mobilogram_sampling_grid", 0.03, "Grid spacing for linear resampling of mobilograms (in 1/K0 units).");
+      defaults_.setValue("pickIMTraces:mobilogram_sampling_grid", 0.01, "Grid spacing for linear resampling of mobilograms (in 1/K0 units).");
       defaults_.setValue("pickIMTraces:gauss_ppm_tolerance",      5.0,  "Gaussian smoothing m/z tolerance in ppm");
       defaults_.setValue("pickIMTraces:sgolay_frame_length",     5,     "Savitzky-Golay smoothing frame length");
       defaults_.setValue("pickIMTraces:sgolay_polynomial_order", 3,     "Savitzky-Golay smoothing polynomial order");
