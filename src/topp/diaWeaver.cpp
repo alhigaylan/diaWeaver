@@ -411,6 +411,17 @@ protected:
       p.setValue("pearson_weight", 1.0, "Weight for the Pearson correlation component in the combined score used to rank precursor-fragment assignments.");
       p.setValue("delta_rt_weight", 1.0, "Weight for the delta RT component in the combined score used to rank precursor-fragment assignments.");
       p.setValue("delta_im_weight", 1.0, "Weight for the delta ion mobility component in the combined score used to rank precursor-fragment assignments.");
+      p.setValue("max_nr_ions", 500, "Maximum number of fragment ions written per output spectrum. Assignments are ranked and truncated to this limit. Set to 0 to disable the limit.");
+      p.setValue("assign_unassigned_to_all", "false", "Assign unassigned MS2 fragments to all precursors within RT range.");
+      p.setValidStrings("assign_unassigned_to_all", {"true", "false"});
+      p.setValue("use_combined_scores", "true", "If true, rank precursor-fragment assignments by a weighted combination of Pearson correlation, delta RT and delta IM. If false, use Pearson correlation only.");
+      p.setValidStrings("use_combined_scores", {"false", "true"});
+      p.setValue("output_fragment_scores", "false", "If true, output per-fragment scores as FloatDataArrays in the output spectra.");
+      p.setValidStrings("output_fragment_scores", {"false", "true"});
+      p.setValue("smooth_ms1", "true", "Use EPD-smoothed intensities for MS1 elution profiles in correlation scoring. Falls back to raw intensities if smoothed data is absent.");
+      p.setValidStrings("smooth_ms1", {"false", "true"});
+      p.setValue("smooth_ms2", "false", "Use EPD-smoothed intensities for MS2 elution profiles in correlation scoring. Falls back to raw intensities if smoothed data is absent.");
+      p.setValidStrings("smooth_ms2", {"false", "true"});
       return p;
     }
     return Param();
