@@ -122,6 +122,11 @@ protected:
                         "Per-trace accountability output (TSV)", true);
     setValidFormats_("out_traces", {"tsv"});
 
+    registerOutputFile_("out_summary", "<file>", "",
+                        "Run-level ion accounting summary (TSV): "
+                        "total traces, explained/unexplained counts and percentages.", true);
+    setValidFormats_("out_summary", {"tsv"});
+
     registerOutputFile_("out_peptides", "<file>", "",
                         "Per-peptide fragment-ion coverage output (TSV). "
                         "Leave empty to skip.", false);
@@ -363,11 +368,12 @@ protected:
 
   ExitCodes main_(int, const char**) override
   {
-    const String in_file         = getStringOption_("in");
-    const String in_ids_file     = getStringOption_("in_ids");
-    const String out_traces_file = getStringOption_("out_traces");
-    const String out_pep_file    = getStringOption_("out_peptides");
-    const String out_coll_file   = getStringOption_("out_collisions");
+    const String in_file          = getStringOption_("in");
+    const String in_ids_file      = getStringOption_("in_ids");
+    const String out_traces_file  = getStringOption_("out_traces");
+    const String out_summary_file = getStringOption_("out_summary");
+    const String out_pep_file     = getStringOption_("out_peptides");
+    const String out_coll_file    = getStringOption_("out_collisions");
 
     const double mz_tol_ppm = getDoubleOption_("mz_tolerance");
     const double rt_tol     = getDoubleOption_("rt_tolerance");
@@ -694,16 +700,41 @@ protected:
       }
     }
 
-    OPENMS_LOG_INFO
-      << "\n=== diaWeaverCounter Summary ===\n"
-      << "Total MS2 traces : " << ms2_traces.size() << "\n"
-      << "  Orphan    (0 peptides) : " << n_orphan    << "\n"
-      << "  Unique    (1 peptide)  : " << n_unique    << "\n"
-      << "  Ambiguous (>1 peptide) : " << n_ambiguous << "\n"
-      << "Total peptides    : " << peptides.size() << "\n";
+    const Size n_total     = ms2_traces.size();
+    const Size n_explained = n_unique + n_ambiguous;
+
+    auto pct = [](Size num, Size denom) -> double {
+      return denom > 0 ? 100.0 * static_cast<double>(num) / static_cast<double>(denom) : 0.0;
+    };
+
+    OPENMS_LOG_INFO << "\n=== diaWeaverCounter Summary ===\n"
+      << "Explained: " << n_explained << " / " << n_total
+      << " traces (" << pct(n_explained, n_total) << " %)"
+      << "  |  Orphan: " << n_orphan << " (" << pct(n_orphan, n_total) << " %)\n"
+      << "See " << out_summary_file << " for full metrics.\n";
 
     // ------------------------------------------------------------------
-    // Step 7: Write per-trace accountability TSV
+    // Step 7: Write run-level summary TSV
+    // ------------------------------------------------------------------
+    {
+      ofstream ofs(out_summary_file.c_str());
+      if (!ofs.is_open())
+      {
+        OPENMS_LOG_ERROR << "Cannot write summary output: " << out_summary_file << "\n";
+        return CANNOT_WRITE_OUTPUT_FILE;
+      }
+
+      ofs << "metric\tvalue\tpct_of_total_traces\n"
+          << "total_ms2_traces\t"      << n_total            << "\t\n"
+          << "explained_traces\t"      << n_explained        << "\t" << pct(n_explained, n_total) << "\n"
+          << "unique_traces\t"         << n_unique           << "\t" << pct(n_unique,    n_total) << "\n"
+          << "ambiguous_traces\t"      << n_ambiguous        << "\t" << pct(n_ambiguous, n_total) << "\n"
+          << "unexplained_traces\t"    << n_orphan           << "\t" << pct(n_orphan,    n_total) << "\n"
+          << "total_peptides_mapped\t" << peptides.size()    << "\t\n";
+    }
+
+    // ------------------------------------------------------------------
+    // Step 8: Write per-trace accountability TSV
     // ------------------------------------------------------------------
     {
       ofstream ofs(out_traces_file.c_str());
@@ -739,7 +770,7 @@ protected:
     }
 
     // ------------------------------------------------------------------
-    // Step 8: Write per-peptide coverage TSV (optional)
+    // Step 9: Write per-peptide coverage TSV (optional)
     // ------------------------------------------------------------------
     if (!out_pep_file.empty())
     {
@@ -776,7 +807,7 @@ protected:
     }
 
     // ------------------------------------------------------------------
-    // Step 9: Write collision TSV (optional)
+    // Step 10: Write collision TSV (optional)
     //
     // Long format: one row per (trace, peptide, ion) for every trace
     // claimed by more than one unique peptide.
