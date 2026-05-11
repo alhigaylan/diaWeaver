@@ -39,6 +39,7 @@ Output files:
 #include <OpenMS/CHEMISTRY/TheoreticalSpectrumGenerator.h>
 #include <OpenMS/CHEMISTRY/AASequence.h>
 #include <OpenMS/DATASTRUCTURES/KDTree.h>
+#include <OpenMS/SYSTEM/File.h>
 
 #include <fstream>
 #include <map>
@@ -169,21 +170,41 @@ protected:
   }
 
   // -------------------------------------------------------------------------
-  // TSV placeholder parser
+  // TSV parser for DIA-NN library-free report.tsv (and Spectronaut equivalents)
+  //
+  // run_id    : stem of the input mzML (no path, no extension). Only rows
+  //             whose Run or File.Name stem matches this value are loaded.
+  //             Pass an empty string to disable filtering (loads all rows).
   //
   // Recognised column aliases (case-insensitive):
+  //   run      : "run", "file.name"   ← used for per-run filtering
   //   sequence : "sequence", "modified.sequence", "stripped.sequence",
   //              "pep.strippedsequence"
   //   charge   : "charge", "precursor.charge", "eg.precursorcharge"
-  //   rt       : "rt", "eg.apexrt", "eg.meanapexrt"           [seconds]
+  //   rt       : "rt", "eg.apexrt", "eg.meanapexrt"   [DIA-NN: minutes → ×60]
   //   mz       : "mz", "precursor.mz", "fg.precmz"
   //   im       : "im", "ionmobility", "eg.ionmobility"
   //
-  // TODO: Add DIA-NN-specific RT unit detection (DIA-NN reports RT in minutes)
   // TODO: Add Spectronaut-specific sequence notation stripping
   // TODO: Add support for idXML / pepXML inputs via IdXMLFile / PepXMLFile
   // -------------------------------------------------------------------------
-  vector<PeptideEntry> parsePeptideTSV_(const String& filename) const
+
+  // Returns the run identifier embedded in a DIA-NN File.Name value.
+  // DIA-NN stores the full raw-file path (e.g. /data/foo/run42.d); we want
+  // just the stem ("run42") so it can be compared with the mzML basename.
+  static String runIdFromFileName_(const String& file_name_field)
+  {
+    String stem = File::basename(file_name_field);  // "run42.d"  or  "run42.mzML"
+    // Strip any known raw-file extension
+    for (const char* ext : {".d", ".mzML", ".mzml", ".raw", ".wiff"})
+    {
+      if (stem.hasSuffix(ext)) { stem = stem.prefix(stem.size() - strlen(ext)); break; }
+    }
+    return stem;
+  }
+
+  vector<PeptideEntry> parsePeptideTSV_(const String& filename,
+                                        const String& run_id) const
   {
     vector<PeptideEntry> entries;
 
@@ -208,6 +229,7 @@ protected:
 
     // Map lowercased column name → internal field tag
     const map<String, String> aliases = {
+      {"run",                   "run"}, {"file.name",            "run"},
       {"sequence",              "seq"}, {"modified.sequence",    "seq"},
       {"stripped.sequence",     "seq"}, {"pep.strippedsequence", "seq"},
       {"charge",                "charge"}, {"precursor.charge",  "charge"},
@@ -241,8 +263,27 @@ protected:
                          "    sequence : sequence | modified.sequence | stripped.sequence | "
                                         "pep.strippedsequence\n"
                          "    charge   : charge | precursor.charge | eg.precursorcharge\n"
-                         "    rt       : rt | eg.apexrt | eg.meanapexrt (seconds)\n";
+                         "    rt       : rt | eg.apexrt | eg.meanapexrt (minutes for DIA-NN)\n";
       return entries;
+    }
+
+    const bool has_run_col   = field_col.count("run") > 0;
+    const bool filter_by_run = !run_id.empty();
+    // DIA-NN "Run" column holds just the stem; "File.Name" holds the full path.
+    // runIdFromFileName_() normalises both to a bare stem for comparison.
+    const bool run_col_is_filename =
+      has_run_col &&
+      col_names[field_col.at("run")].toLower() == String("file.name");
+
+    if (filter_by_run && !has_run_col)
+    {
+      OPENMS_LOG_WARN << "[diaWeaverCounter] No run/file.name column found in TSV; "
+                         "run filter '" << run_id << "' cannot be applied. "
+                         "All rows will be loaded.\n";
+    }
+    else if (filter_by_run)
+    {
+      OPENMS_LOG_INFO << "[diaWeaverCounter] Filtering TSV to run: " << run_id << "\n";
     }
 
     // --- Parse data rows ---
@@ -258,10 +299,19 @@ protected:
 
       try
       {
+        // --- Run filter ---
+        if (filter_by_run && has_run_col)
+        {
+          String row_run = fields.at(field_col.at("run")).trim();
+          if (run_col_is_filename) row_run = runIdFromFileName_(row_run);
+          if (row_run != run_id) continue;
+        }
+
         PeptideEntry e;
         e.sequence = fields.at(field_col.at("seq")).trim();
         e.charge   = fields.at(field_col.at("charge")).trim().toInt();
-        e.rt       = fields.at(field_col.at("rt")).trim().toDouble();
+        // DIA-NN reports RT in minutes; convert to seconds
+        e.rt       = fields.at(field_col.at("rt")).trim().toDouble() * 60.0;
         e.mz       = field_col.count("mz") ?
                        fields.at(field_col.at("mz")).trim().toDouble() : 0.0;
         e.im       = field_col.count("im") ?
@@ -397,9 +447,20 @@ protected:
     OPENMS_LOG_INFO << "KD-tree built (" << kd_tree.size() << " nodes).\n";
 
     // ------------------------------------------------------------------
-    // Step 4: Parse peptide identification TSV (placeholder)
+    // Step 4: Parse peptide identification TSV, filtered to this run.
+    //
+    // The run ID is the mzML basename without extension (e.g. "run42").
+    // DIA-NN's Run column holds exactly this stem; File.Name holds the
+    // full raw-file path which runIdFromFileName_() normalises to the stem.
     // ------------------------------------------------------------------
-    vector<PeptideEntry> peptides = parsePeptideTSV_(in_ids_file);
+    String run_id = File::basename(in_file);   // "run42.mzML"
+    for (const char* ext : {".mzML", ".mzml"})
+    {
+      if (run_id.hasSuffix(ext)) { run_id = run_id.prefix(run_id.size() - strlen(ext)); break; }
+    }
+    OPENMS_LOG_INFO << "Run ID derived from mzML: " << run_id << "\n";
+
+    vector<PeptideEntry> peptides = parsePeptideTSV_(in_ids_file, run_id);
     OPENMS_LOG_INFO << "Peptides to map: " << peptides.size() << "\n";
 
     // ------------------------------------------------------------------
