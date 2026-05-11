@@ -309,6 +309,29 @@ protected:
 
         PeptideEntry e;
         e.sequence = fields.at(field_col.at("seq")).trim();
+
+        // DIA-NN reports ambiguous X residue. We cannot readily compute theoretical fragment ion masses.
+        {
+          bool has_bare_x = false;
+          for (Size ci = 0; ci < e.sequence.size(); ++ci)
+          {
+            if (e.sequence[ci] == 'X' &&
+                (ci + 1 >= e.sequence.size() || e.sequence[ci + 1] != '['))
+            {
+              has_bare_x = true;
+              break;
+            }
+          }
+          if (has_bare_x)
+          {
+            OPENMS_LOG_WARN << "[diaWeaverCounter] Sequence '" << e.sequence
+                            << "' (row " << row << ") contains ambiguous residue X "
+                               "with unknown mass. Cannot compute theoretical fragment "
+                               "ions. Skipping.\n";
+            continue;
+          }
+        }
+
         e.charge   = fields.at(field_col.at("charge")).trim().toInt();
         // DIA-NN reports RT in minutes; convert to seconds
         e.rt       = fields.at(field_col.at("rt")).trim().toDouble() * 60.0;
@@ -571,6 +594,56 @@ protected:
           {
             best.best_snr       = trace_snr[tidx];
             best.best_trace_idx = tidx;
+          }
+        }
+      }
+
+      // Search for the unfragmented precursor ion surviving into MS2.
+      // Uses the same RT / IM windows as fragment ions.
+      {
+        const String prec_ion_name = "p";
+        const double mz_prec       = aa_seq.getMZ(pep.charge);
+        const double mz_tol_da     = mz_prec * mz_tol_ppm * 1e-6;
+
+        TraceKDTree::_Region_ region;
+        region._M_low_bounds[0]  = pep.rt - rt_tol;
+        region._M_high_bounds[0] = pep.rt + rt_tol;
+        region._M_low_bounds[1]  = mz_prec - mz_tol_da;
+        region._M_high_bounds[1] = mz_prec + mz_tol_da;
+
+        vector<MS2TraceNode> candidates;
+        kd_tree.find_within_range(region, back_inserter(candidates));
+
+        vector<Size> valid_tidx;
+        for (const auto& cand : candidates)
+        {
+          if (dataset_has_im && pep.im > 0.0 &&
+              ms2_traces[cand.trace_idx].containsIMData())
+          {
+            if (std::abs(cand.im - pep.im) > im_tol) continue;
+          }
+          valid_tidx.push_back(cand.trace_idx);
+        }
+
+        if (!valid_tidx.empty())
+        {
+          ++pep_matched_ions[pep_idx];
+          if (valid_tidx.size() > 1) ++pep_multi_trace_ions[pep_idx];
+
+          auto ion_key = make_pair(pep_idx, prec_ion_name);
+          IonBestMatch& best = best_ion_match[ion_key];
+          best.n_traces += valid_tidx.size();
+
+          for (Size tidx : valid_tidx)
+          {
+            trace_claims[tidx].emplace_back(pep_idx, prec_ion_name);
+            pep_matched_trace_set[pep_idx].insert(tidx);
+
+            if (trace_snr[tidx] > best.best_snr)
+            {
+              best.best_snr       = trace_snr[tidx];
+              best.best_trace_idx = tidx;
+            }
           }
         }
       }
