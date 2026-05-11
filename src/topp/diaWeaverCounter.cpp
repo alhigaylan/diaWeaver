@@ -513,12 +513,13 @@ protected:
 
     TheoreticalSpectrumGenerator tsg;
     Param tsg_params = tsg.getDefaults();
-    tsg_params.setValue("add_metainfo", "true",  "");  // ion names needed for collision table
-    tsg_params.setValue("add_a_ions",   "false", "");
-    tsg_params.setValue("add_c_ions",   "false", "");
-    tsg_params.setValue("add_x_ions",   "false", "");
-    tsg_params.setValue("add_z_ions",   "false", "");
-    tsg_params.setValue("add_losses",   "false", "");
+    tsg_params.setValue("add_metainfo",   "true",  "");  // ion names needed for collision table
+    tsg_params.setValue("add_a_ions",     "false", "");
+    tsg_params.setValue("add_c_ions",     "false", "");
+    tsg_params.setValue("add_x_ions",     "false", "");
+    tsg_params.setValue("add_z_ions",     "false", "");
+    tsg_params.setValue("add_losses",     "true",  "");
+    tsg_params.setValue("add_term_losses","true",  "");
     tsg.setParameters(tsg_params);
 
     for (Size pep_idx = 0; pep_idx < peptides.size(); ++pep_idx)
