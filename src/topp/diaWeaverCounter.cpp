@@ -176,36 +176,58 @@ protected:
   }
 
   // -------------------------------------------------------------------------
-  // TSV parser for DIA-NN library-free report.tsv (and Spectronaut equivalents)
+  // TSV parser for DIA-NN library-free report.tsv and MSFragger psm.tsv
   //
   // run_id    : stem of the input mzML (no path, no extension). Only rows
-  //             whose Run or File.Name stem matches this value are loaded.
+  //             whose run column stem matches this value are loaded.
   //             Pass an empty string to disable filtering (loads all rows).
   //
   // Recognised column aliases (case-insensitive):
-  //   run      : "run", "file.name"   ← used for per-run filtering
-  //   sequence : "sequence", "modified.sequence", "stripped.sequence",
-  //              "pep.strippedsequence"
+  //   run      : "run", "file.name"          ← DIA-NN
+  //              "spectrum"                   ← MSFragger (stem extracted via runIdFromSpectrum_)
+  //   sequence : "modified peptide", "peptide"          ← MSFragger
+  //              "modified.sequence", "stripped.sequence",
+  //              "sequence", "pep.strippedsequence"      ← DIA-NN / generic
   //   charge   : "charge", "precursor.charge", "eg.precursorcharge"
-  //   rt       : "rt", "eg.apexrt", "eg.meanapexrt"   [DIA-NN: minutes → ×60]
-  //   mz       : "mz", "precursor.mz", "fg.precmz"
+  //   rt       : "retention"                 ← MSFragger [seconds, no conversion]
+  //              "rt", "eg.apexrt", "eg.meanapexrt"      ← DIA-NN [minutes → ×60]
+  //   mz       : "calibrated observed m/z", "observed m/z"  ← MSFragger
+  //              "mz", "precursor.mz", "fg.precmz"           ← DIA-NN / generic
   //   im       : "im", "ionmobility", "eg.ionmobility"
   //
   // TODO: Add Spectronaut-specific sequence notation stripping
   // TODO: Add support for idXML / pepXML inputs via IdXMLFile / PepXMLFile
   // -------------------------------------------------------------------------
 
-  // Returns the run identifier embedded in a DIA-NN File.Name value.
-  // DIA-NN stores the full raw-file path (e.g. /data/foo/run42.d); we want
-  // just the stem ("run42") so it can be compared with the mzML basename.
+  // Returns the run identifier from a DIA-NN File.Name value (full raw-file path).
+  // Strips path and known raw-file extensions to produce a bare stem.
   static String runIdFromFileName_(const String& file_name_field)
   {
-    String stem = File::basename(file_name_field);  // "run42.d"  or  "run42.mzML"
-    // Strip any known raw-file extension
+    String stem = File::basename(file_name_field);  // "/data/foo/run42.d" → "run42.d"
     for (const char* ext : {".d", ".mzML", ".mzml", ".raw", ".wiff"})
     {
       if (stem.hasSuffix(ext)) { stem = stem.prefix(stem.size() - strlen(ext)); break; }
     }
+    return stem;
+  }
+
+  // Returns the run identifier from an MSFragger Spectrum field value.
+  // Format: "<run_name>[_diatracer].<scan>.<scan>.<charge>"
+  // e.g.  "run42_diatracer.00030.00030.3" → "run42"
+  static String runIdFromSpectrum_(const String& spectrum_field)
+  {
+    // Strip trailing .scan.scan.charge  (three dot-delimited numeric suffixes)
+    String stem = spectrum_field;
+    for (int i = 0; i < 3; ++i)
+    {
+      Size dot = stem.rfind('.');
+      if (dot == String::npos) break;
+      stem = stem.prefix(dot);
+    }
+    // Strip _diatracer suffix added by FragPipe DIA processing
+    const String diatracer_suffix = "_diatracer";
+    if (stem.hasSuffix(diatracer_suffix))
+      stem = stem.prefix(stem.size() - diatracer_suffix.size());
     return stem;
   }
 
@@ -235,17 +257,27 @@ protected:
 
     // Map lowercased column name → internal field tag
     const map<String, String> aliases = {
-      {"run",                   "run"}, {"file.name",            "run"},
-      {"sequence",              "seq"}, {"modified.sequence",    "seq"},
-      {"stripped.sequence",     "seq"}, {"pep.strippedsequence", "seq"},
-      {"charge",                "charge"}, {"precursor.charge",  "charge"},
-      {"eg.precursorcharge",    "charge"},
-      {"rt",                    "rt"},  {"eg.apexrt",            "rt"},
-      {"eg.meanapexrt",         "rt"},
-      {"mz",                    "mz"},  {"precursor.mz",         "mz"},
-      {"fg.precmz",             "mz"},
-      {"im",                    "im"},  {"ionmobility",          "im"},
-      {"eg.ionmobility",        "im"}
+      // run identification
+      {"run",                        "run"}, {"file.name",               "run"},
+      {"spectrum",                   "run_spectrum"},  // MSFragger — needs runIdFromSpectrum_
+      // sequence
+      {"modified peptide",           "seq"}, {"peptide",                 "seq"},
+      {"sequence",                   "seq"}, {"modified.sequence",       "seq"},
+      {"stripped.sequence",          "seq"}, {"pep.strippedsequence",    "seq"},
+      // charge
+      {"charge",                     "charge"}, {"precursor.charge",     "charge"},
+      {"eg.precursorcharge",         "charge"},
+      // RT — DIA-NN reports minutes; MSFragger reports seconds (tagged separately)
+      {"retention",                  "rt_sec"}, // MSFragger — already seconds
+      {"rt",                         "rt_min"}, {"eg.apexrt",            "rt_min"},
+      {"eg.meanapexrt",              "rt_min"},
+      // m/z
+      {"calibrated observed m/z",    "mz"},  {"observed m/z",            "mz"},
+      {"mz",                         "mz"},  {"precursor.mz",            "mz"},
+      {"fg.precmz",                  "mz"},
+      // ion mobility
+      {"im",                         "im"},  {"ionmobility",             "im"},
+      {"eg.ionmobility",             "im"}
     };
 
     // field tag → column index
@@ -273,17 +305,28 @@ protected:
       return entries;
     }
 
-    const bool has_run_col   = field_col.count("run") > 0;
-    const bool filter_by_run = !run_id.empty();
-    // DIA-NN "Run" column holds just the stem; "File.Name" holds the full path.
-    // runIdFromFileName_() normalises both to a bare stem for comparison.
+    // Determine run-column source and RT unit
+    const bool has_run_diann     = field_col.count("run") > 0;
+    const bool has_run_spectrum  = field_col.count("run_spectrum") > 0;
+    const bool has_run_col       = has_run_diann || has_run_spectrum;
+    const bool filter_by_run     = !run_id.empty();
     const bool run_col_is_filename =
-      has_run_col &&
+      has_run_diann &&
       col_names[field_col.at("run")].toLower() == String("file.name");
+
+    // RT: MSFragger reports seconds ("retention"); DIA-NN reports minutes ("rt*")
+    const bool rt_in_seconds = field_col.count("rt_sec") > 0;
+    const String rt_field    = rt_in_seconds ? "rt_sec" : "rt_min";
+
+    if (field_col.count("rt_sec") == 0 && field_col.count("rt_min") == 0)
+    {
+      OPENMS_LOG_WARN << "[diaWeaverCounter] No recognised RT column found. Skipping file.\n";
+      return entries;
+    }
 
     if (filter_by_run && !has_run_col)
     {
-      OPENMS_LOG_WARN << "[diaWeaverCounter] No run/file.name column found in TSV; "
+      OPENMS_LOG_WARN << "[diaWeaverCounter] No run/spectrum column found in TSV; "
                          "run filter '" << run_id << "' cannot be applied. "
                          "All rows will be loaded.\n";
     }
@@ -308,8 +351,16 @@ protected:
         // --- Run filter ---
         if (filter_by_run && has_run_col)
         {
-          String row_run = fields.at(field_col.at("run")).trim();
-          if (run_col_is_filename) row_run = runIdFromFileName_(row_run);
+          String row_run;
+          if (has_run_spectrum)
+          {
+            row_run = runIdFromSpectrum_(fields.at(field_col.at("run_spectrum")).trim());
+          }
+          else
+          {
+            row_run = fields.at(field_col.at("run")).trim();
+            if (run_col_is_filename) row_run = runIdFromFileName_(row_run);
+          }
           if (row_run != run_id) continue;
         }
 
@@ -339,8 +390,9 @@ protected:
         }
 
         e.charge   = fields.at(field_col.at("charge")).trim().toInt();
-        // DIA-NN reports RT in minutes; convert to seconds
-        e.rt       = fields.at(field_col.at("rt")).trim().toDouble() * 60.0;
+        // MSFragger reports RT in seconds; DIA-NN reports in minutes (×60)
+        e.rt       = fields.at(field_col.at(rt_field)).trim().toDouble()
+                     * (rt_in_seconds ? 1.0 : 60.0);
         e.mz       = field_col.count("mz") ?
                        fields.at(field_col.at("mz")).trim().toDouble() : 0.0;
         e.im       = field_col.count("im") ?
