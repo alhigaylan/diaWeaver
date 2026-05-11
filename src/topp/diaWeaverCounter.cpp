@@ -40,6 +40,7 @@ Output files:
 #include <OpenMS/CHEMISTRY/AASequence.h>
 #include <OpenMS/DATASTRUCTURES/KDTree.h>
 #include <OpenMS/SYSTEM/File.h>
+#include <OpenMS/CONCEPT/Constants.h>
 
 #include <fstream>
 #include <map>
@@ -544,28 +545,30 @@ protected:
       tsg.getSpectrum(theo_spec, aa_seq, 1, pep.charge);
       pep_n_ions[pep_idx] = theo_spec.size();
 
-      // Ion names are in StringDataArrays[0] when add_metainfo = true
-      const PeakSpectrum::StringDataArray& ion_names =
+      // Ion names in StringDataArrays[0], fragment charges in IntegerDataArrays[0]
+      const PeakSpectrum::StringDataArray&  ion_names    =
         theo_spec.getStringDataArrays().at(0);
+      const PeakSpectrum::IntegerDataArray& frag_charges =
+        theo_spec.getIntegerDataArrays().at(0);
 
-      for (Size ion_i = 0; ion_i < theo_spec.size(); ++ion_i)
+      // Each fragment ion is searched at 4 isotope positions (M+0 .. M+3);
+      // the precursor is searched at 5 (M+0 .. M+4).
+      pep_n_ions[pep_idx] = theo_spec.size() * 4 + 5;
+
+      // Helper: KD-tree query + IM post-filter → trace index list
+      auto queryTraces = [&](double mz_center) -> vector<Size>
       {
-        const double mz_theo   = theo_spec[ion_i].getMZ();
-        const String ion_name  = ion_names[ion_i];
-        const double mz_tol_da = mz_theo * mz_tol_ppm * 1e-6;
-
-        // Rectangular KD-tree region query: RT x m/z
+        const double mz_tol_da = mz_center * mz_tol_ppm * 1e-6;
         TraceKDTree::_Region_ region;
         region._M_low_bounds[0]  = pep.rt - rt_tol;
         region._M_high_bounds[0] = pep.rt + rt_tol;
-        region._M_low_bounds[1]  = mz_theo - mz_tol_da;
-        region._M_high_bounds[1] = mz_theo + mz_tol_da;
+        region._M_low_bounds[1]  = mz_center - mz_tol_da;
+        region._M_high_bounds[1] = mz_center + mz_tol_da;
 
         vector<MS2TraceNode> candidates;
         kd_tree.find_within_range(region, back_inserter(candidates));
 
-        // Collect valid trace indices after IM post-filter
-        vector<Size> valid_tidx;
+        vector<Size> result;
         for (const auto& cand : candidates)
         {
           if (dataset_has_im && pep.im > 0.0 &&
@@ -573,19 +576,19 @@ protected:
           {
             if (std::abs(cand.im - pep.im) > im_tol) continue;
           }
-          valid_tidx.push_back(cand.trace_idx);
+          result.push_back(cand.trace_idx);
         }
+        return result;
+      };
 
-        if (valid_tidx.empty()) continue;
-
-        ++pep_matched_ions[pep_idx];
-        if (valid_tidx.size() > 1) ++pep_multi_trace_ions[pep_idx];
-
+      // Helper: record trace claims and update best-SNR book-keeping for one ion name
+      auto recordMatches = [&](const String& ion_name, const vector<Size>& tidx_list)
+      {
         auto ion_key = make_pair(pep_idx, ion_name);
         IonBestMatch& best = best_ion_match[ion_key];
-        best.n_traces += valid_tidx.size();
+        best.n_traces += tidx_list.size();
 
-        for (Size tidx : valid_tidx)
+        for (Size tidx : tidx_list)
         {
           trace_claims[tidx].emplace_back(pep_idx, ion_name);
           pep_matched_trace_set[pep_idx].insert(tidx);
@@ -596,54 +599,57 @@ protected:
             best.best_trace_idx = tidx;
           }
         }
+      };
+
+      // --- Fragment b/y ions: each isotope searched and reported independently.
+      //     Heavier isotopes are only searched if the monoisotopic trace is found. ---
+      for (Size ion_i = 0; ion_i < theo_spec.size(); ++ion_i)
+      {
+        const double mz_mono  = theo_spec[ion_i].getMZ();
+        const String ion_name = ion_names[ion_i];
+        const int    frag_z   = frag_charges[ion_i];
+
+        const vector<Size> mono_tidxs = queryTraces(mz_mono);
+        if (mono_tidxs.empty()) continue;
+
+        ++pep_matched_ions[pep_idx];
+        if (mono_tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
+        recordMatches(ion_name + "[M+0]", mono_tidxs);
+
+        for (int iso = 1; iso <= 3; ++iso)
+        {
+          const double mz_iso      = mz_mono + iso * Constants::C13C12_MASSDIFF_U / frag_z;
+          const vector<Size> tidxs = queryTraces(mz_iso);
+
+          if (tidxs.empty()) continue;
+
+          ++pep_matched_ions[pep_idx];
+          if (tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
+          recordMatches(ion_name + "[M+" + String(iso) + "]", tidxs);
+        }
       }
 
-      // Search for the unfragmented precursor ion surviving into MS2.
-      // Uses the same RT / IM windows as fragment ions.
+      // --- Precursor ion: heavier isotopes only searched if monoisotopic is found. ---
       {
-        const String prec_ion_name = "p";
-        const double mz_prec       = aa_seq.getMZ(pep.charge);
-        const double mz_tol_da     = mz_prec * mz_tol_ppm * 1e-6;
+        const double mz_prec_mono = aa_seq.getMZ(pep.charge);
 
-        TraceKDTree::_Region_ region;
-        region._M_low_bounds[0]  = pep.rt - rt_tol;
-        region._M_high_bounds[0] = pep.rt + rt_tol;
-        region._M_low_bounds[1]  = mz_prec - mz_tol_da;
-        region._M_high_bounds[1] = mz_prec + mz_tol_da;
-
-        vector<MS2TraceNode> candidates;
-        kd_tree.find_within_range(region, back_inserter(candidates));
-
-        vector<Size> valid_tidx;
-        for (const auto& cand : candidates)
-        {
-          if (dataset_has_im && pep.im > 0.0 &&
-              ms2_traces[cand.trace_idx].containsIMData())
-          {
-            if (std::abs(cand.im - pep.im) > im_tol) continue;
-          }
-          valid_tidx.push_back(cand.trace_idx);
-        }
-
-        if (!valid_tidx.empty())
+        const vector<Size> mono_tidxs = queryTraces(mz_prec_mono);
+        if (!mono_tidxs.empty())
         {
           ++pep_matched_ions[pep_idx];
-          if (valid_tidx.size() > 1) ++pep_multi_trace_ions[pep_idx];
+          if (mono_tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
+          recordMatches("p[M+0]", mono_tidxs);
 
-          auto ion_key = make_pair(pep_idx, prec_ion_name);
-          IonBestMatch& best = best_ion_match[ion_key];
-          best.n_traces += valid_tidx.size();
-
-          for (Size tidx : valid_tidx)
+          for (int iso = 1; iso <= 4; ++iso)
           {
-            trace_claims[tidx].emplace_back(pep_idx, prec_ion_name);
-            pep_matched_trace_set[pep_idx].insert(tidx);
+            const double mz_iso      = mz_prec_mono + iso * Constants::C13C12_MASSDIFF_U / pep.charge;
+            const vector<Size> tidxs = queryTraces(mz_iso);
 
-            if (trace_snr[tidx] > best.best_snr)
-            {
-              best.best_snr       = trace_snr[tidx];
-              best.best_trace_idx = tidx;
-            }
+            if (tidxs.empty()) continue;
+
+            ++pep_matched_ions[pep_idx];
+            if (tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
+            recordMatches("p[M+" + String(iso) + "]", tidxs);
           }
         }
       }
