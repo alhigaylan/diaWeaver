@@ -83,6 +83,12 @@ struct PeptideEntry
   double mz      = 0.0;  // precursor m/z (reference only)
   double im      = 0.0;  // precursor IM centroid; 0.0 = not available
   String id;             // row identifier (used in output, e.g. "row 42")
+
+  // Open-search fields (populated only by parseMSFraggerOpenSearchTSV_)
+  String         bare_sequence;           // unmodified peptide sequence
+  map<int,double> assigned_mods;          // positional delta mods from Assigned Modifications
+  double         delta_mass = 0.0;        // open-search delta mass
+  vector<int>    localization_candidates; // 1-indexed residue positions from Best Positions
 };
 
 // ---------------------------------------------------------------------------
@@ -282,23 +288,61 @@ protected:
     return result;
   }
 
-  // Parse "V1;H2" → first position (1-indexed). Returns -1 on failure.
-  static int parseBestPosition_(const String& s)
+  // Parse "V1;H2;G7" → all 1-indexed positions. Skips malformed entries.
+  static vector<int> parseAllBestPositions_(const String& s)
   {
-    if (s.trim().empty()) return -1;
+    vector<int> result;
+    if (s.trim().empty()) return result;
 
     vector<String> parts;
     String(s).split(";", parts);
-    if (parts.empty()) return -1;
 
-    String first = parts[0].trim();
-    // Strip leading amino acid letter(s): "V1" → 1
-    Size digit_start = 0;
-    while (digit_start < first.size() && isalpha((unsigned char)first[digit_start]))
-      ++digit_start;
-    if (digit_start >= first.size()) return -1;
+    for (String& part : parts)
+    {
+      part.trim();
+      Size digit_start = 0;
+      while (digit_start < part.size() && isalpha((unsigned char)part[digit_start]))
+        ++digit_start;
+      if (digit_start >= part.size()) continue;
+      try { result.push_back(part.substr(digit_start).toInt()); } catch (...) {}
+    }
+    return result;
+  }
 
-    try { return first.substr(digit_start).toInt(); } catch (...) { return -1; }
+  // Returns true if a b or y ion with the given name spans residue position pos (1-indexed)
+  // in a peptide of length pep_len. Used to determine if a fragment ion carries the
+  // open-search delta mass when the modification is localised to pos.
+  static bool ionSpansPosition_(const String& ion_name, int pos, int pep_len)
+  {
+    if (ion_name.empty() || pos < 1 || pos > pep_len) return false;
+
+    const char ion_type = ion_name[0];
+
+    // Find the ion number (digits after the type character)
+    Size i = 1;
+    while (i < ion_name.size() && !isdigit((unsigned char)ion_name[i])) ++i;
+    Size j = i;
+    while (j < ion_name.size() && isdigit((unsigned char)ion_name[j])) ++j;
+    if (j == i) return false;
+
+    int ion_num = 0;
+    try { ion_num = ion_name.substr(i, j - i).toInt(); } catch (...) { return false; }
+
+    if (ion_type == 'b') return pos <= ion_num;
+    if (ion_type == 'y') return pos >= pep_len - ion_num + 1;
+    return false;
+  }
+
+  // Format delta mass as an ion label tag: "[+156.1150]" or "[-20.9137]"
+  static String formatDeltaTag_(double delta)
+  {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%.4f", delta);
+    String tag = "[";
+    if (delta >= 0) tag += "+";
+    tag += buf;
+    tag += "]";
+    return tag;
   }
 
   // Build OpenMS-compatible sequence from bare peptide + positional delta mods.
@@ -622,15 +666,17 @@ protected:
         const double delta_mass = fields.at(field_col.at("delta_mass")).trim().toDouble();
 
         // Build positional mod map from Assigned Modifications (static + variable)
-        map<int, double> pos_mods =
+        // Do NOT apply delta here — it is applied per-candidate during ion matching.
+        const map<int, double> assigned_mods =
           parseAssignedMods_(fields.at(field_col.at("assigned_mods")).trim());
 
-        // Add open-search delta at the best localisation position
+        // Parse all localisation candidates from Best Positions
+        vector<int> cand_positions;
         if (std::abs(delta_mass) > 0.02)
         {
-          const int best_pos =
-            parseBestPosition_(fields.at(field_col.at("best_positions")).trim());
-          if (best_pos < 0)
+          cand_positions = parseAllBestPositions_(
+            fields.at(field_col.at("best_positions")).trim());
+          if (cand_positions.empty())
           {
             OPENMS_LOG_WARN << "[diaWeaverCounter] Row " << row
                             << ": significant delta mass " << delta_mass
@@ -638,11 +684,15 @@ protected:
             ++n_skipped_noloc;
             continue;
           }
-          pos_mods[best_pos] += delta_mass;
         }
 
         PeptideEntry e;
-        e.sequence = buildOpenSearchSequence_(bare_seq, pos_mods);
+        e.bare_sequence          = bare_seq;
+        e.assigned_mods          = assigned_mods;
+        e.delta_mass             = delta_mass;
+        e.localization_candidates = cand_positions;
+        // sequence = base modified sequence (assigned mods only, no delta) — used for display
+        e.sequence = buildOpenSearchSequence_(bare_seq, assigned_mods);
         e.charge   = fields.at(field_col.at("charge")).trim().toInt();
         e.rt       = fields.at(field_col.at("rt_sec")).trim().toDouble();
         e.mz       = field_col.count("mz") ?
@@ -658,7 +708,7 @@ protected:
           continue;
         }
 
-        // Validate that the sequence is parseable before committing
+        // Validate base sequence is parseable
         try { AASequence::fromString(e.sequence); }
         catch (const Exception::BaseException& ex)
         {
@@ -856,13 +906,19 @@ protected:
     map<pair<Size,String>, IonBestMatch> best_ion_match;
 
     vector<Size>      pep_n_ions(peptides.size(), 0);
-    vector<Size>      pep_matched_ions(peptides.size(), 0);      // ions with >=1 trace
-    vector<Size>      pep_multi_trace_ions(peptides.size(), 0);  // ions with >1 trace
-    vector<set<Size>> pep_matched_trace_set(peptides.size());    // distinct traces matched
+    vector<Size>      pep_matched_ions(peptides.size(), 0);
+    vector<Size>      pep_multi_trace_ions(peptides.size(), 0);
+    vector<set<Size>> pep_matched_trace_set(peptides.size());
+
+    // within_pep_ion_collision[i] = true when any single peptide claims trace i
+    // with two or more distinct ion labels (only meaningful for open-search output).
+    vector<bool> trace_within_pep_collision(ms2_traces.size(), false);
+    // Per-peptide: tracks the first ion label that claimed each trace; reset each iteration.
+    map<Size, String> pep_trace_first_ion;
 
     TheoreticalSpectrumGenerator tsg;
     Param tsg_params = tsg.getDefaults();
-    tsg_params.setValue("add_metainfo",   "true",  "");  // ion names needed for collision table
+    tsg_params.setValue("add_metainfo",   "true",  "");
     tsg_params.setValue("add_a_ions",     "false", "");
     tsg_params.setValue("add_c_ions",     "false", "");
     tsg_params.setValue("add_x_ions",     "false", "");
@@ -883,33 +939,7 @@ protected:
         return INPUT_FILE_CORRUPT;
       }
 
-      AASequence aa_seq;
-      try
-      {
-        aa_seq = AASequence::fromString(pep.sequence);
-      }
-      catch (const Exception::BaseException& ex)
-      {
-        OPENMS_LOG_WARN << "[diaWeaverCounter] Cannot parse sequence '"
-                        << pep.sequence << "': " << ex.getMessage() << ". Skipping.\n";
-        continue;
-      }
-
-      if (aa_seq.size() < 2) continue;  // no b/y ions possible
-
-      PeakSpectrum theo_spec;
-      tsg.getSpectrum(theo_spec, aa_seq, 1, pep.charge);
-      pep_n_ions[pep_idx] = theo_spec.size();
-
-      // Ion names in StringDataArrays[0], fragment charges in IntegerDataArrays[0]
-      const PeakSpectrum::StringDataArray&  ion_names    =
-        theo_spec.getStringDataArrays().at(0);
-      const PeakSpectrum::IntegerDataArray& frag_charges =
-        theo_spec.getIntegerDataArrays().at(0);
-
-      // Each fragment ion is searched at 4 isotope positions (M+0 .. M+3);
-      // the precursor is searched at 5 (M+0 .. M+4).
-      pep_n_ions[pep_idx] = theo_spec.size() * 4 + 5;
+      pep_trace_first_ion.clear();
 
       // Helper: KD-tree query + IM post-filter → trace index list
       auto queryTraces = [&](double mz_center) -> vector<Size>
@@ -937,16 +967,18 @@ protected:
         return result;
       };
 
-      // Helper: record trace claims and update best-SNR book-keeping for one ion name
-      auto recordMatches = [&](const String& ion_name, const vector<Size>& tidx_list)
+      // Helper: record trace claims, update best-SNR book-keeping, and track
+      // within-peptide ion collisions (same trace claimed by two different ions
+      // from the same peptide).
+      auto recordMatches = [&](const String& ion_label, const vector<Size>& tidx_list)
       {
-        auto ion_key = make_pair(pep_idx, ion_name);
+        auto ion_key = make_pair(pep_idx, ion_label);
         IonBestMatch& best = best_ion_match[ion_key];
         best.n_traces += tidx_list.size();
 
         for (Size tidx : tidx_list)
         {
-          trace_claims[tidx].emplace_back(pep_idx, ion_name);
+          trace_claims[tidx].emplace_back(pep_idx, ion_label);
           pep_matched_trace_set[pep_idx].insert(tidx);
 
           if (trace_snr[tidx] > best.best_snr)
@@ -954,41 +986,68 @@ protected:
             best.best_snr       = trace_snr[tidx];
             best.best_trace_idx = tidx;
           }
+
+          // Within-peptide collision: flag if a second distinct ion from this
+          // peptide maps to the same trace.
+          auto fit = pep_trace_first_ion.find(tidx);
+          if (fit == pep_trace_first_ion.end())
+            pep_trace_first_ion[tidx] = ion_label;
+          else if (fit->second != ion_label)
+            trace_within_pep_collision[tidx] = true;
         }
       };
 
-      // --- Fragment b/y ions: each isotope searched and reported independently.
-      //     Heavier isotopes are only searched if the monoisotopic trace is found. ---
-      for (Size ion_i = 0; ion_i < theo_spec.size(); ++ion_i)
+      if (pep.localization_candidates.empty())
       {
-        const double mz_mono  = theo_spec[ion_i].getMZ();
-        const String ion_name = ion_names[ion_i];
-        const int    frag_z   = frag_charges[ion_i];
-
-        const vector<Size> mono_tidxs = queryTraces(mz_mono);
-        if (mono_tidxs.empty()) continue;
-
-        ++pep_matched_ions[pep_idx];
-        if (mono_tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
-        recordMatches(ion_name + "[M+0]", mono_tidxs);
-
-        for (int iso = 1; iso <= 3; ++iso)
+        // ------------------------------------------------------------------
+        // Standard path (DIA-NN / MSFragger closed-search)
+        // ------------------------------------------------------------------
+        AASequence aa_seq;
+        try { aa_seq = AASequence::fromString(pep.sequence); }
+        catch (const Exception::BaseException& ex)
         {
-          const double mz_iso      = mz_mono + iso * Constants::C13C12_MASSDIFF_U / frag_z;
-          const vector<Size> tidxs = queryTraces(mz_iso);
+          OPENMS_LOG_WARN << "[diaWeaverCounter] Cannot parse sequence '"
+                          << pep.sequence << "': " << ex.getMessage() << ". Skipping.\n";
+          continue;
+        }
+        if (aa_seq.size() < 2) continue;
 
-          if (tidxs.empty()) continue;
+        PeakSpectrum theo_spec;
+        tsg.getSpectrum(theo_spec, aa_seq, 1, pep.charge);
+
+        const PeakSpectrum::StringDataArray&  ion_names    =
+          theo_spec.getStringDataArrays().at(0);
+        const PeakSpectrum::IntegerDataArray& frag_charges =
+          theo_spec.getIntegerDataArrays().at(0);
+
+        pep_n_ions[pep_idx] = theo_spec.size() * 4 + 5;
+
+        for (Size ion_i = 0; ion_i < theo_spec.size(); ++ion_i)
+        {
+          const double mz_mono  = theo_spec[ion_i].getMZ();
+          const String ion_name = ion_names[ion_i];
+          const int    frag_z   = frag_charges[ion_i];
+
+          const vector<Size> mono_tidxs = queryTraces(mz_mono);
+          if (mono_tidxs.empty()) continue;
 
           ++pep_matched_ions[pep_idx];
-          if (tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
-          recordMatches(ion_name + "[M+" + String(iso) + "]", tidxs);
+          if (mono_tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
+          recordMatches(ion_name + "[M+0]", mono_tidxs);
+
+          for (int iso = 1; iso <= 3; ++iso)
+          {
+            const double mz_iso = mz_mono + iso * Constants::C13C12_MASSDIFF_U / frag_z;
+            const vector<Size> tidxs = queryTraces(mz_iso);
+            if (tidxs.empty()) continue;
+            ++pep_matched_ions[pep_idx];
+            if (tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
+            recordMatches(ion_name + "[M+" + String(iso) + "]", tidxs);
+          }
         }
-      }
 
-      // --- Precursor ion: heavier isotopes only searched if monoisotopic is found. ---
-      {
+        // Precursor
         const double mz_prec_mono = aa_seq.getMZ(pep.charge);
-
         const vector<Size> mono_tidxs = queryTraces(mz_prec_mono);
         if (!mono_tidxs.empty())
         {
@@ -998,15 +1057,113 @@ protected:
 
           for (int iso = 1; iso <= 4; ++iso)
           {
-            const double mz_iso      = mz_prec_mono + iso * Constants::C13C12_MASSDIFF_U / pep.charge;
+            const double mz_iso = mz_prec_mono + iso * Constants::C13C12_MASSDIFF_U / pep.charge;
             const vector<Size> tidxs = queryTraces(mz_iso);
-
             if (tidxs.empty()) continue;
-
             ++pep_matched_ions[pep_idx];
             if (tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
             recordMatches("p[M+" + String(iso) + "]", tidxs);
           }
+        }
+      }
+      else
+      {
+        // ------------------------------------------------------------------
+        // Open-search path: union of traces across all localisation candidates.
+        // For each candidate position, generate a spectrum with the delta mass
+        // at that position. Ions are labelled with a modification tag when
+        // they span the modified residue (e.g. "y5[+156.1150][M+0]").
+        // Unmodified ions that are identical across candidates are deduplicated.
+        // ------------------------------------------------------------------
+        const String delta_tag = formatDeltaTag_(pep.delta_mass);
+        const int    pep_len   = static_cast<int>(pep.bare_sequence.size());
+
+        set<String> seen_ion_labels;  // dedup identical ions across candidates
+
+        for (int cand_pos : pep.localization_candidates)
+        {
+          map<int,double> cand_mods = pep.assigned_mods;
+          cand_mods[cand_pos] += pep.delta_mass;
+
+          AASequence cand_aa_seq;
+          try { cand_aa_seq = AASequence::fromString(
+                  buildOpenSearchSequence_(pep.bare_sequence, cand_mods)); }
+          catch (...) { continue; }
+          if (cand_aa_seq.size() < 2) continue;
+
+          PeakSpectrum cand_spec;
+          tsg.getSpectrum(cand_spec, cand_aa_seq, 1, pep.charge);
+
+          const PeakSpectrum::StringDataArray&  cand_names   =
+            cand_spec.getStringDataArrays().at(0);
+          const PeakSpectrum::IntegerDataArray& cand_charges =
+            cand_spec.getIntegerDataArrays().at(0);
+
+          for (Size ion_i = 0; ion_i < cand_spec.size(); ++ion_i)
+          {
+            const double mz_mono   = cand_spec[ion_i].getMZ();
+            const String base_name = cand_names[ion_i];
+            const int    frag_z    = cand_charges[ion_i];
+
+            const bool   is_mod    = ionSpansPosition_(base_name, cand_pos, pep_len);
+            const String ion_label = is_mod ? base_name + delta_tag : base_name;
+
+            if (seen_ion_labels.count(ion_label)) continue;
+            seen_ion_labels.insert(ion_label);
+            pep_n_ions[pep_idx] += 4;
+
+            const vector<Size> mono_tidxs = queryTraces(mz_mono);
+            if (mono_tidxs.empty()) continue;
+
+            ++pep_matched_ions[pep_idx];
+            if (mono_tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
+            recordMatches(ion_label + "[M+0]", mono_tidxs);
+
+            for (int iso = 1; iso <= 3; ++iso)
+            {
+              const double mz_iso = mz_mono + iso * Constants::C13C12_MASSDIFF_U / frag_z;
+              const vector<Size> tidxs = queryTraces(mz_iso);
+              if (tidxs.empty()) continue;
+              ++pep_matched_ions[pep_idx];
+              if (tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
+              recordMatches(ion_label + "[M+" + String(iso) + "]", tidxs);
+            }
+          }
+        }
+
+        // Precursor: total mass is invariant across candidates; compute once
+        // from the first candidate's fully modified sequence.
+        {
+          map<int,double> first_mods = pep.assigned_mods;
+          first_mods[pep.localization_candidates[0]] += pep.delta_mass;
+          pep_n_ions[pep_idx] += 5;
+
+          try
+          {
+            const AASequence prec_aa_seq = AASequence::fromString(
+              buildOpenSearchSequence_(pep.bare_sequence, first_mods));
+            const double mz_prec_mono = prec_aa_seq.getMZ(pep.charge);
+
+            const vector<Size> mono_tidxs = queryTraces(mz_prec_mono);
+            if (!mono_tidxs.empty())
+            {
+              ++pep_matched_ions[pep_idx];
+              if (mono_tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
+              recordMatches("p[M+0]", mono_tidxs);
+
+              for (int iso = 1; iso <= 4; ++iso)
+              {
+                const double mz_iso = mz_prec_mono +
+                  iso * Constants::C13C12_MASSDIFF_U / pep.charge;
+                const vector<Size> tidxs = queryTraces(mz_iso);
+                if (tidxs.empty()) continue;
+                ++pep_matched_ions[pep_idx];
+                if (tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
+                recordMatches("p[M+" + String(iso) + "]", tidxs);
+              }
+            }
+          }
+          catch (...) {}
         }
       }
     }
@@ -1095,7 +1252,7 @@ protected:
       }
 
       ofs << "trace_idx\tcentroid_mz\tcentroid_rt\tcentroid_im\tapex_snr\t"
-             "n_claiming_peptides\tn_claiming_ions\tstatus\n";
+             "n_claiming_peptides\tn_claiming_ions\tstatus\twithin_pep_ion_collision\n";
 
       for (Size i = 0; i < ms2_traces.size(); ++i)
       {
@@ -1115,7 +1272,8 @@ protected:
             << trace_snr[i]                << "\t"
             << n_pep                       << "\t"
             << trace_claims[i].size()      << "\t"
-            << status                      << "\n";
+            << status                      << "\t"
+            << (trace_within_pep_collision[i] ? "true" : "false") << "\n";
       }
     }
 
@@ -1133,7 +1291,8 @@ protected:
 
       ofs << "peptide_id\tsequence\tcharge\trt\t"
              "n_theoretical_ions\tn_matched_ions\tn_multi_trace_ions\t"
-             "n_exclusive_traces\tn_shared_traces\tcoverage_pct\n";
+             "n_exclusive_traces\tn_shared_traces\tcoverage_pct\t"
+             "n_localization_candidates\tlocalization_candidates\n";
 
       for (Size pi = 0; pi < peptides.size(); ++pi)
       {
@@ -1143,16 +1302,26 @@ protected:
                                 100.0 * static_cast<double>(pep_matched_ions[pi]) / n_theo
                                 : 0.0;
 
-        ofs << pep.id                    << "\t"
-            << pep.sequence              << "\t"
-            << pep.charge                << "\t"
-            << pep.rt                    << "\t"
-            << n_theo                    << "\t"
-            << pep_matched_ions[pi]      << "\t"
-            << pep_multi_trace_ions[pi]  << "\t"
-            << pep_exclusive[pi]         << "\t"
-            << pep_shared[pi]            << "\t"
-            << cov                       << "\n";
+        // Format localization candidates as "5;6;7" (numeric positions)
+        String cand_str;
+        for (Size ci = 0; ci < pep.localization_candidates.size(); ++ci)
+        {
+          if (ci > 0) cand_str += ";";
+          cand_str += String(pep.localization_candidates[ci]);
+        }
+
+        ofs << pep.id                                    << "\t"
+            << pep.sequence                              << "\t"
+            << pep.charge                                << "\t"
+            << pep.rt                                    << "\t"
+            << n_theo                                    << "\t"
+            << pep_matched_ions[pi]                      << "\t"
+            << pep_multi_trace_ions[pi]                  << "\t"
+            << pep_exclusive[pi]                         << "\t"
+            << pep_shared[pi]                            << "\t"
+            << cov                                       << "\t"
+            << pep.localization_candidates.size()        << "\t"
+            << cand_str                                  << "\n";
       }
     }
 
