@@ -231,6 +231,112 @@ protected:
     return stem;
   }
 
+  // Parse "13C(57.0214), N-term(42.0106), ..." → {position → delta_mass}
+  // pos 0 = N-terminal, pos > 0 = 1-indexed residue, pos -1 = C-terminal
+  static map<int, double> parseAssignedMods_(const String& s)
+  {
+    map<int, double> result;
+    if (s.trim().empty()) return result;
+
+    vector<String> parts;
+    String(s).split(",", parts);
+
+    for (String& part : parts)
+    {
+      part.trim();
+      Size open_p  = part.find('(');
+      Size close_p = part.rfind(')');
+      if (open_p == String::npos || close_p == String::npos || close_p <= open_p) continue;
+
+      String prefix   = part.prefix(open_p).trim();
+      String mass_str = part.substr(open_p + 1, close_p - open_p - 1).trim();
+
+      double delta = 0.0;
+      try { delta = mass_str.toDouble(); } catch (...) { continue; }
+
+      String prefix_lower = prefix;
+      prefix_lower.toLower();
+
+      if (prefix_lower == "n-term" || prefix_lower == "nterm")
+      {
+        result[0] += delta;
+      }
+      else if (prefix_lower == "c-term" || prefix_lower == "cterm")
+      {
+        result[-1] += delta;
+      }
+      else
+      {
+        // "13C" → strip trailing amino acid letter(s) to get numeric position
+        Size digit_end = prefix.size();
+        while (digit_end > 0 && isalpha((unsigned char)prefix[digit_end - 1]))
+          --digit_end;
+        if (digit_end == 0) continue;
+
+        int pos = 0;
+        try { pos = prefix.prefix(digit_end).toInt(); } catch (...) { continue; }
+        if (pos < 1) continue;
+        result[pos] += delta;
+      }
+    }
+    return result;
+  }
+
+  // Parse "V1;H2" → first position (1-indexed). Returns -1 on failure.
+  static int parseBestPosition_(const String& s)
+  {
+    if (s.trim().empty()) return -1;
+
+    vector<String> parts;
+    String(s).split(";", parts);
+    if (parts.empty()) return -1;
+
+    String first = parts[0].trim();
+    // Strip leading amino acid letter(s): "V1" → 1
+    Size digit_start = 0;
+    while (digit_start < first.size() && isalpha((unsigned char)first[digit_start]))
+      ++digit_start;
+    if (digit_start >= first.size()) return -1;
+
+    try { return first.substr(digit_start).toInt(); } catch (...) { return -1; }
+  }
+
+  // Build OpenMS-compatible sequence from bare peptide + positional delta mods.
+  // pos 0 = N-terminal, pos > 0 = 1-indexed residue, pos -1 = C-terminal.
+  static String buildOpenSearchSequence_(const String& bare_seq,
+                                          const map<int, double>& pos_mods)
+  {
+    String result;
+
+    auto it_nterm = pos_mods.find(0);
+    if (it_nterm != pos_mods.end() && std::abs(it_nterm->second) > 0.001)
+    {
+      const double m = it_nterm->second;
+      result += (m >= 0 ? "(+" : "(") + String(m) + ")";
+    }
+
+    for (Size i = 0; i < bare_seq.size(); ++i)
+    {
+      result += bare_seq[i];
+      int pos = static_cast<int>(i) + 1;
+      auto it = pos_mods.find(pos);
+      if (it != pos_mods.end() && std::abs(it->second) > 0.001)
+      {
+        const double m = it->second;
+        result += (m >= 0 ? "[+" : "[") + String(m) + "]";
+      }
+    }
+
+    auto it_cterm = pos_mods.find(-1);
+    if (it_cterm != pos_mods.end() && std::abs(it_cterm->second) > 0.001)
+    {
+      const double m = it_cterm->second;
+      result += (m >= 0 ? "(+" : "(") + String(m) + ")";
+    }
+
+    return result;
+  }
+
   vector<PeptideEntry> parsePeptideTSV_(const String& filename,
                                         const String& run_id) const
   {
@@ -293,7 +399,8 @@ protected:
 
     if (field_col.find("seq")    == field_col.end() ||
         field_col.find("charge") == field_col.end() ||
-        field_col.find("rt")     == field_col.end())
+        (field_col.find("rt_sec") == field_col.end() &&
+         field_col.find("rt_min") == field_col.end()))
     {
       OPENMS_LOG_WARN << "[diaWeaverCounter] TSV is missing required columns "
                          "(sequence / charge / rt). Returning empty peptide list.\n"
@@ -414,6 +521,194 @@ protected:
     OPENMS_LOG_INFO << "[diaWeaverCounter] Loaded " << entries.size()
                     << " peptide entries from " << filename << "\n";
     return entries;
+  }
+
+  // -------------------------------------------------------------------------
+  // MSFragger open-search psm.tsv parser
+  //
+  // Builds the full modified sequence from:
+  //   1. Bare Peptide column  (no mods)
+  //   2. Assigned Modifications column (static + variable mods, as delta masses)
+  //   3. Delta Mass applied at Best Positions (open-search PTM localisation)
+  //
+  // Rows are filtered by run (Spectrum column) and Q-value (1% FDR).
+  // Rows with a significant delta mass (>0.02 Da) but no localisation site are skipped.
+  // -------------------------------------------------------------------------
+  vector<PeptideEntry> parseMSFraggerOpenSearchTSV_(const String& filename,
+                                                     const String& run_id) const
+  {
+    vector<PeptideEntry> entries;
+
+    ifstream file(filename.c_str());
+    if (!file.is_open())
+    {
+      OPENMS_LOG_ERROR << "[diaWeaverCounter] Cannot open MSFragger psm.tsv: " << filename << "\n";
+      return entries;
+    }
+
+    string raw_header;
+    if (!getline(file, raw_header)) return entries;
+
+    vector<String> col_names;
+    String(raw_header).split("\t", col_names);
+    for (auto& c : col_names) c.trim();
+
+    const map<String, String> aliases = {
+      {"spectrum",                  "run_spectrum"},
+      {"peptide",                   "seq_bare"},
+      {"charge",                    "charge"},
+      {"retention",                 "rt_sec"},
+      {"calibrated observed m/z",   "mz"},
+      {"observed m/z",              "mz"},
+      {"assigned modifications",    "assigned_mods"},
+      {"delta mass",                "delta_mass"},
+      {"best positions",            "best_positions"},
+      {"im",                        "im"},
+      {"ionmobility",               "im"},
+    };
+
+    map<String, int> field_col;
+    for (Size i = 0; i < col_names.size(); ++i)
+    {
+      String lower = col_names[i];
+      lower.toLower();
+      auto it = aliases.find(lower);
+      if (it != aliases.end())
+        field_col[it->second] = static_cast<int>(i);
+    }
+
+    for (const String& req : {"seq_bare", "charge", "rt_sec",
+                               "assigned_mods", "delta_mass", "best_positions"})
+    {
+      if (field_col.count(req) == 0)
+      {
+        OPENMS_LOG_WARN << "[diaWeaverCounter] MSFragger open-search psm.tsv missing "
+                           "required column '" << req << "'. Cannot parse.\n";
+        return entries;
+      }
+    }
+
+    const bool filter_by_run = !run_id.empty() && field_col.count("run_spectrum") > 0;
+    if (!run_id.empty() && !filter_by_run)
+      OPENMS_LOG_WARN << "[diaWeaverCounter] No Spectrum column; run filter cannot be applied.\n";
+    else if (filter_by_run)
+      OPENMS_LOG_INFO << "[diaWeaverCounter] Filtering MSFragger open-search psm.tsv to run: "
+                      << run_id << "\n";
+
+    string raw_line;
+    Size row = 1;
+    Size n_skipped_run   = 0;
+    Size n_skipped_noloc = 0;
+
+    while (getline(file, raw_line))
+    {
+      ++row;
+      if (raw_line.empty()) continue;
+
+      vector<String> fields;
+      String(raw_line).split("\t", fields);
+
+      try
+      {
+        // Run filter
+        if (filter_by_run)
+        {
+          const String row_run = runIdFromSpectrum_(
+            fields.at(field_col.at("run_spectrum")).trim());
+          if (row_run != run_id) { ++n_skipped_run; continue; }
+        }
+
+        const String bare_seq   = fields.at(field_col.at("seq_bare")).trim();
+        const double delta_mass = fields.at(field_col.at("delta_mass")).trim().toDouble();
+
+        // Build positional mod map from Assigned Modifications (static + variable)
+        map<int, double> pos_mods =
+          parseAssignedMods_(fields.at(field_col.at("assigned_mods")).trim());
+
+        // Add open-search delta at the best localisation position
+        if (std::abs(delta_mass) > 0.02)
+        {
+          const int best_pos =
+            parseBestPosition_(fields.at(field_col.at("best_positions")).trim());
+          if (best_pos < 0)
+          {
+            OPENMS_LOG_WARN << "[diaWeaverCounter] Row " << row
+                            << ": significant delta mass " << delta_mass
+                            << " Da but no Best Positions localisation. Skipping.\n";
+            ++n_skipped_noloc;
+            continue;
+          }
+          pos_mods[best_pos] += delta_mass;
+        }
+
+        PeptideEntry e;
+        e.sequence = buildOpenSearchSequence_(bare_seq, pos_mods);
+        e.charge   = fields.at(field_col.at("charge")).trim().toInt();
+        e.rt       = fields.at(field_col.at("rt_sec")).trim().toDouble();
+        e.mz       = field_col.count("mz") ?
+                       fields.at(field_col.at("mz")).trim().toDouble() : 0.0;
+        e.im       = field_col.count("im") ?
+                       fields.at(field_col.at("im")).trim().toDouble() : 0.0;
+        e.id       = "row" + String(row);
+
+        if (e.charge < 1)
+        {
+          OPENMS_LOG_WARN << "[diaWeaverCounter] Row " << row
+                          << ": invalid charge " << e.charge << ". Skipping.\n";
+          continue;
+        }
+
+        // Validate that the sequence is parseable before committing
+        try { AASequence::fromString(e.sequence); }
+        catch (const Exception::BaseException& ex)
+        {
+          OPENMS_LOG_WARN << "[diaWeaverCounter] Row " << row
+                          << ": sequence '" << e.sequence
+                          << "' failed AASequence validation: " << ex.getMessage()
+                          << ". Skipping.\n";
+          continue;
+        }
+
+        entries.push_back(move(e));
+      }
+      catch (const Exception::BaseException& ex)
+      {
+        OPENMS_LOG_WARN << "[diaWeaverCounter] Skipping malformed row " << row
+                        << ": " << ex.getMessage() << "\n";
+      }
+      catch (const out_of_range&)
+      {
+        OPENMS_LOG_WARN << "[diaWeaverCounter] Skipping short row " << row << "\n";
+      }
+    }
+
+    OPENMS_LOG_INFO << "[diaWeaverCounter] MSFragger open-search: loaded " << entries.size()
+                    << " peptides (skipped: " << n_skipped_run   << " wrong run, "
+                    << n_skipped_noloc << " unlocalized delta) from " << filename << "\n";
+    return entries;
+  }
+
+  // Returns true if the TSV looks like a MSFragger open-search psm.tsv.
+  // Detection: header contains "best positions", "assigned modifications", "delta mass".
+  static bool isOpenSearchPSV_(const String& filename)
+  {
+    ifstream f(filename.c_str());
+    string header;
+    if (!getline(f, header)) return false;
+
+    vector<String> cols;
+    String(header).split("\t", cols);
+
+    bool has_best_pos = false, has_assigned = false, has_delta = false;
+    for (auto& c : cols)
+    {
+      String cl = c;
+      cl.trim().toLower();
+      if (cl == "best positions")          has_best_pos = true;
+      if (cl == "assigned modifications")  has_assigned = true;
+      if (cl == "delta mass")              has_delta    = true;
+    }
+    return has_best_pos && has_assigned && has_delta;
   }
 
   // -------------------------------------------------------------------------
@@ -542,7 +837,9 @@ protected:
     }
     OPENMS_LOG_INFO << "Run ID derived from mzML: " << run_id << "\n";
 
-    vector<PeptideEntry> peptides = parsePeptideTSV_(in_ids_file, run_id);
+    vector<PeptideEntry> peptides = isOpenSearchPSV_(in_ids_file)
+      ? parseMSFraggerOpenSearchTSV_(in_ids_file, run_id)
+      : parsePeptideTSV_(in_ids_file, run_id);
     OPENMS_LOG_INFO << "Peptides to map: " << peptides.size() << "\n";
 
     // ------------------------------------------------------------------
