@@ -798,7 +798,7 @@ protected:
 #pragma omp for schedule(dynamic, 1)
           for (SignedSize s = 0; s < static_cast<SignedSize>(ms2_exp.size()); ++s)
           {
-            if (IMTypes::determineIMFormat(ms2_exp[s]) != IMFormat::CENTROIDED)
+            if (ms2_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
             {
               MSSpectrum aggregated;
               aggregateSpectrum_(ms2_exp, static_cast<Size>(s), picker_im, aggregated);
@@ -835,7 +835,7 @@ protected:
           {
             if (im_info.available)
             {
-              if (IMTypes::determineIMFormat(ms2_exp[s]) != IMFormat::CENTROIDED)
+              if (ms2_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
               {
                 picker_im.pickIMTraces(ms2_exp[s]);
               }
@@ -878,7 +878,7 @@ protected:
 #pragma omp for schedule(dynamic, 1)
             for (SignedSize s = 0; s < static_cast<SignedSize>(precursor_exp.size()); ++s)
             {
-              if (IMTypes::determineIMFormat(precursor_exp[s]) != IMFormat::CENTROIDED)
+              if (precursor_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
               {
                 MSSpectrum aggregated;
                 aggregateSpectrum_(precursor_exp, static_cast<Size>(s), picker_im, aggregated);
@@ -915,7 +915,7 @@ protected:
             {
               if (im_info.available)
               {
-                if (IMTypes::determineIMFormat(precursor_exp[s]) != IMFormat::CENTROIDED)
+                if (precursor_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
                 {
                   picker_im.pickIMTraces(precursor_exp[s]);
                 }
@@ -983,7 +983,7 @@ protected:
 #pragma omp for schedule(dynamic, 1)
           for (SignedSize s = 0; s < static_cast<SignedSize>(ms1_exp.size()); ++s)
           {
-            if (IMTypes::determineIMFormat(ms1_exp[s]) != IMFormat::CENTROIDED)
+            if (ms1_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
             {
               MSSpectrum aggregated;
               aggregateSpectrum_(ms1_exp, static_cast<Size>(s), picker_im, aggregated);
@@ -1020,7 +1020,7 @@ protected:
           {
             if (im_info.available)
             {
-              if (IMTypes::determineIMFormat(ms1_exp[s]) != IMFormat::CENTROIDED)
+              if (ms1_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
               {
                 picker_im.pickIMTraces(ms1_exp[s]);
               }
