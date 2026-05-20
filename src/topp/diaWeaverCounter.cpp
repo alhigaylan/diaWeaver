@@ -31,11 +31,13 @@ Output files:
 */
 
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
-#include <OpenMS/FORMAT/MzMLFile.h>
+#include <OpenMS/APPLICATIONS/diaWeaver.h>
 #include <OpenMS/KERNEL/MSExperiment.h>
+#include <OpenMS/KERNEL/OnDiscMSExperiment.h>
 #include <OpenMS/KERNEL/MassTrace.h>
 #include <OpenMS/FEATUREFINDER/MassTraceDetection.h>
 #include <OpenMS/FEATUREFINDER/ElutionPeakDetection.h>
+#include <OpenMS/PROCESSING/CENTROIDING/PeakPickerHiRes.h>
 #include <OpenMS/CHEMISTRY/TheoreticalSpectrumGenerator.h>
 #include <OpenMS/CHEMISTRY/AASequence.h>
 #include <OpenMS/DATASTRUCTURES/KDTree.h>
@@ -155,27 +157,62 @@ protected:
                           "Ion mobility tolerance (±, 1/K0; applied only when IM data are present)", false);
     setMinFloat_("im_tolerance", 0.0);
 
-    registerSubsection_("MassTraceDetection",
-                        "Parameters forwarded to the internal MassTraceDetection algorithm");
+    registerSubsection_("MassTraceExtractor",
+                        "Parameters for per-window MS2 mass trace extraction (mirrors diaWeaver)");
 
-    registerSubsection_("ElutionPeakDetection",
-                        "Parameters forwarded to the internal ElutionPeakDetection algorithm");
+    registerSubsection_("PeakPickerHiRes",
+                        "Parameters for high-resolution peak picking applied to profile-mode MS2 spectra");
   }
 
   Param getSubsectionDefaults_(const String& section) const override
   {
-    if (section == "MassTraceDetection")
+    if (section == "MassTraceExtractor")
     {
-      MassTraceDetection mtd;
-      Param p = mtd.getDefaults();
-      p.setValue("mass_error_ppm",   10.0, "Allowed mass deviation (ppm)");
-      p.setValue("min_trace_length",  2.0, "Minimum trace length (seconds)");
-      return p;
+      Param combined;
+
+      Param p_com;
+      p_com.setValue("noise_threshold_int",       30.0,   "Intensity threshold below which peaks are regarded as noise.");
+      p_com.setValue("chrom_peak_snr",             1.0,   "Minimum signal-to-noise a mass trace should have.");
+      p_com.setValue("chrom_fwhm",                 3.0,   "Expected chromatographic peak width (in seconds).");
+      p_com.setValue("auto_noise_threshold",      "true", "Automatically estimate noise threshold from the input map.");
+      p_com.setValidStrings("auto_noise_threshold", {"true", "false"});
+      p_com.setValue("noise_estimation_n_scans",  50,     "Number of scans sampled to estimate noise when auto_noise_threshold is true.");
+      p_com.setValue("noise_estimation_percentile", 80.0, "Intensity percentile used to define noise level from sampled scans.");
+      combined.insert("common:", p_com);
+      combined.setSectionDescription("common", "Common parameters shared by MTD and EPD");
+
+      Param p_mtd = MassTraceDetection().getDefaults();
+      p_mtd.setValue("mass_error_ppm",              10.0, "Allowed mass deviation (ppm).");
+      p_mtd.setValue("min_trace_length",             2.0, "Minimum expected trace length (seconds).");
+      p_mtd.setValue("trace_termination_outliers",     2, "Consecutive missing-peak scans before trace termination.");
+      p_mtd.setValue("reestimate_mt_sd",          "false", "Enable dynamic re-estimation of m/z variance.");
+      p_mtd.setValue("quant_method",          "max_height", "Quantification method for mass traces.");
+      p_mtd.setValue("impute_zeros_missing_scans", "true", "Insert zero-intensity points at scans with no peak (preserves RT grid).");
+      p_mtd.remove("noise_threshold_int");
+      p_mtd.remove("chrom_peak_snr");
+      p_mtd.remove("auto_noise_threshold");
+      p_mtd.remove("noise_estimation_n_scans");
+      p_mtd.remove("noise_estimation_percentile");
+      combined.insert("mtd:", p_mtd);
+      combined.setSectionDescription("mtd", "MassTraceDetection parameters");
+
+      Param p_epd;
+      p_epd.setValue("enabled",         "true", "Enable splitting of isobaric mass traces by elution peak detection.");
+      p_epd.setValue("width_filtering",  "off", "Filter unlikely peak widths. 'auto' uses 5th/95th percentile; 'fixed' uses min/max_fwhm.");
+      p_epd.setValidStrings("enabled",         {"true", "false"});
+      p_epd.setValidStrings("width_filtering", {"off", "fixed", "auto"});
+      p_epd.insert("", ElutionPeakDetection().getDefaults());
+      p_epd.remove("chrom_peak_snr");
+      p_epd.remove("chrom_fwhm");
+      combined.insert("epd:", p_epd);
+      combined.setSectionDescription("epd", "ElutionPeakDetection parameters");
+
+      return combined;
     }
-    if (section == "ElutionPeakDetection")
+    if (section == "PeakPickerHiRes")
     {
-      ElutionPeakDetection epd;
-      return epd.getDefaults();
+      PeakPickerHiRes pp;
+      return pp.getDefaults();
     }
     return Param();
   }
@@ -761,6 +798,57 @@ protected:
   }
 
   // -------------------------------------------------------------------------
+  // Mirrors diaWeaver's runMassTraceExtractor_: MTD + optional EPD.
+  // Spectra in ms_peakmap must already be MSLevel=1 (extractSingleMS2Window
+  // guarantees this). Traces are appended to traces_out.
+  // -------------------------------------------------------------------------
+  void runMassTraceExtractor_(MSExperiment& ms_peakmap,
+                              const Param& common_param,
+                              Param mtd_param,
+                              Param epd_param,
+                              std::vector<MassTrace>& traces_out)
+  {
+    if (ms_peakmap.empty()) return;
+    ms_peakmap.sortSpectra(true);
+
+    MassTraceDetection mtdet;
+    mtd_param.insert("", common_param);
+    mtd_param.remove("chrom_fwhm");
+    mtdet.setParameters(mtd_param);
+
+    std::vector<MassTrace> m_traces;
+    mtdet.run(ms_peakmap, m_traces);
+    if (m_traces.empty()) return;
+
+    const bool use_epd = epd_param.getValue("enabled").toBool();
+    if (use_epd)
+    {
+      epd_param.remove("enabled");
+      epd_param.insert("", common_param);
+      epd_param.remove("noise_threshold_int");
+      ElutionPeakDetection epdet;
+      epdet.setParameters(epd_param);
+
+      std::vector<MassTrace> split;
+      epdet.detectPeaks(m_traces, split);
+
+      std::vector<MassTrace> final_traces;
+      if (epdet.getParameters().getValue("width_filtering") == "auto")
+        epdet.filterByPeakWidth(split, final_traces);
+      else
+        final_traces = std::move(split);
+
+      for (auto& t : final_traces)
+        if (t.getSize() > 0) traces_out.push_back(std::move(t));
+    }
+    else
+    {
+      for (auto& t : m_traces)
+        if (t.getSize() > 0) traces_out.push_back(std::move(t));
+    }
+  }
+
+  // -------------------------------------------------------------------------
 
   ExitCodes main_(int, const char**) override
   {
@@ -776,77 +864,94 @@ protected:
     const double im_tol     = getDoubleOption_("im_tolerance");
 
     // ------------------------------------------------------------------
-    // Step 1: Load mzML and filter to MS2 spectra
+    // Step 1: Determine DIA windows via metadata scan (no full load).
+    //         Uses OnDiscMSExperiment for memory-efficient access,
+    //         exactly as diaWeaver does.
     // ------------------------------------------------------------------
-    OPENMS_LOG_INFO << "Loading: " << in_file << "\n";
-    MSExperiment full_exp;
-    MzMLFile().load(in_file, full_exp);
-
-    MSExperiment ms2_exp;
-    for (const auto& spec : full_exp)
+    OPENMS_LOG_INFO << "Opening: " << in_file << "\n";
+    OnDiscMSExperiment on_disc;
+    if (!on_disc.openFile(in_file))
     {
-      if (spec.getMSLevel() == 2)
-        ms2_exp.addSpectrum(spec);
+      OPENMS_LOG_ERROR << "Failed to open as indexed mzML: " << in_file << "\n";
+      return INPUT_FILE_NOT_FOUND;
     }
-    OPENMS_LOG_INFO << "MS2 spectra: " << ms2_exp.size() << "\n";
 
-    if (ms2_exp.empty())
+    DiaWeaver::WindowMap windows;
+    DiaWeaver::determineWindows(on_disc, windows);
+    const DiaWeaver::IMInfo im_info = DiaWeaver::determineIMInfo(on_disc, windows);
+
+    OPENMS_LOG_INFO << "Found " << windows.size() << " DIA windows.\n";
+    if (windows.empty())
     {
-      OPENMS_LOG_ERROR << "No MS2 spectra found in " << in_file << "\n";
+      OPENMS_LOG_ERROR << "No DIA windows found in " << in_file
+                       << ". Is this a DIA mzML?\n";
       return INCOMPATIBLE_INPUT_DATA;
     }
 
     // ------------------------------------------------------------------
-    // Step 2: Detect MS2 mass traces (MTD → EPD), matching diaWeaver's
-    //         runMassTraceExtractor_ pipeline. EPD adds smoothed
-    //         intensities required for apex SNR computation.
+    // Step 2: Per-window extraction → peak picking → MTD+EPD.
+    //         extractSingleMS2Window already:
+    //           • isolates spectra to one window
+    //           • excludes peaks inside the precursor isolation band
+    //           • relabels spectra to MSLevel=1 (required by MTD)
+    //         Traces from all windows are accumulated into ms2_traces.
     // ------------------------------------------------------------------
-    ms2_exp.sortSpectra(true);
-
-    MassTraceDetection mtd;
-    mtd.setParameters(getParam_().copy("MassTraceDetection:", true));
-
-    std::vector<MassTrace> raw_traces;
-    OPENMS_LOG_INFO << "Running MassTraceDetection...\n";
-    mtd.run(ms2_exp, raw_traces);
-    OPENMS_LOG_INFO << "MTD: " << raw_traces.size() << " raw traces.\n";
-
-    ElutionPeakDetection epd;
-    epd.setParameters(getParam_().copy("ElutionPeakDetection:", true));
+    const Param mte_common = getParam_().copy("MassTraceExtractor:common:", true);
+    const Param mte_mtd    = getParam_().copy("MassTraceExtractor:mtd:",    true);
+    const Param mte_epd    = getParam_().copy("MassTraceExtractor:epd:",    true);
+    const Param pphr_param = getParam_().copy("PeakPickerHiRes:",           true);
 
     std::vector<MassTrace> ms2_traces;
-    OPENMS_LOG_INFO << "Running ElutionPeakDetection...\n";
-    epd.detectPeaks(raw_traces, ms2_traces);
 
-    if (epd.getParameters().getValue("width_filtering") == "auto")
+    for (const auto& [w, indices] : windows)
     {
-      std::vector<MassTrace> filtered;
-      epd.filterByPeakWidth(ms2_traces, filtered);
-      ms2_traces = std::move(filtered);
+      MSExperiment win_exp;
+      DiaWeaver::extractSingleMS2Window(on_disc, w, indices, im_info, win_exp);
+      if (win_exp.empty()) continue;
+
+      // Peak-pick profile-mode spectra (skipped if already centroided)
+      if (!im_info.available)
+      {
+        PeakPickerHiRes picker;
+        picker.setParameters(pphr_param);
+        for (auto& spec : win_exp)
+        {
+          if (spec.getType(true) != SpectrumSettings::SpectrumType::CENTROID)
+          {
+            MSSpectrum picked;
+            picker.pick(spec, picked);
+            spec = std::move(picked);
+          }
+        }
+      }
+
+      const Size before = ms2_traces.size();
+      Param mtd_copy = mte_mtd;
+      Param epd_copy = mte_epd;
+      runMassTraceExtractor_(win_exp, mte_common, mtd_copy, epd_copy, ms2_traces);
+
+      OPENMS_LOG_INFO << "Window [" << w.lower_mz << "-" << w.upper_mz << " m/z]: "
+                      << (ms2_traces.size() - before) << " traces.\n";
     }
 
-    ms2_traces.erase(
-      std::remove_if(ms2_traces.begin(), ms2_traces.end(),
-                [](const MassTrace& t) { return t.getSize() == 0; }),
-      ms2_traces.end());
-
-    OPENMS_LOG_INFO << "After EPD: " << ms2_traces.size() << " traces.\n";
+    OPENMS_LOG_INFO << "Total MS2 traces across all windows: " << ms2_traces.size() << "\n";
 
     if (ms2_traces.empty())
     {
-      OPENMS_LOG_WARN << "No MS2 mass traces remain after EPD. "
-                         "Consider relaxing MassTraceDetection / ElutionPeakDetection parameters.\n";
+      OPENMS_LOG_WARN << "No MS2 mass traces detected. "
+                         "Consider relaxing MassTraceExtractor parameters.\n";
     }
 
     // Precompute apex SNR for every trace (requires smoothed intensities from EPD)
+    ElutionPeakDetection epd_snr;  // stateless for SNR; no parameter configuration needed
     std::vector<double> trace_snr(ms2_traces.size(), 0.0);
     for (Size i = 0; i < ms2_traces.size(); ++i)
     {
       if (!ms2_traces[i].getSmoothedIntensities().empty())
-        trace_snr[i] = epd.computeApexSNR(ms2_traces[i]);
+        trace_snr[i] = epd_snr.computeApexSNR(ms2_traces[i]);
     }
 
-    // Check once whether any trace carries IM data
+    // Derive IM availability from traces (consistent with im_info but trace-based)
     bool dataset_has_im = false;
     for (const auto& mt : ms2_traces)
     {
