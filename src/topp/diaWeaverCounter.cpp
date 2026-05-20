@@ -242,7 +242,7 @@ protected:
   static map<int, double> parseAssignedMods_(const String& s)
   {
     map<int, double> result;
-    if (s.trim().empty()) return result;
+    if (String(s).trim().empty()) return result;
 
     vector<String> parts;
     String(s).split(",", parts);
@@ -292,7 +292,7 @@ protected:
   static vector<int> parseAllBestPositions_(const String& s)
   {
     vector<int> result;
-    if (s.trim().empty()) return result;
+    if (String(s).trim().empty()) return result;
 
     vector<String> parts;
     String(s).split(";", parts);
