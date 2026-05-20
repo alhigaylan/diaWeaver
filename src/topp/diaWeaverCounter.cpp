@@ -889,27 +889,70 @@ protected:
     }
 
     // ------------------------------------------------------------------
-    // Step 2: Per-window extraction → peak picking → MTD+EPD.
-    //         extractSingleMS2Window already:
-    //           • isolates spectra to one window
-    //           • excludes peaks inside the precursor isolation band
-    //           • relabels spectra to MSLevel=1 (required by MTD)
-    //         Traces from all windows are accumulated into ms2_traces.
+    // Step 2: Parse peptide IDs before the window loop so we can assign
+    //         each peptide to its window by precursor m/z.
     // ------------------------------------------------------------------
+    String run_id = File::basename(in_file);
+    for (const char* ext : {".mzML", ".mzml"})
+    {
+      if (run_id.hasSuffix(ext)) { run_id = run_id.prefix(run_id.size() - strlen(ext)); break; }
+    }
+    OPENMS_LOG_INFO << "Run ID derived from mzML: " << run_id << "\n";
+
+    std::vector<PeptideEntry> peptides = isOpenSearchPSV_(in_ids_file)
+      ? parseMSFraggerOpenSearchTSV_(in_ids_file, run_id)
+      : parsePeptideTSV_(in_ids_file, run_id);
+    OPENMS_LOG_INFO << "Peptides to map: " << peptides.size() << "\n";
+
+    // Theoretical spectrum generator — configured once, reused across windows
+    TheoreticalSpectrumGenerator tsg;
+    {
+      Param p = tsg.getDefaults();
+      p.setValue("add_metainfo",    "true",  "");
+      p.setValue("add_a_ions",      "false", "");
+      p.setValue("add_c_ions",      "false", "");
+      p.setValue("add_x_ions",      "false", "");
+      p.setValue("add_z_ions",      "false", "");
+      p.setValue("add_losses",      "true",  "");
+      p.setValue("add_term_losses", "true",  "");
+      tsg.setParameters(p);
+    }
+
+    // Global accumulators — grown one window at a time
+    std::vector<MassTrace>  ms2_traces;
+    std::vector<double>     trace_snr;
+    std::vector<std::vector<std::pair<Size, String>>> trace_claims;
+    std::vector<bool>       trace_within_pep_collision;
+
+    // Per-peptide result vectors — indexed by global peptide index, filled across windows
+    std::vector<Size>           pep_n_ions(peptides.size(), 0);
+    std::vector<Size>           pep_matched_ions(peptides.size(), 0);
+    std::vector<Size>           pep_multi_trace_ions(peptides.size(), 0);
+    std::vector<std::set<Size>> pep_matched_trace_set(peptides.size());
+    std::map<std::pair<Size,String>, IonBestMatch> best_ion_match;
+
+    ElutionPeakDetection epd_snr;  // stateless; used only for computeApexSNR
+
     const Param mte_common = getParam_().copy("MassTraceExtractor:common:", true);
     const Param mte_mtd    = getParam_().copy("MassTraceExtractor:mtd:",    true);
     const Param mte_epd    = getParam_().copy("MassTraceExtractor:epd:",    true);
     const Param pphr_param = getParam_().copy("PeakPickerHiRes:",           true);
 
-    std::vector<MassTrace> ms2_traces;
-
+    // ------------------------------------------------------------------
+    // Step 3: Per-window loop.
+    //   a) Extract window-isolated MS2 spectra + peak pick + MTD+EPD
+    //   b) Build a per-window KD-tree (local trace indices)
+    //   c) Filter peptides to this window by precursor m/z
+    //   d) Map peptide fragment ions to local traces
+    //   e) Translate local→global indices and append to global accumulators
+    // ------------------------------------------------------------------
     for (const auto& [w, indices] : windows)
     {
+      // --- 3a: Extract + peak pick + MTD+EPD ---
       MSExperiment win_exp;
       DiaWeaver::extractSingleMS2Window(on_disc, w, indices, im_info, win_exp);
       if (win_exp.empty()) continue;
 
-      // Peak-pick profile-mode spectra (skipped if already centroided)
       if (!im_info.available)
       {
         PeakPickerHiRes picker;
@@ -925,303 +968,161 @@ protected:
         }
       }
 
-      const Size before = ms2_traces.size();
-      Param mtd_copy = mte_mtd;
-      Param epd_copy = mte_epd;
-      runMassTraceExtractor_(win_exp, mte_common, mtd_copy, epd_copy, ms2_traces);
-
-      OPENMS_LOG_INFO << "Window [" << w.lower_mz << "-" << w.upper_mz << " m/z]: "
-                      << (ms2_traces.size() - before) << " traces.\n";
-    }
-
-    OPENMS_LOG_INFO << "Total MS2 traces across all windows: " << ms2_traces.size() << "\n";
-
-    if (ms2_traces.empty())
-    {
-      OPENMS_LOG_WARN << "No MS2 mass traces detected. "
-                         "Consider relaxing MassTraceExtractor parameters.\n";
-    }
-
-    // Precompute apex SNR for every trace (requires smoothed intensities from EPD)
-    ElutionPeakDetection epd_snr;  // stateless for SNR; no parameter configuration needed
-    std::vector<double> trace_snr(ms2_traces.size(), 0.0);
-    for (Size i = 0; i < ms2_traces.size(); ++i)
-    {
-      if (!ms2_traces[i].getSmoothedIntensities().empty())
-        trace_snr[i] = epd_snr.computeApexSNR(ms2_traces[i]);
-    }
-
-    // Derive IM availability from traces (consistent with im_info but trace-based)
-    bool dataset_has_im = false;
-    for (const auto& mt : ms2_traces)
-    {
-      if (mt.containsIMData()) { dataset_has_im = true; break; }
-    }
-
-    // ------------------------------------------------------------------
-    // Step 3: Build 2D KD-tree (RT x m/z) over detected MS2 traces.
-    //         IM is stored in the node but used only as a post-filter.
-    // ------------------------------------------------------------------
-    TraceKDTree kd_tree;
-
-    for (Size i = 0; i < ms2_traces.size(); ++i)
-    {
-      MS2TraceNode node;
-      node.rt        = ms2_traces[i].getCentroidRT();
-      node.mz        = ms2_traces[i].getCentroidMZ();
-      node.im        = ms2_traces[i].containsIMData() ?
-                         ms2_traces[i].getCentroidIM() : 0.0;
-      node.trace_idx = i;
-      kd_tree.insert(node);
-    }
-    kd_tree.optimise();
-    OPENMS_LOG_INFO << "KD-tree built (" << kd_tree.size() << " nodes).\n";
-
-    // ------------------------------------------------------------------
-    // Step 4: Parse peptide identification TSV, filtered to this run.
-    //
-    // The run ID is the mzML basename without extension (e.g. "run42").
-    // DIA-NN's Run column holds exactly this stem; File.Name holds the
-    // full raw-file path which runIdFromFileName_() normalises to the stem.
-    // ------------------------------------------------------------------
-    String run_id = File::basename(in_file);   // "run42.mzML"
-    for (const char* ext : {".mzML", ".mzml"})
-    {
-      if (run_id.hasSuffix(ext)) { run_id = run_id.prefix(run_id.size() - strlen(ext)); break; }
-    }
-    OPENMS_LOG_INFO << "Run ID derived from mzML: " << run_id << "\n";
-
-    std::vector<PeptideEntry> peptides = isOpenSearchPSV_(in_ids_file)
-      ? parseMSFraggerOpenSearchTSV_(in_ids_file, run_id)
-      : parsePeptideTSV_(in_ids_file, run_id);
-    OPENMS_LOG_INFO << "Peptides to map: " << peptides.size() << "\n";
-
-    // ------------------------------------------------------------------
-    // Step 5: Generate theoretical b/y ions and map to traces via KD-tree
-    //
-    // trace_claims[i] = list of (pep_idx, ion_name) pairs that claimed trace i.
-    //                   Multiple entries from the same peptide (different ions)
-    //                   and from different peptides are all recorded.
-    //
-    // best_ion_match[(pep_idx, ion_name)] = trace with highest apex SNR
-    //                   among all traces that matched this ion.
-    // ------------------------------------------------------------------
-    std::vector<std::vector<std::pair<Size, String>>> trace_claims(ms2_traces.size());
-    std::map<std::pair<Size,String>, IonBestMatch> best_ion_match;
-
-    std::vector<Size>      pep_n_ions(peptides.size(), 0);
-    std::vector<Size>      pep_matched_ions(peptides.size(), 0);
-    std::vector<Size>      pep_multi_trace_ions(peptides.size(), 0);
-    std::vector<std::set<Size>> pep_matched_trace_set(peptides.size());
-
-    // within_pep_ion_collision[i] = true when any single peptide claims trace i
-    // with two or more distinct ion labels (only meaningful for open-search output).
-    std::vector<bool> trace_within_pep_collision(ms2_traces.size(), false);
-    // Per-peptide: tracks the first ion label that claimed each trace; reset each iteration.
-    std::map<Size, String> pep_trace_first_ion;
-
-    TheoreticalSpectrumGenerator tsg;
-    Param tsg_params = tsg.getDefaults();
-    tsg_params.setValue("add_metainfo",   "true",  "");
-    tsg_params.setValue("add_a_ions",     "false", "");
-    tsg_params.setValue("add_c_ions",     "false", "");
-    tsg_params.setValue("add_x_ions",     "false", "");
-    tsg_params.setValue("add_z_ions",     "false", "");
-    tsg_params.setValue("add_losses",     "true",  "");
-    tsg_params.setValue("add_term_losses","true",  "");
-    tsg.setParameters(tsg_params);
-
-    for (Size pep_idx = 0; pep_idx < peptides.size(); ++pep_idx)
-    {
-      const PeptideEntry& pep = peptides[pep_idx];
-
-      if (pep.charge < 1)
+      std::vector<MassTrace> win_traces;
       {
-        OPENMS_LOG_ERROR << "[diaWeaverCounter] Invalid charge " << pep.charge
-                         << " for peptide '" << pep.sequence << "' (" << pep.id
-                         << "). Charge must be >= 1. Aborting.\n";
-        return INPUT_FILE_CORRUPT;
+        Param mtd_copy = mte_mtd;
+        Param epd_copy = mte_epd;
+        runMassTraceExtractor_(win_exp, mte_common, mtd_copy, epd_copy, win_traces);
       }
+      if (win_traces.empty()) continue;
 
-      pep_trace_first_ion.clear();
+      // global_offset: where this window's traces will sit in the global vector
+      const Size global_offset = ms2_traces.size();
 
-      // Helper: KD-tree query + IM post-filter → trace index list
-      auto queryTraces = [&](double mz_center) -> std::vector<Size>
+      // --- 3b: Per-window SNR + local KD-tree ---
+      std::vector<double> win_snr(win_traces.size(), 0.0);
+      bool win_has_im = false;
+      TraceKDTree local_kd;
+
+      for (Size i = 0; i < win_traces.size(); ++i)
       {
-        const double mz_tol_da = mz_center * mz_tol_ppm * 1e-6;
-        TraceKDTree::_Region_ region;
-        region._M_low_bounds[0]  = pep.rt - rt_tol;
-        region._M_high_bounds[0] = pep.rt + rt_tol;
-        region._M_low_bounds[1]  = mz_center - mz_tol_da;
-        region._M_high_bounds[1] = mz_center + mz_tol_da;
+        if (!win_traces[i].getSmoothedIntensities().empty())
+          win_snr[i] = epd_snr.computeApexSNR(win_traces[i]);
+        if (win_traces[i].containsIMData()) win_has_im = true;
 
-        std::vector<MS2TraceNode> candidates;
-        kd_tree.find_within_range(region, back_inserter(candidates));
-
-        std::vector<Size> result;
-        for (const auto& cand : candidates)
-        {
-          if (dataset_has_im && pep.im > 0.0 &&
-              ms2_traces[cand.trace_idx].containsIMData())
-          {
-            if (std::abs(cand.im - pep.im) > im_tol) continue;
-          }
-          result.push_back(cand.trace_idx);
-        }
-        return result;
-      };
-
-      // Helper: record trace claims, update best-SNR book-keeping, and track
-      // within-peptide ion collisions (same trace claimed by two different ions
-      // from the same peptide).
-      auto recordMatches = [&](const String& ion_label, const std::vector<Size>& tidx_list)
-      {
-        auto ion_key = std::make_pair(pep_idx, ion_label);
-        IonBestMatch& best = best_ion_match[ion_key];
-        best.n_traces += tidx_list.size();
-
-        for (Size tidx : tidx_list)
-        {
-          trace_claims[tidx].emplace_back(pep_idx, ion_label);
-          pep_matched_trace_set[pep_idx].insert(tidx);
-
-          if (trace_snr[tidx] > best.best_snr)
-          {
-            best.best_snr       = trace_snr[tidx];
-            best.best_trace_idx = tidx;
-          }
-
-          // Within-peptide collision: flag if a second distinct ion from this
-          // peptide maps to the same trace.
-          auto fit = pep_trace_first_ion.find(tidx);
-          if (fit == pep_trace_first_ion.end())
-            pep_trace_first_ion[tidx] = ion_label;
-          else if (fit->second != ion_label)
-            trace_within_pep_collision[tidx] = true;
-        }
-      };
-
-      if (pep.localization_candidates.empty())
-      {
-        // ------------------------------------------------------------------
-        // Standard path (DIA-NN / MSFragger closed-search)
-        // ------------------------------------------------------------------
-        AASequence aa_seq;
-        try { aa_seq = AASequence::fromString(pep.sequence); }
-        catch (const Exception::BaseException& ex)
-        {
-          OPENMS_LOG_WARN << "[diaWeaverCounter] Cannot parse sequence '"
-                          << pep.sequence << "': " << ex.getMessage() << ". Skipping.\n";
-          continue;
-        }
-        if (aa_seq.size() < 2) continue;
-
-        PeakSpectrum theo_spec;
-        tsg.getSpectrum(theo_spec, aa_seq, 1, pep.charge);
-
-        const PeakSpectrum::StringDataArray&  ion_names    =
-          theo_spec.getStringDataArrays().at(0);
-        const PeakSpectrum::IntegerDataArray& frag_charges =
-          theo_spec.getIntegerDataArrays().at(0);
-
-        pep_n_ions[pep_idx] = theo_spec.size() * 4 + 5;
-
-        for (Size ion_i = 0; ion_i < theo_spec.size(); ++ion_i)
-        {
-          const double mz_mono  = theo_spec[ion_i].getMZ();
-          const String ion_name = ion_names[ion_i];
-          const int    frag_z   = frag_charges[ion_i];
-
-          const std::vector<Size> mono_tidxs = queryTraces(mz_mono);
-          if (mono_tidxs.empty()) continue;
-
-          ++pep_matched_ions[pep_idx];
-          if (mono_tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
-          recordMatches(ion_name + "[M+0]", mono_tidxs);
-
-          for (int iso = 1; iso <= 3; ++iso)
-          {
-            const double mz_iso = mz_mono + iso * Constants::C13C12_MASSDIFF_U / frag_z;
-            const std::vector<Size> tidxs = queryTraces(mz_iso);
-            if (tidxs.empty()) continue;
-            ++pep_matched_ions[pep_idx];
-            if (tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
-            recordMatches(ion_name + "[M+" + String(iso) + "]", tidxs);
-          }
-        }
-
-        // Precursor
-        const double mz_prec_mono = aa_seq.getMZ(pep.charge);
-        const std::vector<Size> mono_tidxs = queryTraces(mz_prec_mono);
-        if (!mono_tidxs.empty())
-        {
-          ++pep_matched_ions[pep_idx];
-          if (mono_tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
-          recordMatches("p[M+0]", mono_tidxs);
-
-          for (int iso = 1; iso <= 4; ++iso)
-          {
-            const double mz_iso = mz_prec_mono + iso * Constants::C13C12_MASSDIFF_U / pep.charge;
-            const std::vector<Size> tidxs = queryTraces(mz_iso);
-            if (tidxs.empty()) continue;
-            ++pep_matched_ions[pep_idx];
-            if (tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
-            recordMatches("p[M+" + String(iso) + "]", tidxs);
-          }
-        }
+        MS2TraceNode node;
+        node.rt        = win_traces[i].getCentroidRT();
+        node.mz        = win_traces[i].getCentroidMZ();
+        node.im        = win_traces[i].containsIMData() ?
+                           win_traces[i].getCentroidIM() : 0.0;
+        node.trace_idx = i;  // LOCAL index
+        local_kd.insert(node);
       }
-      else
+      local_kd.optimise();
+
+      // --- 3c: Filter peptides to this window by precursor m/z ---
+      std::vector<Size> win_pep_indices;
+      for (Size pi = 0; pi < peptides.size(); ++pi)
       {
-        // ------------------------------------------------------------------
-        // Open-search path: union of traces across all localisation candidates.
-        // For each candidate position, generate a spectrum with the delta mass
-        // at that position. Ions are labelled with a modification tag when
-        // they span the modified residue (e.g. "y5[+156.1150][M+0]").
-        // Unmodified ions that are identical across candidates are deduplicated.
-        // ------------------------------------------------------------------
-        const String delta_tag = formatDeltaTag_(pep.delta_mass);
-        const int    pep_len   = static_cast<int>(pep.bare_sequence.size());
-
-        std::set<String> seen_ion_labels;  // dedup identical ions across candidates
-
-        for (int cand_pos : pep.localization_candidates)
+        double pmz = peptides[pi].mz;
+        if (pmz <= 0.0)
         {
-          std::map<int,double> cand_mods = pep.assigned_mods;
-          cand_mods[cand_pos] += pep.delta_mass;
-
-          AASequence cand_aa_seq;
-          try { cand_aa_seq = AASequence::fromString(
-                  buildOpenSearchSequence_(pep.bare_sequence, cand_mods)); }
+          try { pmz = AASequence::fromString(peptides[pi].sequence).getMZ(peptides[pi].charge); }
           catch (...) { continue; }
-          if (cand_aa_seq.size() < 2) continue;
+        }
+        if (pmz >= w.lower_mz && pmz <= w.upper_mz)
+          win_pep_indices.push_back(pi);
+      }
 
-          PeakSpectrum cand_spec;
-          tsg.getSpectrum(cand_spec, cand_aa_seq, 1, pep.charge);
+      // --- 3d: Per-window claim accumulators (local trace indices) ---
+      std::vector<std::vector<std::pair<Size, String>>> win_trace_claims(win_traces.size());
+      std::vector<bool> win_within_pep_collision(win_traces.size(), false);
+      std::map<Size, String> pep_trace_first_ion;
 
-          const PeakSpectrum::StringDataArray&  cand_names   =
-            cand_spec.getStringDataArrays().at(0);
-          const PeakSpectrum::IntegerDataArray& cand_charges =
-            cand_spec.getIntegerDataArrays().at(0);
+      for (Size pep_idx : win_pep_indices)
+      {
+        const PeptideEntry& pep = peptides[pep_idx];
 
-          for (Size ion_i = 0; ion_i < cand_spec.size(); ++ion_i)
+        if (pep.charge < 1)
+        {
+          OPENMS_LOG_ERROR << "[diaWeaverCounter] Invalid charge " << pep.charge
+                           << " for peptide '" << pep.sequence << "' (" << pep.id
+                           << "). Charge must be >= 1. Aborting.\n";
+          return INPUT_FILE_CORRUPT;
+        }
+
+        pep_trace_first_ion.clear();
+
+        // Query local KD-tree; returns LOCAL trace indices
+        auto queryTraces = [&](double mz_center) -> std::vector<Size>
+        {
+          const double mz_tol_da = mz_center * mz_tol_ppm * 1e-6;
+          TraceKDTree::_Region_ region;
+          region._M_low_bounds[0]  = pep.rt - rt_tol;
+          region._M_high_bounds[0] = pep.rt + rt_tol;
+          region._M_low_bounds[1]  = mz_center - mz_tol_da;
+          region._M_high_bounds[1] = mz_center + mz_tol_da;
+
+          std::vector<MS2TraceNode> candidates;
+          local_kd.find_within_range(region, back_inserter(candidates));
+
+          std::vector<Size> result;
+          for (const auto& cand : candidates)
           {
-            const double mz_mono   = cand_spec[ion_i].getMZ();
-            const String base_name = cand_names[ion_i];
-            const int    frag_z    = cand_charges[ion_i];
+            if (win_has_im && pep.im > 0.0 &&
+                win_traces[cand.trace_idx].containsIMData())
+            {
+              if (std::abs(cand.im - pep.im) > im_tol) continue;
+            }
+            result.push_back(cand.trace_idx);  // LOCAL
+          }
+          return result;
+        };
 
-            const bool   is_mod    = ionSpansPosition_(base_name, cand_pos, pep_len);
-            const String ion_label = is_mod ? base_name + delta_tag : base_name;
+        // Record claims using local indices for win_trace_claims/win_snr;
+        // translate to global for pep_matched_trace_set and best_ion_match.
+        auto recordMatches = [&](const String& ion_label, const std::vector<Size>& local_tidx_list)
+        {
+          auto ion_key = std::make_pair(pep_idx, ion_label);
+          IonBestMatch& best = best_ion_match[ion_key];
+          best.n_traces += local_tidx_list.size();
 
-            if (seen_ion_labels.count(ion_label)) continue;
-            seen_ion_labels.insert(ion_label);
-            pep_n_ions[pep_idx] += 4;
+          for (Size local_tidx : local_tidx_list)
+          {
+            const Size global_tidx = global_offset + local_tidx;
+
+            win_trace_claims[local_tidx].emplace_back(pep_idx, ion_label);
+            pep_matched_trace_set[pep_idx].insert(global_tidx);
+
+            if (win_snr[local_tidx] > best.best_snr)
+            {
+              best.best_snr       = win_snr[local_tidx];
+              best.best_trace_idx = global_tidx;  // stored globally for output step
+            }
+
+            auto fit = pep_trace_first_ion.find(local_tidx);
+            if (fit == pep_trace_first_ion.end())
+              pep_trace_first_ion[local_tidx] = ion_label;
+            else if (fit->second != ion_label)
+              win_within_pep_collision[local_tidx] = true;
+          }
+        };
+
+        if (pep.localization_candidates.empty())
+        {
+          // Standard path (DIA-NN / MSFragger closed-search)
+          AASequence aa_seq;
+          try { aa_seq = AASequence::fromString(pep.sequence); }
+          catch (const Exception::BaseException& ex)
+          {
+            OPENMS_LOG_WARN << "[diaWeaverCounter] Cannot parse sequence '"
+                            << pep.sequence << "': " << ex.getMessage() << ". Skipping.\n";
+            continue;
+          }
+          if (aa_seq.size() < 2) continue;
+
+          PeakSpectrum theo_spec;
+          tsg.getSpectrum(theo_spec, aa_seq, 1, pep.charge);
+
+          const PeakSpectrum::StringDataArray&  ion_names    =
+            theo_spec.getStringDataArrays().at(0);
+          const PeakSpectrum::IntegerDataArray& frag_charges =
+            theo_spec.getIntegerDataArrays().at(0);
+
+          pep_n_ions[pep_idx] = theo_spec.size() * 4 + 5;
+
+          for (Size ion_i = 0; ion_i < theo_spec.size(); ++ion_i)
+          {
+            const double mz_mono  = theo_spec[ion_i].getMZ();
+            const String ion_name = ion_names[ion_i];
+            const int    frag_z   = frag_charges[ion_i];
 
             const std::vector<Size> mono_tidxs = queryTraces(mz_mono);
             if (mono_tidxs.empty()) continue;
 
             ++pep_matched_ions[pep_idx];
             if (mono_tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
-            recordMatches(ion_label + "[M+0]", mono_tidxs);
+            recordMatches(ion_name + "[M+0]", mono_tidxs);
 
             for (int iso = 1; iso <= 3; ++iso)
             {
@@ -1230,47 +1131,132 @@ protected:
               if (tidxs.empty()) continue;
               ++pep_matched_ions[pep_idx];
               if (tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
-              recordMatches(ion_label + "[M+" + String(iso) + "]", tidxs);
+              recordMatches(ion_name + "[M+" + String(iso) + "]", tidxs);
+            }
+          }
+
+          const double mz_prec_mono = aa_seq.getMZ(pep.charge);
+          const std::vector<Size> prec_tidxs = queryTraces(mz_prec_mono);
+          if (!prec_tidxs.empty())
+          {
+            ++pep_matched_ions[pep_idx];
+            if (prec_tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
+            recordMatches("p[M+0]", prec_tidxs);
+
+            for (int iso = 1; iso <= 4; ++iso)
+            {
+              const double mz_iso = mz_prec_mono + iso * Constants::C13C12_MASSDIFF_U / pep.charge;
+              const std::vector<Size> tidxs = queryTraces(mz_iso);
+              if (tidxs.empty()) continue;
+              ++pep_matched_ions[pep_idx];
+              if (tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
+              recordMatches("p[M+" + String(iso) + "]", tidxs);
             }
           }
         }
-
-        // Precursor: total mass is invariant across candidates; compute once
-        // from the first candidate's fully modified sequence.
+        else
         {
-          std::map<int,double> first_mods = pep.assigned_mods;
-          first_mods[pep.localization_candidates[0]] += pep.delta_mass;
-          pep_n_ions[pep_idx] += 5;
+          // Open-search path
+          const String delta_tag = formatDeltaTag_(pep.delta_mass);
+          const int    pep_len   = static_cast<int>(pep.bare_sequence.size());
+          std::set<String> seen_ion_labels;
 
-          try
+          for (int cand_pos : pep.localization_candidates)
           {
-            const AASequence prec_aa_seq = AASequence::fromString(
-              buildOpenSearchSequence_(pep.bare_sequence, first_mods));
-            const double mz_prec_mono = prec_aa_seq.getMZ(pep.charge);
+            std::map<int,double> cand_mods = pep.assigned_mods;
+            cand_mods[cand_pos] += pep.delta_mass;
 
-            const std::vector<Size> mono_tidxs = queryTraces(mz_prec_mono);
-            if (!mono_tidxs.empty())
+            AASequence cand_aa_seq;
+            try { cand_aa_seq = AASequence::fromString(
+                    buildOpenSearchSequence_(pep.bare_sequence, cand_mods)); }
+            catch (...) { continue; }
+            if (cand_aa_seq.size() < 2) continue;
+
+            PeakSpectrum cand_spec;
+            tsg.getSpectrum(cand_spec, cand_aa_seq, 1, pep.charge);
+
+            const PeakSpectrum::StringDataArray&  cand_names   =
+              cand_spec.getStringDataArrays().at(0);
+            const PeakSpectrum::IntegerDataArray& cand_charges =
+              cand_spec.getIntegerDataArrays().at(0);
+
+            for (Size ion_i = 0; ion_i < cand_spec.size(); ++ion_i)
             {
+              const double mz_mono   = cand_spec[ion_i].getMZ();
+              const String base_name = cand_names[ion_i];
+              const int    frag_z    = cand_charges[ion_i];
+
+              const bool   is_mod    = ionSpansPosition_(base_name, cand_pos, pep_len);
+              const String ion_label = is_mod ? base_name + delta_tag : base_name;
+
+              if (seen_ion_labels.count(ion_label)) continue;
+              seen_ion_labels.insert(ion_label);
+              pep_n_ions[pep_idx] += 4;
+
+              const std::vector<Size> mono_tidxs = queryTraces(mz_mono);
+              if (mono_tidxs.empty()) continue;
+
               ++pep_matched_ions[pep_idx];
               if (mono_tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
-              recordMatches("p[M+0]", mono_tidxs);
+              recordMatches(ion_label + "[M+0]", mono_tidxs);
 
-              for (int iso = 1; iso <= 4; ++iso)
+              for (int iso = 1; iso <= 3; ++iso)
               {
-                const double mz_iso = mz_prec_mono +
-                  iso * Constants::C13C12_MASSDIFF_U / pep.charge;
+                const double mz_iso = mz_mono + iso * Constants::C13C12_MASSDIFF_U / frag_z;
                 const std::vector<Size> tidxs = queryTraces(mz_iso);
                 if (tidxs.empty()) continue;
                 ++pep_matched_ions[pep_idx];
                 if (tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
-                recordMatches("p[M+" + String(iso) + "]", tidxs);
+                recordMatches(ion_label + "[M+" + String(iso) + "]", tidxs);
               }
             }
           }
-          catch (...) {}
+
+          // Precursor mass is invariant across candidates; compute from first candidate
+          {
+            std::map<int,double> first_mods = pep.assigned_mods;
+            first_mods[pep.localization_candidates[0]] += pep.delta_mass;
+            pep_n_ions[pep_idx] += 5;
+            try
+            {
+              const AASequence prec_seq = AASequence::fromString(
+                buildOpenSearchSequence_(pep.bare_sequence, first_mods));
+              const double mz_prec_mono = prec_seq.getMZ(pep.charge);
+              const std::vector<Size> prec_tidxs = queryTraces(mz_prec_mono);
+              if (!prec_tidxs.empty())
+              {
+                ++pep_matched_ions[pep_idx];
+                if (prec_tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
+                recordMatches("p[M+0]", prec_tidxs);
+                for (int iso = 1; iso <= 4; ++iso)
+                {
+                  const double mz_iso = mz_prec_mono +
+                    iso * Constants::C13C12_MASSDIFF_U / pep.charge;
+                  const std::vector<Size> tidxs = queryTraces(mz_iso);
+                  if (tidxs.empty()) continue;
+                  ++pep_matched_ions[pep_idx];
+                  if (tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
+                  recordMatches("p[M+" + String(iso) + "]", tidxs);
+                }
+              }
+            }
+            catch (...) {}
+          }
         }
-      }
-    }
+      }  // end peptide loop for this window
+
+      // --- 3e: Append window results to global accumulators ---
+      for (auto& t : win_traces)  ms2_traces.push_back(std::move(t));
+      for (double s : win_snr)    trace_snr.push_back(s);
+      for (auto& c : win_trace_claims)         trace_claims.push_back(std::move(c));
+      for (bool  f : win_within_pep_collision) trace_within_pep_collision.push_back(f);
+
+      OPENMS_LOG_INFO << "Window [" << w.lower_mz << "-" << w.upper_mz << " m/z]: "
+                      << win_traces.size() << " traces, "
+                      << win_pep_indices.size() << " peptides assigned.\n";
+    }  // end window loop
+
+    OPENMS_LOG_INFO << "Total MS2 traces: " << ms2_traces.size() << "\n";
 
     // ------------------------------------------------------------------
     // Step 6: Derive per-trace and per-peptide aggregate metrics
