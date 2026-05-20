@@ -49,7 +49,6 @@ Output files:
 #include <algorithm>
 
 using namespace OpenMS;
-using namespace std;
 
 // ---------------------------------------------------------------------------
 // KD-tree node: stores centroid RT, m/z, IM and the index into ms2_traces
@@ -86,9 +85,9 @@ struct PeptideEntry
 
   // Open-search fields (populated only by parseMSFraggerOpenSearchTSV_)
   String         bare_sequence;           // unmodified peptide sequence
-  map<int,double> assigned_mods;          // positional delta mods from Assigned Modifications
+  std::map<int,double> assigned_mods;          // positional delta mods from Assigned Modifications
   double         delta_mass = 0.0;        // open-search delta mass
-  vector<int>    localization_candidates; // 1-indexed residue positions from Best Positions
+  std::vector<int>    localization_candidates; // 1-indexed residue positions from Best Positions
 };
 
 // ---------------------------------------------------------------------------
@@ -239,12 +238,12 @@ protected:
 
   // Parse "13C(57.0214), N-term(42.0106), ..." → {position → delta_mass}
   // pos 0 = N-terminal, pos > 0 = 1-indexed residue, pos -1 = C-terminal
-  static map<int, double> parseAssignedMods_(const String& s)
+  static std::map<int, double> parseAssignedMods_(const String& s)
   {
-    map<int, double> result;
+    std::map<int, double> result;
     if (String(s).trim().empty()) return result;
 
-    vector<String> parts;
+    std::vector<String> parts;
     String(s).split(",", parts);
 
     for (String& part : parts)
@@ -289,12 +288,12 @@ protected:
   }
 
   // Parse "V1;H2;G7" → all 1-indexed positions. Skips malformed entries.
-  static vector<int> parseAllBestPositions_(const String& s)
+  static std::vector<int> parseAllBestPositions_(const String& s)
   {
-    vector<int> result;
+    std::vector<int> result;
     if (String(s).trim().empty()) return result;
 
-    vector<String> parts;
+    std::vector<String> parts;
     String(s).split(";", parts);
 
     for (String& part : parts)
@@ -348,7 +347,7 @@ protected:
   // Build OpenMS-compatible sequence from bare peptide + positional delta mods.
   // pos 0 = N-terminal, pos > 0 = 1-indexed residue, pos -1 = C-terminal.
   static String buildOpenSearchSequence_(const String& bare_seq,
-                                          const map<int, double>& pos_mods)
+                                          const std::map<int, double>& pos_mods)
   {
     String result;
 
@@ -381,12 +380,12 @@ protected:
     return result;
   }
 
-  vector<PeptideEntry> parsePeptideTSV_(const String& filename,
+  std::vector<PeptideEntry> parsePeptideTSV_(const String& filename,
                                         const String& run_id) const
   {
-    vector<PeptideEntry> entries;
+    std::vector<PeptideEntry> entries;
 
-    ifstream file(filename.c_str());
+    std::ifstream file(filename.c_str());
     if (!file.is_open())
     {
       OPENMS_LOG_ERROR << "[diaWeaverCounter] Cannot open peptide TSV: " << filename << "\n";
@@ -394,19 +393,19 @@ protected:
     }
 
     // --- Parse header row ---
-    string raw_header;
-    if (!getline(file, raw_header))
+    std::string raw_header;
+    if (!std::getline(file, raw_header))
     {
       OPENMS_LOG_ERROR << "[diaWeaverCounter] Empty TSV file: " << filename << "\n";
       return entries;
     }
 
-    vector<String> col_names;
+    std::vector<String> col_names;
     String(raw_header).split("\t", col_names);
     for (auto& c : col_names) c.trim();
 
     // Map lowercased column name → internal field tag
-    const map<String, String> aliases = {
+    const std::map<String, String> aliases = {
       // run identification
       {"run",                        "run"}, {"file.name",               "run"},
       {"spectrum",                   "run_spectrum"},  // MSFragger — needs runIdFromSpectrum_
@@ -431,7 +430,7 @@ protected:
     };
 
     // field tag → column index
-    map<String, int> field_col;
+    std::map<String, int> field_col;
     for (Size i = 0; i < col_names.size(); ++i)
     {
       String lower = col_names[i];
@@ -487,14 +486,14 @@ protected:
     }
 
     // --- Parse data rows ---
-    string raw_line;
+    std::string raw_line;
     Size row = 1;
-    while (getline(file, raw_line))
+    while (std::getline(file, raw_line))
     {
       ++row;
       if (raw_line.empty()) continue;
 
-      vector<String> fields;
+      std::vector<String> fields;
       String(raw_line).split("\t", fields);
 
       try
@@ -556,7 +555,7 @@ protected:
         OPENMS_LOG_WARN << "[diaWeaverCounter] Skipping malformed row " << row
                         << ": " << ex.getMessage() << "\n";
       }
-      catch (const out_of_range&)
+      catch (const std::out_of_range&)
       {
         OPENMS_LOG_WARN << "[diaWeaverCounter] Skipping short row " << row << "\n";
       }
@@ -578,26 +577,26 @@ protected:
   // Rows are filtered by run (Spectrum column) and Q-value (1% FDR).
   // Rows with a significant delta mass (>0.02 Da) but no localisation site are skipped.
   // -------------------------------------------------------------------------
-  vector<PeptideEntry> parseMSFraggerOpenSearchTSV_(const String& filename,
+  std::vector<PeptideEntry> parseMSFraggerOpenSearchTSV_(const String& filename,
                                                      const String& run_id) const
   {
-    vector<PeptideEntry> entries;
+    std::vector<PeptideEntry> entries;
 
-    ifstream file(filename.c_str());
+    std::ifstream file(filename.c_str());
     if (!file.is_open())
     {
       OPENMS_LOG_ERROR << "[diaWeaverCounter] Cannot open MSFragger psm.tsv: " << filename << "\n";
       return entries;
     }
 
-    string raw_header;
-    if (!getline(file, raw_header)) return entries;
+    std::string raw_header;
+    if (!std::getline(file, raw_header)) return entries;
 
-    vector<String> col_names;
+    std::vector<String> col_names;
     String(raw_header).split("\t", col_names);
     for (auto& c : col_names) c.trim();
 
-    const map<String, String> aliases = {
+    const std::map<String, String> aliases = {
       {"spectrum",                  "run_spectrum"},
       {"peptide",                   "seq_bare"},
       {"charge",                    "charge"},
@@ -611,7 +610,7 @@ protected:
       {"ionmobility",               "im"},
     };
 
-    map<String, int> field_col;
+    std::map<String, int> field_col;
     for (Size i = 0; i < col_names.size(); ++i)
     {
       String lower = col_names[i];
@@ -639,17 +638,17 @@ protected:
       OPENMS_LOG_INFO << "[diaWeaverCounter] Filtering MSFragger open-search psm.tsv to run: "
                       << run_id << "\n";
 
-    string raw_line;
+    std::string raw_line;
     Size row = 1;
     Size n_skipped_run   = 0;
     Size n_skipped_noloc = 0;
 
-    while (getline(file, raw_line))
+    while (std::getline(file, raw_line))
     {
       ++row;
       if (raw_line.empty()) continue;
 
-      vector<String> fields;
+      std::vector<String> fields;
       String(raw_line).split("\t", fields);
 
       try
@@ -667,11 +666,11 @@ protected:
 
         // Build positional mod map from Assigned Modifications (static + variable)
         // Do NOT apply delta here — it is applied per-candidate during ion matching.
-        const map<int, double> assigned_mods =
+        const std::map<int, double> assigned_mods =
           parseAssignedMods_(fields.at(field_col.at("assigned_mods")).trim());
 
         // Parse all localisation candidates from Best Positions
-        vector<int> cand_positions;
+        std::vector<int> cand_positions;
         if (std::abs(delta_mass) > 0.02)
         {
           cand_positions = parseAllBestPositions_(
@@ -726,7 +725,7 @@ protected:
         OPENMS_LOG_WARN << "[diaWeaverCounter] Skipping malformed row " << row
                         << ": " << ex.getMessage() << "\n";
       }
-      catch (const out_of_range&)
+      catch (const std::out_of_range&)
       {
         OPENMS_LOG_WARN << "[diaWeaverCounter] Skipping short row " << row << "\n";
       }
@@ -742,11 +741,11 @@ protected:
   // Detection: header contains "best positions", "assigned modifications", "delta mass".
   static bool isOpenSearchPSV_(const String& filename)
   {
-    ifstream f(filename.c_str());
-    string header;
-    if (!getline(f, header)) return false;
+    std::ifstream f(filename.c_str());
+    std::string header;
+    if (!std::getline(f, header)) return false;
 
-    vector<String> cols;
+    std::vector<String> cols;
     String(header).split("\t", cols);
 
     bool has_best_pos = false, has_assigned = false, has_delta = false;
@@ -807,7 +806,7 @@ protected:
     MassTraceDetection mtd;
     mtd.setParameters(getParam_().copy("MassTraceDetection:", true));
 
-    vector<MassTrace> raw_traces;
+    std::vector<MassTrace> raw_traces;
     OPENMS_LOG_INFO << "Running MassTraceDetection...\n";
     mtd.run(ms2_exp, raw_traces);
     OPENMS_LOG_INFO << "MTD: " << raw_traces.size() << " raw traces.\n";
@@ -815,19 +814,19 @@ protected:
     ElutionPeakDetection epd;
     epd.setParameters(getParam_().copy("ElutionPeakDetection:", true));
 
-    vector<MassTrace> ms2_traces;
+    std::vector<MassTrace> ms2_traces;
     OPENMS_LOG_INFO << "Running ElutionPeakDetection...\n";
     epd.detectPeaks(raw_traces, ms2_traces);
 
     if (epd.getParameters().getValue("width_filtering") == "auto")
     {
-      vector<MassTrace> filtered;
+      std::vector<MassTrace> filtered;
       epd.filterByPeakWidth(ms2_traces, filtered);
-      ms2_traces = move(filtered);
+      ms2_traces = std::move(filtered);
     }
 
     ms2_traces.erase(
-      remove_if(ms2_traces.begin(), ms2_traces.end(),
+      std::remove_if(ms2_traces.begin(), ms2_traces.end(),
                 [](const MassTrace& t) { return t.getSize() == 0; }),
       ms2_traces.end());
 
@@ -840,7 +839,7 @@ protected:
     }
 
     // Precompute apex SNR for every trace (requires smoothed intensities from EPD)
-    vector<double> trace_snr(ms2_traces.size(), 0.0);
+    std::vector<double> trace_snr(ms2_traces.size(), 0.0);
     for (Size i = 0; i < ms2_traces.size(); ++i)
     {
       if (!ms2_traces[i].getSmoothedIntensities().empty())
@@ -887,7 +886,7 @@ protected:
     }
     OPENMS_LOG_INFO << "Run ID derived from mzML: " << run_id << "\n";
 
-    vector<PeptideEntry> peptides = isOpenSearchPSV_(in_ids_file)
+    std::vector<PeptideEntry> peptides = isOpenSearchPSV_(in_ids_file)
       ? parseMSFraggerOpenSearchTSV_(in_ids_file, run_id)
       : parsePeptideTSV_(in_ids_file, run_id);
     OPENMS_LOG_INFO << "Peptides to map: " << peptides.size() << "\n";
@@ -902,19 +901,19 @@ protected:
     // best_ion_match[(pep_idx, ion_name)] = trace with highest apex SNR
     //                   among all traces that matched this ion.
     // ------------------------------------------------------------------
-    vector<vector<pair<Size, String>>> trace_claims(ms2_traces.size());
-    map<pair<Size,String>, IonBestMatch> best_ion_match;
+    std::vector<std::vector<std::pair<Size, String>>> trace_claims(ms2_traces.size());
+    std::map<std::pair<Size,String>, IonBestMatch> best_ion_match;
 
-    vector<Size>      pep_n_ions(peptides.size(), 0);
-    vector<Size>      pep_matched_ions(peptides.size(), 0);
-    vector<Size>      pep_multi_trace_ions(peptides.size(), 0);
-    vector<set<Size>> pep_matched_trace_set(peptides.size());
+    std::vector<Size>      pep_n_ions(peptides.size(), 0);
+    std::vector<Size>      pep_matched_ions(peptides.size(), 0);
+    std::vector<Size>      pep_multi_trace_ions(peptides.size(), 0);
+    std::vector<std::set<Size>> pep_matched_trace_set(peptides.size());
 
     // within_pep_ion_collision[i] = true when any single peptide claims trace i
     // with two or more distinct ion labels (only meaningful for open-search output).
-    vector<bool> trace_within_pep_collision(ms2_traces.size(), false);
+    std::vector<bool> trace_within_pep_collision(ms2_traces.size(), false);
     // Per-peptide: tracks the first ion label that claimed each trace; reset each iteration.
-    map<Size, String> pep_trace_first_ion;
+    std::map<Size, String> pep_trace_first_ion;
 
     TheoreticalSpectrumGenerator tsg;
     Param tsg_params = tsg.getDefaults();
@@ -942,7 +941,7 @@ protected:
       pep_trace_first_ion.clear();
 
       // Helper: KD-tree query + IM post-filter → trace index list
-      auto queryTraces = [&](double mz_center) -> vector<Size>
+      auto queryTraces = [&](double mz_center) -> std::vector<Size>
       {
         const double mz_tol_da = mz_center * mz_tol_ppm * 1e-6;
         TraceKDTree::_Region_ region;
@@ -951,10 +950,10 @@ protected:
         region._M_low_bounds[1]  = mz_center - mz_tol_da;
         region._M_high_bounds[1] = mz_center + mz_tol_da;
 
-        vector<MS2TraceNode> candidates;
+        std::vector<MS2TraceNode> candidates;
         kd_tree.find_within_range(region, back_inserter(candidates));
 
-        vector<Size> result;
+        std::vector<Size> result;
         for (const auto& cand : candidates)
         {
           if (dataset_has_im && pep.im > 0.0 &&
@@ -970,9 +969,9 @@ protected:
       // Helper: record trace claims, update best-SNR book-keeping, and track
       // within-peptide ion collisions (same trace claimed by two different ions
       // from the same peptide).
-      auto recordMatches = [&](const String& ion_label, const vector<Size>& tidx_list)
+      auto recordMatches = [&](const String& ion_label, const std::vector<Size>& tidx_list)
       {
-        auto ion_key = make_pair(pep_idx, ion_label);
+        auto ion_key = std::make_pair(pep_idx, ion_label);
         IonBestMatch& best = best_ion_match[ion_key];
         best.n_traces += tidx_list.size();
 
@@ -1028,7 +1027,7 @@ protected:
           const String ion_name = ion_names[ion_i];
           const int    frag_z   = frag_charges[ion_i];
 
-          const vector<Size> mono_tidxs = queryTraces(mz_mono);
+          const std::vector<Size> mono_tidxs = queryTraces(mz_mono);
           if (mono_tidxs.empty()) continue;
 
           ++pep_matched_ions[pep_idx];
@@ -1038,7 +1037,7 @@ protected:
           for (int iso = 1; iso <= 3; ++iso)
           {
             const double mz_iso = mz_mono + iso * Constants::C13C12_MASSDIFF_U / frag_z;
-            const vector<Size> tidxs = queryTraces(mz_iso);
+            const std::vector<Size> tidxs = queryTraces(mz_iso);
             if (tidxs.empty()) continue;
             ++pep_matched_ions[pep_idx];
             if (tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
@@ -1048,7 +1047,7 @@ protected:
 
         // Precursor
         const double mz_prec_mono = aa_seq.getMZ(pep.charge);
-        const vector<Size> mono_tidxs = queryTraces(mz_prec_mono);
+        const std::vector<Size> mono_tidxs = queryTraces(mz_prec_mono);
         if (!mono_tidxs.empty())
         {
           ++pep_matched_ions[pep_idx];
@@ -1058,7 +1057,7 @@ protected:
           for (int iso = 1; iso <= 4; ++iso)
           {
             const double mz_iso = mz_prec_mono + iso * Constants::C13C12_MASSDIFF_U / pep.charge;
-            const vector<Size> tidxs = queryTraces(mz_iso);
+            const std::vector<Size> tidxs = queryTraces(mz_iso);
             if (tidxs.empty()) continue;
             ++pep_matched_ions[pep_idx];
             if (tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
@@ -1078,11 +1077,11 @@ protected:
         const String delta_tag = formatDeltaTag_(pep.delta_mass);
         const int    pep_len   = static_cast<int>(pep.bare_sequence.size());
 
-        set<String> seen_ion_labels;  // dedup identical ions across candidates
+        std::set<String> seen_ion_labels;  // dedup identical ions across candidates
 
         for (int cand_pos : pep.localization_candidates)
         {
-          map<int,double> cand_mods = pep.assigned_mods;
+          std::map<int,double> cand_mods = pep.assigned_mods;
           cand_mods[cand_pos] += pep.delta_mass;
 
           AASequence cand_aa_seq;
@@ -1112,7 +1111,7 @@ protected:
             seen_ion_labels.insert(ion_label);
             pep_n_ions[pep_idx] += 4;
 
-            const vector<Size> mono_tidxs = queryTraces(mz_mono);
+            const std::vector<Size> mono_tidxs = queryTraces(mz_mono);
             if (mono_tidxs.empty()) continue;
 
             ++pep_matched_ions[pep_idx];
@@ -1122,7 +1121,7 @@ protected:
             for (int iso = 1; iso <= 3; ++iso)
             {
               const double mz_iso = mz_mono + iso * Constants::C13C12_MASSDIFF_U / frag_z;
-              const vector<Size> tidxs = queryTraces(mz_iso);
+              const std::vector<Size> tidxs = queryTraces(mz_iso);
               if (tidxs.empty()) continue;
               ++pep_matched_ions[pep_idx];
               if (tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
@@ -1134,7 +1133,7 @@ protected:
         // Precursor: total mass is invariant across candidates; compute once
         // from the first candidate's fully modified sequence.
         {
-          map<int,double> first_mods = pep.assigned_mods;
+          std::map<int,double> first_mods = pep.assigned_mods;
           first_mods[pep.localization_candidates[0]] += pep.delta_mass;
           pep_n_ions[pep_idx] += 5;
 
@@ -1144,7 +1143,7 @@ protected:
               buildOpenSearchSequence_(pep.bare_sequence, first_mods));
             const double mz_prec_mono = prec_aa_seq.getMZ(pep.charge);
 
-            const vector<Size> mono_tidxs = queryTraces(mz_prec_mono);
+            const std::vector<Size> mono_tidxs = queryTraces(mz_prec_mono);
             if (!mono_tidxs.empty())
             {
               ++pep_matched_ions[pep_idx];
@@ -1155,7 +1154,7 @@ protected:
               {
                 const double mz_iso = mz_prec_mono +
                   iso * Constants::C13C12_MASSDIFF_U / pep.charge;
-                const vector<Size> tidxs = queryTraces(mz_iso);
+                const std::vector<Size> tidxs = queryTraces(mz_iso);
                 if (tidxs.empty()) continue;
                 ++pep_matched_ions[pep_idx];
                 if (tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
@@ -1173,18 +1172,18 @@ protected:
     // ------------------------------------------------------------------
 
     // Number of unique peptides claiming each trace
-    vector<Size> trace_n_peptides(ms2_traces.size(), 0);
+    std::vector<Size> trace_n_peptides(ms2_traces.size(), 0);
     for (Size i = 0; i < ms2_traces.size(); ++i)
     {
-      set<Size> unique_peps;
+      std::set<Size> unique_peps;
       for (const auto& [pi, ion] : trace_claims[i])
         unique_peps.insert(pi);
       trace_n_peptides[i] = unique_peps.size();
     }
 
     // Per-peptide exclusive vs shared trace counts
-    vector<Size> pep_exclusive(peptides.size(), 0);
-    vector<Size> pep_shared(peptides.size(), 0);
+    std::vector<Size> pep_exclusive(peptides.size(), 0);
+    std::vector<Size> pep_shared(peptides.size(), 0);
     for (Size pi = 0; pi < peptides.size(); ++pi)
     {
       for (Size tidx : pep_matched_trace_set[pi])
@@ -1224,7 +1223,7 @@ protected:
     // Step 7: Write run-level summary TSV
     // ------------------------------------------------------------------
     {
-      ofstream ofs(out_summary_file.c_str());
+      std::ofstream ofs(out_summary_file.c_str());
       if (!ofs.is_open())
       {
         OPENMS_LOG_ERROR << "Cannot write summary output: " << out_summary_file << "\n";
@@ -1244,7 +1243,7 @@ protected:
     // Step 8: Write per-trace accountability TSV
     // ------------------------------------------------------------------
     {
-      ofstream ofs(out_traces_file.c_str());
+      std::ofstream ofs(out_traces_file.c_str());
       if (!ofs.is_open())
       {
         OPENMS_LOG_ERROR << "Cannot write trace output: " << out_traces_file << "\n";
@@ -1282,7 +1281,7 @@ protected:
     // ------------------------------------------------------------------
     if (!out_pep_file.empty())
     {
-      ofstream ofs(out_pep_file.c_str());
+      std::ofstream ofs(out_pep_file.c_str());
       if (!ofs.is_open())
       {
         OPENMS_LOG_ERROR << "Cannot write peptide output: " << out_pep_file << "\n";
@@ -1336,7 +1335,7 @@ protected:
     // ------------------------------------------------------------------
     if (!out_coll_file.empty())
     {
-      ofstream ofs(out_coll_file.c_str());
+      std::ofstream ofs(out_coll_file.c_str());
       if (!ofs.is_open())
       {
         OPENMS_LOG_ERROR << "Cannot write collision output: " << out_coll_file << "\n";
@@ -1356,7 +1355,7 @@ protected:
 
         for (const auto& [pi, ion_name] : trace_claims[i])
         {
-          const auto ion_key = make_pair(pi, ion_name);
+          const auto ion_key = std::make_pair(pi, ion_name);
           const bool is_best = best_ion_match.count(ion_key) &&
                                best_ion_match.at(ion_key).best_trace_idx == i;
 
