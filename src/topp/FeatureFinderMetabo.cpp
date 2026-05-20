@@ -12,6 +12,9 @@
 #include <OpenMS/IONMOBILITY/IMTypes.h>
 #include <OpenMS/KERNEL/MSExperiment.h>
 #include <OpenMS/KERNEL/FeatureMap.h>
+#include <OpenMS/KERNEL/ConsensusMap.h>
+#include <OpenMS/KERNEL/ConsensusFeature.h>
+#include <OpenMS/KERNEL/FeatureHandle.h>
 #include <OpenMS/KERNEL/MassTrace.h>
 #include <OpenMS/FEATUREFINDER/MassTraceDetection.h>
 #include <OpenMS/FEATUREFINDER/ElutionPeakDetection.h>
