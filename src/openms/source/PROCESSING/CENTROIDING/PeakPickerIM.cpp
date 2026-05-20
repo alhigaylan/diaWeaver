@@ -963,7 +963,8 @@ namespace OpenMS
           empty_im_array.setName(Constants::UserParam::ION_MOBILITY_CENTROID);
           empty_frame.getFloatDataArrays().push_back(std::move(empty_im_array));
           empty_frame.setType(SpectrumSettings::SpectrumType::CENTROID);
-          empty_frame.setIMFormat(IMFormat::CENTROIDED);
+          empty_frame.setIMFormat(IMFormat::IM_PEAK);
+          empty_frame.setIMPeakType(IMPeakType::IM_CENTROIDED);
           spectrum = std::move(empty_frame);
           return;
         }
@@ -985,7 +986,8 @@ namespace OpenMS
         // Copy spectrum settings to output
         copySpectrumMeta(spectrum, centroided_frame, false);
         centroided_frame.setType(SpectrumSettings::SpectrumType::CENTROID);
-        centroided_frame.setIMFormat(IMFormat::CENTROIDED);
+        centroided_frame.setIMFormat(IMFormat::IM_PEAK);
+        centroided_frame.setIMPeakType(IMPeakType::IM_CENTROIDED);
         spectrum = std::move(centroided_frame);
         return;
       }
