@@ -189,8 +189,8 @@ find_package(CURL REQUIRED)
 #------------------------------------------------------------------------------
 # Apache Arrow and Parquet (required dependency)
 # Arrow 23+ required for parquet file format compatibility
-find_package(Arrow 23 CONFIG REQUIRED)
-find_package(Parquet 23 CONFIG REQUIRED)
+find_package(Arrow 24 CONFIG REQUIRED)
+find_package(Parquet 24 CONFIG REQUIRED)
 
 # Arrow's CMake config may import nlohmann_json as a transitive dependency.
 # If so, force the vendored extern to use the already-imported target instead
