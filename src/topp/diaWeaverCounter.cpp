@@ -548,7 +548,7 @@ protected:
         e.im       = field_col.count("im") ?
                        fields.at(field_col.at("im")).trim().toDouble() : 0.0;
         e.id       = "row" + String(row);
-        entries.push_back(move(e));
+        entries.push_back(std::move(e));
       }
       catch (const Exception::BaseException& ex)
       {
@@ -718,7 +718,7 @@ protected:
           continue;
         }
 
-        entries.push_back(move(e));
+        entries.push_back(std::move(e));
       }
       catch (const Exception::BaseException& ex)
       {
