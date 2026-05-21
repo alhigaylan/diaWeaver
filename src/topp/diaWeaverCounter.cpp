@@ -1549,7 +1549,7 @@ protected:
       }
 
       ofs << "trace_idx\tcentroid_mz\tcentroid_rt\tcentroid_im\tapex_snr\t"
-             "n_claiming_peptides\tn_claiming_ions\tstatus\twithin_pep_ion_collision\n";
+             "n_claiming_peptides\tn_claiming_ions\tstatus\twithin_pep_ion_collision\tclaims\n";
 
       for (Size i = 0; i < ms2_traces.size(); ++i)
       {
@@ -1561,6 +1561,38 @@ protected:
         else if (n_pep == 1) status = "unique";
         else                 status = "ambiguous";
 
+        // Build claims string grouped by peptide.
+        // Format: "pep_id:sequence:(ion1,ion2,...);pep_id2:sequence2:(ion3,...)"
+        // Empty for orphan traces.
+        String claims_str;
+        if (!trace_claims[i].empty())
+        {
+          // Collect ion labels per peptide, preserving first-seen order of peptides.
+          std::vector<Size> pep_order;
+          std::map<Size, std::vector<String>> pep_ions;
+          for (const auto& [pi, ion_label] : trace_claims[i])
+          {
+            if (pep_ions.find(pi) == pep_ions.end())
+              pep_order.push_back(pi);
+            pep_ions[pi].push_back(ion_label);
+          }
+
+          bool first_pep = true;
+          for (Size pi : pep_order)
+          {
+            if (!first_pep) claims_str += ";";
+            first_pep = false;
+            claims_str += peptides[pi].id + ":" + peptides[pi].sequence + ":(";
+            const auto& ions = pep_ions.at(pi);
+            for (Size ii = 0; ii < ions.size(); ++ii)
+            {
+              if (ii > 0) claims_str += ",";
+              claims_str += ions[ii];
+            }
+            claims_str += ")";
+          }
+        }
+
         ofs << i                           << "\t"
             << mt.getCentroidMZ()          << "\t"
             << mt.getCentroidRT()          << "\t"
@@ -1570,7 +1602,8 @@ protected:
             << n_pep                       << "\t"
             << trace_claims[i].size()      << "\t"
             << status                      << "\t"
-            << (trace_within_pep_collision[i] ? "true" : "false") << "\n";
+            << (trace_within_pep_collision[i] ? "true" : "false") << "\t"
+            << claims_str                  << "\n";
       }
     }
 
