@@ -49,6 +49,9 @@ Output files:
 #include <set>
 #include <cmath>
 #include <algorithm>
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 using namespace OpenMS;
 
@@ -156,6 +159,10 @@ protected:
     registerDoubleOption_("im_tolerance", "<1/K0>", 0.02,
                           "Ion mobility tolerance (±, 1/K0; applied only when IM data are present)", false);
     setMinFloat_("im_tolerance", 0.0);
+
+    registerIntOption_("threads", "<n>", 1,
+                       "Number of threads for parallel window processing.", false);
+    setMinInt_("threads", 1);
 
     registerSubsection_("MassTraceExtractor",
                         "Parameters for per-window MS2 mass trace extraction (mirrors diaWeaver)");
@@ -939,16 +946,48 @@ protected:
     const Param pphr_param = getParam_().copy("PeakPickerHiRes:",           true);
 
     // ------------------------------------------------------------------
-    // Step 3: Per-window loop.
-    //   a) Extract window-isolated MS2 spectra + peak pick + MTD+EPD
-    //   b) Build a per-window KD-tree (local trace indices)
-    //   c) Filter peptides to this window by precursor m/z
-    //   d) Map peptide fragment ions to local traces
-    //   e) Translate local→global indices and append to global accumulators
+    // Step 3: Per-window loop — parallel over windows.
+    //
+    //   Heavy work (thread-local, no guards):
+    //     a) Extract + peak pick + MTD+EPD  → win_traces, win_snr
+    //     b) Build per-window KD-tree       → local_kd  (local indices)
+    //     c) Filter peptides by precursor m/z
+    //     d) Map fragment ions → local traces; accumulate into thread-local
+    //        win_pep_n_ions, win_pep_matched_ions, win_pep_multi_trace_ions,
+    //        win_pep_trace_sets (local indices), win_best_ion_match (local best_trace_idx)
+    //
+    //   Accumulation (guarded by critical section):
+    //     e) Compute global_offset = ms2_traces.size()
+    //        Translate local→global indices, merge into global accumulators
+    //
+    //   Steps 6-10 run sequentially after the loop on the completed globals.
     // ------------------------------------------------------------------
-    for (const auto& [w, indices] : windows)
+
+    // Convert map to vector for OpenMP indexed access
+    std::vector<std::pair<DiaWeaver::DIAWindow, std::vector<Size>>> window_vec(
+      windows.begin(), windows.end());
+    const SignedSize total_windows = static_cast<SignedSize>(window_vec.size());
+
+#ifdef _OPENMP
+    omp_set_num_threads(getIntOption_("threads"));
+    OPENMS_LOG_INFO << "Processing " << total_windows << " windows with "
+                    << getIntOption_("threads") << " thread(s).\n";
+#endif
+
+    bool had_error = false;  // set inside critical section if a window hits a fatal error
+
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 1) firstprivate(on_disc)
+#endif
+    for (SignedSize widx = 0; widx < total_windows; ++widx)
     {
-      // --- 3a: Extract + peak pick + MTD+EPD ---
+#ifdef _OPENMP
+      if (had_error) continue;  // propagate fatal error across parallel iterations
+#endif
+      const DiaWeaver::DIAWindow& w       = window_vec[widx].first;
+      const std::vector<Size>&    indices = window_vec[widx].second;
+
+      // --- 3a: Extract + peak pick + MTD+EPD (all thread-local) ---
       MSExperiment win_exp;
       DiaWeaver::extractSingleMS2Window(on_disc, w, indices, im_info, win_exp);
       if (win_exp.empty()) continue;
@@ -976,9 +1015,6 @@ protected:
       }
       if (win_traces.empty()) continue;
 
-      // global_offset: where this window's traces will sit in the global vector
-      const Size global_offset = ms2_traces.size();
-
       // --- 3b: Per-window SNR + local KD-tree ---
       std::vector<double> win_snr(win_traces.size(), 0.0);
       bool win_has_im = false;
@@ -995,7 +1031,7 @@ protected:
         node.mz        = win_traces[i].getCentroidMZ();
         node.im        = win_traces[i].containsIMData() ?
                            win_traces[i].getCentroidIM() : 0.0;
-        node.trace_idx = i;  // LOCAL index
+        node.trace_idx = i;  // LOCAL
         local_kd.insert(node);
       }
       local_kd.optimise();
@@ -1014,26 +1050,37 @@ protected:
           win_pep_indices.push_back(pi);
       }
 
-      // --- 3d: Per-window claim accumulators (local trace indices) ---
+      // --- 3d: Thread-local claim accumulators ---
       std::vector<std::vector<std::pair<Size, String>>> win_trace_claims(win_traces.size());
-      std::vector<bool> win_within_pep_collision(win_traces.size(), false);
-      std::map<Size, String> pep_trace_first_ion;
+      std::vector<bool>       win_within_pep_collision(win_traces.size(), false);
+      std::map<Size, String>  pep_trace_first_ion;
+
+      // Thread-local per-peptide accumulators (indexed by global pep_idx)
+      std::vector<Size>           win_pep_n_ions(peptides.size(), 0);
+      std::vector<Size>           win_pep_matched(peptides.size(), 0);
+      std::vector<Size>           win_pep_multi(peptides.size(), 0);
+      std::vector<std::set<Size>> win_pep_trace_sets(peptides.size());  // LOCAL indices
+      std::map<std::pair<Size,String>, IonBestMatch> win_best_ion_match; // LOCAL best_trace_idx
+
+      bool win_had_error = false;
 
       for (Size pep_idx : win_pep_indices)
       {
+        if (win_had_error) break;
         const PeptideEntry& pep = peptides[pep_idx];
 
         if (pep.charge < 1)
         {
           OPENMS_LOG_ERROR << "[diaWeaverCounter] Invalid charge " << pep.charge
                            << " for peptide '" << pep.sequence << "' (" << pep.id
-                           << "). Charge must be >= 1. Aborting.\n";
-          return INPUT_FILE_CORRUPT;
+                           << "). Charge must be >= 1.\n";
+          win_had_error = true;
+          break;
         }
 
         pep_trace_first_ion.clear();
 
-        // Query local KD-tree; returns LOCAL trace indices
+        // Query local KD-tree — returns LOCAL trace indices
         auto queryTraces = [&](double mz_center) -> std::vector<Size>
         {
           const double mz_tol_da = mz_center * mz_tol_ppm * 1e-6;
@@ -1059,25 +1106,22 @@ protected:
           return result;
         };
 
-        // Record claims using local indices for win_trace_claims/win_snr;
-        // translate to global for pep_matched_trace_set and best_ion_match.
+        // Write only to thread-local structures; global translation deferred to critical section
         auto recordMatches = [&](const String& ion_label, const std::vector<Size>& local_tidx_list)
         {
           auto ion_key = std::make_pair(pep_idx, ion_label);
-          IonBestMatch& best = best_ion_match[ion_key];
+          IonBestMatch& best = win_best_ion_match[ion_key];
           best.n_traces += local_tidx_list.size();
 
           for (Size local_tidx : local_tidx_list)
           {
-            const Size global_tidx = global_offset + local_tidx;
-
             win_trace_claims[local_tidx].emplace_back(pep_idx, ion_label);
-            pep_matched_trace_set[pep_idx].insert(global_tidx);
+            win_pep_trace_sets[pep_idx].insert(local_tidx);  // LOCAL
 
             if (win_snr[local_tidx] > best.best_snr)
             {
               best.best_snr       = win_snr[local_tidx];
-              best.best_trace_idx = global_tidx;  // stored globally for output step
+              best.best_trace_idx = local_tidx;  // LOCAL — translated to global in critical section
             }
 
             auto fit = pep_trace_first_ion.find(local_tidx);
@@ -1109,7 +1153,7 @@ protected:
           const PeakSpectrum::IntegerDataArray& frag_charges =
             theo_spec.getIntegerDataArrays().at(0);
 
-          pep_n_ions[pep_idx] = theo_spec.size() * 4 + 5;
+          win_pep_n_ions[pep_idx] = theo_spec.size() * 4 + 5;
 
           for (Size ion_i = 0; ion_i < theo_spec.size(); ++ion_i)
           {
@@ -1120,8 +1164,8 @@ protected:
             const std::vector<Size> mono_tidxs = queryTraces(mz_mono);
             if (mono_tidxs.empty()) continue;
 
-            ++pep_matched_ions[pep_idx];
-            if (mono_tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
+            ++win_pep_matched[pep_idx];
+            if (mono_tidxs.size() > 1) ++win_pep_multi[pep_idx];
             recordMatches(ion_name + "[M+0]", mono_tidxs);
 
             for (int iso = 1; iso <= 3; ++iso)
@@ -1129,8 +1173,8 @@ protected:
               const double mz_iso = mz_mono + iso * Constants::C13C12_MASSDIFF_U / frag_z;
               const std::vector<Size> tidxs = queryTraces(mz_iso);
               if (tidxs.empty()) continue;
-              ++pep_matched_ions[pep_idx];
-              if (tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
+              ++win_pep_matched[pep_idx];
+              if (tidxs.size() > 1) ++win_pep_multi[pep_idx];
               recordMatches(ion_name + "[M+" + String(iso) + "]", tidxs);
             }
           }
@@ -1139,8 +1183,8 @@ protected:
           const std::vector<Size> prec_tidxs = queryTraces(mz_prec_mono);
           if (!prec_tidxs.empty())
           {
-            ++pep_matched_ions[pep_idx];
-            if (prec_tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
+            ++win_pep_matched[pep_idx];
+            if (prec_tidxs.size() > 1) ++win_pep_multi[pep_idx];
             recordMatches("p[M+0]", prec_tidxs);
 
             for (int iso = 1; iso <= 4; ++iso)
@@ -1148,8 +1192,8 @@ protected:
               const double mz_iso = mz_prec_mono + iso * Constants::C13C12_MASSDIFF_U / pep.charge;
               const std::vector<Size> tidxs = queryTraces(mz_iso);
               if (tidxs.empty()) continue;
-              ++pep_matched_ions[pep_idx];
-              if (tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
+              ++win_pep_matched[pep_idx];
+              if (tidxs.size() > 1) ++win_pep_multi[pep_idx];
               recordMatches("p[M+" + String(iso) + "]", tidxs);
             }
           }
@@ -1191,13 +1235,13 @@ protected:
 
               if (seen_ion_labels.count(ion_label)) continue;
               seen_ion_labels.insert(ion_label);
-              pep_n_ions[pep_idx] += 4;
+              win_pep_n_ions[pep_idx] += 4;
 
               const std::vector<Size> mono_tidxs = queryTraces(mz_mono);
               if (mono_tidxs.empty()) continue;
 
-              ++pep_matched_ions[pep_idx];
-              if (mono_tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
+              ++win_pep_matched[pep_idx];
+              if (mono_tidxs.size() > 1) ++win_pep_multi[pep_idx];
               recordMatches(ion_label + "[M+0]", mono_tidxs);
 
               for (int iso = 1; iso <= 3; ++iso)
@@ -1205,18 +1249,18 @@ protected:
                 const double mz_iso = mz_mono + iso * Constants::C13C12_MASSDIFF_U / frag_z;
                 const std::vector<Size> tidxs = queryTraces(mz_iso);
                 if (tidxs.empty()) continue;
-                ++pep_matched_ions[pep_idx];
-                if (tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
+                ++win_pep_matched[pep_idx];
+                if (tidxs.size() > 1) ++win_pep_multi[pep_idx];
                 recordMatches(ion_label + "[M+" + String(iso) + "]", tidxs);
               }
             }
           }
 
-          // Precursor mass is invariant across candidates; compute from first candidate
+          // Precursor — invariant across candidates; compute from first
           {
             std::map<int,double> first_mods = pep.assigned_mods;
             first_mods[pep.localization_candidates[0]] += pep.delta_mass;
-            pep_n_ions[pep_idx] += 5;
+            win_pep_n_ions[pep_idx] += 5;
             try
             {
               const AASequence prec_seq = AASequence::fromString(
@@ -1225,8 +1269,8 @@ protected:
               const std::vector<Size> prec_tidxs = queryTraces(mz_prec_mono);
               if (!prec_tidxs.empty())
               {
-                ++pep_matched_ions[pep_idx];
-                if (prec_tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
+                ++win_pep_matched[pep_idx];
+                if (prec_tidxs.size() > 1) ++win_pep_multi[pep_idx];
                 recordMatches("p[M+0]", prec_tidxs);
                 for (int iso = 1; iso <= 4; ++iso)
                 {
@@ -1234,8 +1278,8 @@ protected:
                     iso * Constants::C13C12_MASSDIFF_U / pep.charge;
                   const std::vector<Size> tidxs = queryTraces(mz_iso);
                   if (tidxs.empty()) continue;
-                  ++pep_matched_ions[pep_idx];
-                  if (tidxs.size() > 1) ++pep_multi_trace_ions[pep_idx];
+                  ++win_pep_matched[pep_idx];
+                  if (tidxs.size() > 1) ++win_pep_multi[pep_idx];
                   recordMatches("p[M+" + String(iso) + "]", tidxs);
                 }
               }
@@ -1243,18 +1287,59 @@ protected:
             catch (...) {}
           }
         }
-      }  // end peptide loop for this window
+      }  // end peptide loop
 
-      // --- 3e: Append window results to global accumulators ---
-      for (auto& t : win_traces)  ms2_traces.push_back(std::move(t));
-      for (double s : win_snr)    trace_snr.push_back(s);
-      for (auto& c : win_trace_claims)         trace_claims.push_back(std::move(c));
-      for (bool  f : win_within_pep_collision) trace_within_pep_collision.push_back(f);
+      // --- 3e: Guarded accumulation into global structures ---
+#ifdef _OPENMP
+#pragma omp critical (accumulate_results)
+#endif
+      {
+        if (win_had_error)
+        {
+          had_error = true;
+        }
+        else
+        {
+          // Atomically claim the global offset for this window's traces
+          const Size global_offset = ms2_traces.size();
 
-      OPENMS_LOG_INFO << "Window [" << w.lower_mz << "-" << w.upper_mz << " m/z]: "
-                      << win_traces.size() << " traces, "
-                      << win_pep_indices.size() << " peptides assigned.\n";
+          // Translate local→global in win_best_ion_match, then merge
+          for (auto& [key, val] : win_best_ion_match)
+          {
+            val.best_trace_idx += global_offset;
+            auto& g = best_ion_match[key];
+            g.n_traces += val.n_traces;
+            if (val.best_snr > g.best_snr)
+            {
+              g.best_snr       = val.best_snr;
+              g.best_trace_idx = val.best_trace_idx;
+            }
+          }
+
+          // Translate local→global pep_matched_trace_set and merge per-peptide scalars
+          for (Size pi : win_pep_indices)
+          {
+            pep_n_ions[pi]           += win_pep_n_ions[pi];
+            pep_matched_ions[pi]     += win_pep_matched[pi];
+            pep_multi_trace_ions[pi] += win_pep_multi[pi];
+            for (Size local_tidx : win_pep_trace_sets[pi])
+              pep_matched_trace_set[pi].insert(global_offset + local_tidx);
+          }
+
+          // Append trace data
+          for (auto& t : win_traces)  ms2_traces.push_back(std::move(t));
+          for (double s : win_snr)    trace_snr.push_back(s);
+          for (auto& c : win_trace_claims)         trace_claims.push_back(std::move(c));
+          for (bool  f : win_within_pep_collision) trace_within_pep_collision.push_back(f);
+
+          OPENMS_LOG_INFO << "Window [" << w.lower_mz << "-" << w.upper_mz << " m/z]: "
+                          << win_traces.size() << " traces, "
+                          << win_pep_indices.size() << " peptides.\n";
+        }
+      }  // end critical section
     }  // end window loop
+
+    if (had_error) return INPUT_FILE_CORRUPT;
 
     OPENMS_LOG_INFO << "Total MS2 traces: " << ms2_traces.size() << "\n";
 
