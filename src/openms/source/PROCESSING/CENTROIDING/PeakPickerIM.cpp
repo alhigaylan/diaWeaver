@@ -44,104 +44,6 @@ using namespace std;
 namespace OpenMS
 {
 
-    double PeakPickerIM::computeOptimalSamplingRate(const vector<MSSpectrum>& spectra)
-    {
-      vector<double> im_diffs;
-      Size upper_peak_limit = 0;
-      for (size_t s = 0; s < spectra.size(); ++s)
-      {
-        upper_peak_limit += spectra[s].size();
-      }
-      im_diffs.reserve(upper_peak_limit);
-
-      for (size_t s = 0; s < spectra.size(); ++s)
-      {
-        const MSSpectrum& spectrum = spectra[s];
-        // The mobilogram could have multiple ion mobility peaks at the same x position.
-        // Sum the peak intensity
-        MSSpectrum summed_trace;
-        sumFrame_(spectrum, summed_trace, sum_tolerance_im_, false);
-
-        if (summed_trace.size() < 20)
-        {
-#ifdef DEBUG_PICKER
-          OPENMS_LOG_DEBUG << "Skipping trace " << s << " because it has too few points ("
-                    << summed_trace.size() << ").\n";
-#endif
-          continue; // skip this mobilogram
-        }
-
-        for (size_t i = 1; i < summed_trace.size(); ++i)
-        {
-          double diff = summed_trace[i].getMZ() - summed_trace[i - 1].getMZ();
-          im_diffs.push_back(diff);
-        }
-        if (im_diffs.size() > 1000) break;
-      }
-
-      // If we found no valid im differences (traces too short)
-      if (im_diffs.empty())
-      {
-#ifdef DEBUG_PICKER
-        OPENMS_LOG_DEBUG << "Warning: No valid im differences found in any spectra. Using default sampling rate of 0.01\n";
-#endif
-        return 0.01; // Fallback value
-      }
-
-      // Sort the differences to compute the 75th percentile threshold
-      // This is needed in case there is a gap in the mobilogram. i+1 peak will skew the computed
-      // sampling rate.
-      std::sort(im_diffs.begin(), im_diffs.end());
-
-      size_t percentile_index = static_cast<size_t>(im_diffs.size() * 0.75);
-      double threshold = im_diffs[percentile_index];
-
-#ifdef DEBUG_PICKER
-      OPENMS_LOG_DEBUG << "75th percentile of position differences is: " << threshold << '\n';
-#endif
-
-      // Filter out large differences (keep diffs <= threshold)
-      vector<double> small_im_diffs;
-      for (double diff : im_diffs)
-      {
-        if (diff <= threshold)
-        {
-          small_im_diffs.push_back(diff);
-        }
-      }
-
-      if (small_im_diffs.empty())
-      {
-        OPENMS_LOG_WARN << "Warning: No valid small im differences found after filtering. Using default sampling rate of 0.01\n";
-        return 0.01;
-      }
-
-      // Compute the mode
-      std::unordered_map<double, int> freq_map;
-      for (double diff : small_im_diffs)
-      {
-        freq_map[diff]++;
-      }
-
-      double mode_sampling_rate = small_im_diffs.front();
-      int max_count = 0;
-
-      for (const auto& [diff, count] : freq_map)
-      {
-        if (count > max_count)
-        {
-          mode_sampling_rate = diff;
-          max_count = count;
-        }
-      }
-
-#ifdef DEBUG_PICKER
-      OPENMS_LOG_DEBUG << "Computed optimal sampling rate: " << mode_sampling_rate << '\n';
-#endif
-
-      return mode_sampling_rate;
-    }
-
     // Function to compute the lower and upper m/z bounds based on ppm tolerance
     std::pair<double, double> PeakPickerIM::ppmBounds(double mz, double ppm)
     {
@@ -240,15 +142,6 @@ namespace OpenMS
       }
       const auto [im_data_index, im_unit] = raw_spectrum.getIMData();
       const auto& ion_mobility_array = raw_spectrum.getFloatDataArrays()[im_data_index];
-
-      // Warn if CCS data with small tolerance (only once per PeakPickerIM instance)
-      if (im_unit == DriftTimeUnit::CCS && sum_tolerance_im_ < 1.0 && !ccs_warning_shown_)
-      {
-        OPENMS_LOG_WARN << "Warning: Ion mobility data is in CCS units (square angstroms), but sum_tolerance_im"
-                        << " = " << sum_tolerance_im_ << " appears to be set for 1/K0 data. "
-                        << "For CCS data, consider using larger values (e.g., 10-20 for clustering, 1.0 for summing)." << '\n';
-        ccs_warning_shown_ = true;
-      }
 
       // Vector of MSSpectra for each picked m/z peak (each spectrum is a mobilogram trace)
       std::vector<MSSpectrum> mobility_traces;
@@ -803,9 +696,9 @@ namespace OpenMS
         : DefaultParamHandler("PeakPickerIM")
     {
       // --- PickIMTraces parameters ---
-      defaults_.setValue("pickIMTraces:sum_tolerance_mz",        1.0,   "Tolerance for summing adjacent m/z peaks (ppm)");
-      defaults_.setValue("pickIMTraces:sum_tolerance_im",        0.0006,"Tolerance for summing adjacent ion mobility peaks (in 1/K0 units). For CCS data, use larger values (e.g., 1.0).");
-      defaults_.setValue("pickIMTraces:gauss_ppm_tolerance",     5.0,   "Gaussian smoothing m/z tolerance in ppm");
+      defaults_.setValue("pickIMTraces:sum_tolerance_mz",          1.0,  "Tolerance for summing adjacent m/z peaks (ppm)");
+      defaults_.setValue("pickIMTraces:mobilogram_sampling_grid", 0.01, "Grid spacing for linear resampling of mobilograms (in 1/K0 units).");
+      defaults_.setValue("pickIMTraces:gauss_ppm_tolerance",      5.0,  "Gaussian smoothing m/z tolerance in ppm");
       defaults_.setValue("pickIMTraces:sgolay_frame_length",     5,     "Savitzky-Golay smoothing frame length");
       defaults_.setValue("pickIMTraces:sgolay_polynomial_order", 3,     "Savitzky-Golay smoothing polynomial order");
       defaults_.setValue("pickIMTraces:include_unclaimed", "false",     "If set, include unpicked raw peaks into the centroided output. PickIMCluster will group unpicked peaks.");
@@ -823,9 +716,9 @@ namespace OpenMS
     }
     void PeakPickerIM::updateMembers_()
     {
-      sum_tolerance_mz_      = (double)param_.getValue("pickIMTraces:sum_tolerance_mz");
-      sum_tolerance_im_      = (double)param_.getValue("pickIMTraces:sum_tolerance_im");
-      gauss_ppm_tolerance_   = (double)param_.getValue("pickIMTraces:gauss_ppm_tolerance");
+      sum_tolerance_mz_         = (double)param_.getValue("pickIMTraces:sum_tolerance_mz");
+      mobilogram_sampling_grid_ = (double)param_.getValue("pickIMTraces:mobilogram_sampling_grid");
+      gauss_ppm_tolerance_      = (double)param_.getValue("pickIMTraces:gauss_ppm_tolerance");
       sgolay_frame_length_   = (int)param_.getValue("pickIMTraces:sgolay_frame_length");
       sgolay_polynomial_order_= (int)param_.getValue("pickIMTraces:sgolay_polynomial_order");
       include_unclaimed_ = param_.getValue("pickIMTraces:include_unclaimed").toBool();
@@ -1001,14 +894,12 @@ namespace OpenMS
 
       auto [mobilogram_traces, claimed] = PeakPickerIM::extractIonMobilityTraces(picked_spectrum, spectrum);
 
-      // Compute optimal sampling rate from the native spacing of mobilogram data points
-      double sampling_rate = computeOptimalSamplingRate(mobilogram_traces) * 5;
       Param resampler_param;
-      resampler_param.setValue("spacing", sampling_rate);
+      resampler_param.setValue("spacing", mobilogram_sampling_grid_);
       resampler_param.setValue("ppm", "false");
 
 #ifdef DEBUG_PICKER
-      OPENMS_LOG_DEBUG << "Using sampling rate... : " << sampling_rate << '\n';
+      OPENMS_LOG_DEBUG << "Using mobilogram sampling grid: " << mobilogram_sampling_grid_ << '\n';
 #endif
 
 #ifdef DEBUG_PICKER
@@ -1019,14 +910,8 @@ namespace OpenMS
 #endif
       // ************************************************* PART II *****************************************************
       // ------------------------------------------ Ion mobility peak picking ------------------------------------------
-      // ------------------------------------------ part 1b: sum ion mobility peaks ------------------------------------
-      // An extract ion mobilogram can have two peaks with identicial 1/k value and cuase issues in the peak picking steps.
-      // Example: if raw sampling rate is 0.0012 1/k -- then ion mobility peak 0.8800 1/k and 0.8806 1/k should be combined.
-      // Use 0.0006 1/k as default. This parameter may need to change depending on ion mobility ramp tamp
-      // (it is currently optimized for 100 ms ramp time)
 
-
-      // prepare picked ion mobility objects (we are internally using MSSpectrum object for downstram peak picking inputs).
+      // prepare picked ion mobility objects (we are internally using MSSpectrum object for downstream peak picking inputs).
       vector<MSSpectrum> picked_traces;
       // Remove empty traces that can occur when no raw peaks are found within the FWHM window
       // of a picked m/z peak during extractIonMobilityTraces()
@@ -1043,73 +928,52 @@ namespace OpenMS
         OPENMS_LOG_DEBUG << "\n--- Processing Trace " << i << " ---\n";
         OPENMS_LOG_DEBUG << "Original trace has " << trace.size() << " peaks.\n";
 #endif
-        MSSpectrum summed_trace;
-        summed_trace.reserve(trace.size() + 1);
-        summed_trace.emplace_back(-1.0, -1.0);
-        sumFrame_(trace, summed_trace, sampling_rate, false);
-#ifdef DEBUG_PICKER
-        OPENMS_LOG_DEBUG << "Trace after sumFrame_ has " << summed_trace.size() << " peaks.\n";
-#endif
         // ------------------------------------------ part 2b: smooth and resample --------------------------------
         // Prepare mobilograms for SGolay smoothing.
-        // To avoid edge effect, we will pad the edges with (sgolay_frame_length_ -1 / 2.0) points.
-        double im_start = summed_trace[1].getMZ();
-        double im_end = summed_trace.back().getMZ();
+        // To avoid edge effects, pad both edges with zero-intensity points at distance
+        // (sgolay_frame_length_ - 1) / 2 * mobilogram_sampling_grid_ from the data boundary.
+        // After linear resampling this produces (sgolay_frame_length_ - 1) / 2 zero-baseline
+        // nodes on each side, giving SGolay a valid window at the mobilogram edges.
+        double im_start = trace.front().getMZ();
+        double im_end = trace.back().getMZ();
 
 #ifdef DEBUG_PICKER
-        OPENMS_LOG_DEBUG << "Original summed trace ion mobility range: [" << im_start << ", " << im_end << "]\n";
+        OPENMS_LOG_DEBUG << "Ion mobility range: [" << im_start << ", " << im_end << "]\n";
 #endif
         int padding_points = static_cast<int>(std::ceil((sgolay_frame_length_ - 1) / 2.0));
 
-        Peak1D front_padding;
-        front_padding.setMZ(im_start - padding_points * sampling_rate);
-        front_padding.setIntensity(0.0);
-        summed_trace[0] = front_padding;
-
-        Peak1D back_padding;
-        back_padding.setMZ(im_end + padding_points * sampling_rate);
-        back_padding.setIntensity(0.0);
-        summed_trace.push_back(back_padding);
+        MSSpectrum padded_trace;
+        padded_trace.reserve(trace.size() + 2);
+        padded_trace.emplace_back(im_start - padding_points * mobilogram_sampling_grid_, 0.0);
+        for (const auto& peak : trace) padded_trace.push_back(peak);
+        padded_trace.emplace_back(im_end + padding_points * mobilogram_sampling_grid_, 0.0);
 
 #ifdef DEBUG_PICKER
-        OPENMS_LOG_DEBUG << "Padded summed trace im range: [" << summed_trace.front().getMZ() << ", " << summed_trace.back().getMZ() << "]\n";
+        OPENMS_LOG_DEBUG << "Padded trace im range: [" << padded_trace.front().getMZ() << ", " << padded_trace.back().getMZ() << "]\n";
 #endif
 
-        // linear resample to rescue weak signal
+        // Linear resample onto uniform grid; LinearResamplerAlign handles duplicate
+        // IM positions in the raw trace correctly (distributes intensity to bracketing nodes).
         LinearResamplerAlign lin_resampler;
         lin_resampler.setParameters(resampler_param);
-        lin_resampler.raster(summed_trace);
-        /*
-#ifdef DEBUG_PICKER
-        OPENMS_LOG_DEBUG << "Size of resampled trace: " << summed_trace.size() << " peaks.\n";
-        for (const auto& peak : summed_trace)
-        {
-          OPENMS_LOG_DEBUG << "m/z: " << peak.getMZ() << ", intensity: " << peak.getIntensity() << '\n';
-        }
-#endif
-*/
+        lin_resampler.raster(padded_trace);
+
         // SGolay smooth prior to peak picking
         SavitzkyGolayFilter sgolay_filter;
         Param sgolay_params;
         sgolay_params.setValue("frame_length", sgolay_frame_length_);
         sgolay_params.setValue("polynomial_order", sgolay_polynomial_order_);
         sgolay_filter.setParameters(sgolay_params);
-        sgolay_filter.filter(summed_trace);
+        sgolay_filter.filter(padded_trace);
 
 #ifdef DEBUG_PICKER
-        OPENMS_LOG_DEBUG << "Trace after Savitzky-Golay smoothing has " << summed_trace.size() << " peaks.\n";
-        for (const auto& peak : summed_trace)
+        OPENMS_LOG_DEBUG << "Trace after Savitzky-Golay smoothing has " << padded_trace.size() << " peaks.\n";
+        for (const auto& peak : padded_trace)
         {
           OPENMS_LOG_DEBUG << "m/z: " << peak.getMZ() << ", intensity: " << peak.getIntensity() << '\n';
         }
 #endif
         // ------------------------------------------ part 3b: im peak picking --------------------------------
-        // apply PeakPickerHiRes to pick ion mobility peaks.
-        // PeakPickerHiRes can be applied to chromatograms. We reasoned the same set of parameters ideal for
-        // chromatograms is also applicable for mobilograms.
-        // Each raw mobilogram contains a float data array with raw m/z values.
-        // We will use the ion mobility peak FWHM to define min/max ion mobility boundary
-        // and recompute the m/z center based on the ion mobility peak.
         PeakPickerHiRes picker_im;
         Param picker_im_p;
         picker_im_p.setValue("signal_to_noise", 0.0);
@@ -1121,7 +985,7 @@ namespace OpenMS
         picker_im.setParameters(picker_im_p);
 
         MSSpectrum picked_trace;
-        picker_im.pick(summed_trace, picked_trace);
+        picker_im.pick(padded_trace, picked_trace);
         picked_traces.push_back(std::move(picked_trace));
 #ifdef DEBUG_PICKER
         OPENMS_LOG_DEBUG << "--- Finished Processing Trace " << i << " ---\n\n";
