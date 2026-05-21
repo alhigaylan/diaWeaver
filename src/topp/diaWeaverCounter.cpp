@@ -181,7 +181,7 @@ protected:
       p_com.setValue("noise_threshold_int",       30.0,   "Intensity threshold below which peaks are regarded as noise.");
       p_com.setValue("chrom_peak_snr",             1.0,   "Minimum signal-to-noise a mass trace should have.");
       p_com.setValue("chrom_fwhm",                 3.0,   "Expected chromatographic peak width (in seconds).");
-      p_com.setValue("auto_noise_threshold",      "true", "Automatically estimate noise threshold from the input map.");
+      p_com.setValue("auto_noise_threshold",      "false", "Automatically estimate noise threshold from the input map.");
       p_com.setValidStrings("auto_noise_threshold", {"true", "false"});
       p_com.setValue("noise_estimation_n_scans",  50,     "Number of scans sampled to estimate noise when auto_noise_threshold is true.");
       p_com.setValue("noise_estimation_percentile", 80.0, "Intensity percentile used to define noise level from sampled scans.");
