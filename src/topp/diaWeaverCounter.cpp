@@ -162,8 +162,15 @@ protected:
     setMinFloat_("im_tolerance", 0.0);
 
     registerIntOption_("threads", "<n>", 1,
-                       "Number of threads for parallel window processing.", false);
+                       "Total number of threads to use for processing.", false);
     setMinInt_("threads", 1);
+
+    registerIntOption_("threads_outer_loop", "<n>", -1,
+                       "Number of threads for the outer loop (over DIA windows). "
+                       "Remaining threads are used for the inner loop (peak picking within each window). "
+                       "Set to -1 to use all threads in the outer loop only (no nested parallelism). "
+                       "Example: with 24 total threads and 4 outer threads, each window gets 6 threads "
+                       "for peak picking.", false);
 
     registerFlag_("aggregate_across_scans",
                   "If set, aggregate signal across neighboring scans using Gaussian weighting "
@@ -1051,9 +1058,29 @@ protected:
     const SignedSize total_windows = static_cast<SignedSize>(window_vec.size());
 
 #ifdef _OPENMP
-    omp_set_num_threads(getIntOption_("threads"));
-    OPENMS_LOG_INFO << "Processing " << total_windows << " windows with "
-                    << getIntOption_("threads") << " thread(s).\n";
+    const int num_threads          = getIntOption_("threads");
+    const int threads_outer_loop   = getIntOption_("threads_outer_loop");
+
+    int outer_threads = num_threads;
+    int inner_threads = 1;
+
+    if (threads_outer_loop > 0)
+    {
+      outer_threads = std::min(threads_outer_loop, num_threads);
+      inner_threads = std::max(1, num_threads / outer_threads);
+      omp_set_nested(1);
+      omp_set_dynamic(0);
+      OPENMS_LOG_INFO << "Using nested parallelism: " << outer_threads
+                      << " outer thread(s) x " << inner_threads
+                      << " inner thread(s) for peak picking.\n";
+    }
+    else
+    {
+      OPENMS_LOG_INFO << "Using " << outer_threads
+                      << " thread(s) for window processing (no nested parallelism).\n";
+    }
+
+    omp_set_num_threads(outer_threads);
 #endif
 
     bool had_error = false;  // set inside critical section if a window hits a fatal error
@@ -1082,48 +1109,64 @@ protected:
         MSExperiment win_exp_picked;
         win_exp_picked.resize(win_exp.size());
 
-        PeakPickerIM picker_im;
-        picker_im.setParameters(ppim_param);
-
-        for (Size s = 0; s < win_exp.size(); ++s)
+#ifdef _OPENMP
+#pragma omp parallel num_threads(inner_threads)
+#endif
         {
-          if (win_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
+          PeakPickerIM picker_im;
+          picker_im.setParameters(ppim_param);
+
+#ifdef _OPENMP
+#pragma omp for schedule(dynamic, 1)
+#endif
+          for (SignedSize s = 0; s < static_cast<SignedSize>(win_exp.size()); ++s)
           {
-            MSSpectrum aggregated;
-            aggregateSpectrum_(win_exp, s, picker_im, aggregated);
-            picker_im.pickIMTraces(aggregated);
-            win_exp_picked[s] = std::move(aggregated);
-          }
-          else
-          {
-            win_exp_picked[s] = win_exp[s];
+            if (win_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
+            {
+              MSSpectrum aggregated;
+              aggregateSpectrum_(win_exp, static_cast<Size>(s), picker_im, aggregated);
+              picker_im.pickIMTraces(aggregated);
+              win_exp_picked[s] = std::move(aggregated);
+            }
+            else
+            {
+              win_exp_picked[s] = win_exp[s];
+            }
           }
         }
         win_exp = std::move(win_exp_picked);
       }
       else
       {
-        PeakPickerIM    picker_im;
-        PeakPickerHiRes picker_hr;
-        if (im_info.available)
-          picker_im.setParameters(ppim_param);
-        else
-          picker_hr.setParameters(pphr_param);
-
-        for (auto& spec : win_exp)
+#ifdef _OPENMP
+#pragma omp parallel num_threads(inner_threads)
+#endif
         {
+          PeakPickerIM    picker_im;
+          PeakPickerHiRes picker_hr;
           if (im_info.available)
-          {
-            if (spec.getIMPeakType() != IMPeakType::IM_CENTROIDED)
-              picker_im.pickIMTraces(spec);
-          }
+            picker_im.setParameters(ppim_param);
           else
+            picker_hr.setParameters(pphr_param);
+
+#ifdef _OPENMP
+#pragma omp for schedule(dynamic, 1)
+#endif
+          for (SignedSize s = 0; s < static_cast<SignedSize>(win_exp.size()); ++s)
           {
-            if (spec.getType(true) != SpectrumSettings::SpectrumType::CENTROID)
+            if (im_info.available)
             {
-              MSSpectrum picked;
-              picker_hr.pick(spec, picked);
-              spec = std::move(picked);
+              if (win_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
+                picker_im.pickIMTraces(win_exp[s]);
+            }
+            else
+            {
+              if (win_exp[s].getType(true) != SpectrumSettings::SpectrumType::CENTROID)
+              {
+                MSSpectrum picked;
+                picker_hr.pick(win_exp[s], picked);
+                win_exp[s] = std::move(picked);
+              }
             }
           }
         }
@@ -1460,6 +1503,11 @@ protected:
         }
       }  // end critical section
     }  // end window loop
+
+#ifdef _OPENMP
+    if (threads_outer_loop > 0)
+      omp_set_num_threads(num_threads);  // restore total thread count
+#endif
 
     if (had_error) return INPUT_FILE_CORRUPT;
 
