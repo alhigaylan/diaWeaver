@@ -412,9 +412,9 @@ protected:
 
       if (spacing_ < min_dist)
       {
-        OPENMS_LOG_WARN << "Resampling spacing (" << spacing_
-                        << ") is smaller than the smallest distance between data points ("
-                        << min_dist << "). This approximates the detector dead time and may produce spurious peaks.\n";
+        OPENMS_LOG_DEBUG << "Resampling spacing (" << spacing_
+                         << ") is smaller than the smallest distance between data points ("
+                         << min_dist << "). This approximates the detector dead time and may produce spurious peaks.\n";
       }
     }
 
