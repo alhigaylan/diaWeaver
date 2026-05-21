@@ -627,7 +627,8 @@ protected:
     }
 
     OPENMS_LOG_INFO << "[diaWeaverCounter] Loaded " << entries.size()
-                    << " peptide entries from " << filename << "\n";
+                    << " peptide entries for run '" << run_id
+                    << "' from " << filename << "\n";
     return entries;
   }
 
@@ -1513,6 +1514,14 @@ protected:
 
     OPENMS_LOG_INFO << "Total MS2 traces: " << ms2_traces.size() << "\n";
 
+    // Count peptides that matched at least one trace
+    Size n_matched_peptides = 0;
+    for (Size pi = 0; pi < peptides.size(); ++pi)
+      if (pep_matched_ions[pi] > 0) ++n_matched_peptides;
+
+    OPENMS_LOG_INFO << "Peptides with >= 1 matched ion: "
+                    << n_matched_peptides << " / " << peptides.size() << "\n";
+
     // ------------------------------------------------------------------
     // Step 6: Derive per-trace and per-peptide aggregate metrics
     // ------------------------------------------------------------------
@@ -1563,6 +1572,8 @@ protected:
       << "Explained: " << n_explained << " / " << n_total
       << " traces (" << pct(n_explained, n_total) << " %)"
       << "  |  Orphan: " << n_orphan << " (" << pct(n_orphan, n_total) << " %)\n"
+      << "Peptides (input / with match): "
+      << peptides.size() << " / " << n_matched_peptides << "\n"
       << "See " << out_summary_file << " for full metrics.\n";
 
     // ------------------------------------------------------------------
@@ -1581,8 +1592,9 @@ protected:
           << "explained_traces\t"      << n_explained        << "\t" << pct(n_explained, n_total) << "\n"
           << "unique_traces\t"         << n_unique           << "\t" << pct(n_unique,    n_total) << "\n"
           << "ambiguous_traces\t"      << n_ambiguous        << "\t" << pct(n_ambiguous, n_total) << "\n"
-          << "unexplained_traces\t"    << n_orphan           << "\t" << pct(n_orphan,    n_total) << "\n"
-          << "total_peptides_mapped\t" << peptides.size()    << "\t\n";
+          << "unexplained_traces\t"          << n_orphan           << "\t" << pct(n_orphan,    n_total) << "\n"
+          << "total_peptides_input\t"        << peptides.size()    << "\t\n"
+          << "total_peptides_with_match\t"   << n_matched_peptides << "\t\n";
     }
 
     // ------------------------------------------------------------------
