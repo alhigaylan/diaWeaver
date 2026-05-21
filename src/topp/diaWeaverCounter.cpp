@@ -37,6 +37,7 @@ Output files:
 #include <OpenMS/KERNEL/MassTrace.h>
 #include <OpenMS/FEATUREFINDER/MassTraceDetection.h>
 #include <OpenMS/FEATUREFINDER/ElutionPeakDetection.h>
+#include <OpenMS/PROCESSING/CENTROIDING/PeakPickerIM.h>
 #include <OpenMS/PROCESSING/CENTROIDING/PeakPickerHiRes.h>
 #include <OpenMS/CHEMISTRY/TheoreticalSpectrumGenerator.h>
 #include <OpenMS/CHEMISTRY/AASequence.h>
@@ -164,11 +165,19 @@ protected:
                        "Number of threads for parallel window processing.", false);
     setMinInt_("threads", 1);
 
+    registerFlag_("aggregate_across_scans",
+                  "If set, aggregate signal across neighboring scans using Gaussian weighting "
+                  "before peak picking. Improves signal-to-noise for low-intensity peaks. "
+                  "Only effective when IM data are present (TimsTOF).", false);
+
     registerSubsection_("MassTraceExtractor",
                         "Parameters for per-window MS2 mass trace extraction (mirrors diaWeaver)");
 
+    registerSubsection_("PeakPickerIM",
+                        "Parameters for ion mobility peak picking (used when input has IM data)");
+
     registerSubsection_("PeakPickerHiRes",
-                        "Parameters for high-resolution peak picking applied to profile-mode MS2 spectra");
+                        "Parameters for high-resolution peak picking (used when input has no IM data)");
   }
 
   Param getSubsectionDefaults_(const String& section) const override
@@ -215,6 +224,11 @@ protected:
       combined.setSectionDescription("epd", "ElutionPeakDetection parameters");
 
       return combined;
+    }
+    if (section == "PeakPickerIM")
+    {
+      PeakPickerIM pp;
+      return pp.getDefaults();
     }
     if (section == "PeakPickerHiRes")
     {
@@ -805,6 +819,57 @@ protected:
   }
 
   // -------------------------------------------------------------------------
+  // Aggregate a single spectrum with its RT neighbors using Gaussian weighting.
+  // Reads from the immutable source experiment; safe to call from a parallel loop
+  // that writes picked results into a separate output experiment.
+  // Mirrors diaWeaver's aggregateSpectrum_ exactly.
+  // -------------------------------------------------------------------------
+  static void aggregateSpectrum_(
+    const MSExperiment& exp,
+    Size center_idx,
+    const PeakPickerIM& picker,
+    MSSpectrum& out)
+  {
+    if (center_idx >= exp.size()) return;
+
+    Param params = picker.getParameters();
+    double fwhm   = (double)params.getValue("aggregation:rt_FWHM");
+    double cutoff = (double)params.getValue("aggregation:cutoff");
+    double factor = -4.0 * std::log(2.0) / (fwhm * fwhm);
+
+    double center_rt = exp[center_idx].getRT();
+
+    std::vector<MSSpectrum> spectra_to_aggregate;
+    std::vector<double> weights;
+
+    // Search forward (including center)
+    for (Size j = center_idx; j < exp.size(); ++j)
+    {
+      double rt_diff = exp[j].getRT() - center_rt;
+      double weight  = std::exp(factor * rt_diff * rt_diff);
+      if (weight < cutoff && j != center_idx) break;
+      spectra_to_aggregate.push_back(exp[j]);
+      weights.push_back(weight);
+    }
+
+    // Search backward
+    for (SignedSize j = static_cast<SignedSize>(center_idx) - 1; j >= 0; --j)
+    {
+      double rt_diff = exp[j].getRT() - center_rt;
+      double weight  = std::exp(factor * rt_diff * rt_diff);
+      if (weight < cutoff) break;
+      spectra_to_aggregate.push_back(exp[j]);
+      weights.push_back(weight);
+    }
+
+    double sum_w = 0.0;
+    for (double w : weights) sum_w += w;
+    for (double& w : weights) w /= sum_w;
+
+    picker.aggregateScans(spectra_to_aggregate, weights, out);
+  }
+
+  // -------------------------------------------------------------------------
   // Mirrors diaWeaver's runMassTraceExtractor_: MTD + optional EPD.
   // Spectra in ms_peakmap must already be MSLevel=1 (extractSingleMS2Window
   // guarantees this). Traces are appended to traces_out.
@@ -866,9 +931,10 @@ protected:
     const String out_pep_file     = getStringOption_("out_peptides");
     const String out_coll_file    = getStringOption_("out_collisions");
 
-    const double mz_tol_ppm = getDoubleOption_("mz_tolerance");
-    const double rt_tol     = getDoubleOption_("rt_tolerance");
-    const double im_tol     = getDoubleOption_("im_tolerance");
+    const double mz_tol_ppm    = getDoubleOption_("mz_tolerance");
+    const double rt_tol        = getDoubleOption_("rt_tolerance");
+    const double im_tol        = getDoubleOption_("im_tolerance");
+    const bool   aggregate_scans = getFlag_("aggregate_across_scans");
 
     // ------------------------------------------------------------------
     // Step 1: Determine DIA windows via metadata scan (no full load).
@@ -893,6 +959,21 @@ protected:
       OPENMS_LOG_ERROR << "No DIA windows found in " << in_file
                        << ". Is this a DIA mzML?\n";
       return INCOMPATIBLE_INPUT_DATA;
+    }
+
+    if (im_info.available)
+    {
+      OPENMS_LOG_INFO << "Ion mobility data detected. Using PeakPickerIM.\n";
+      if (aggregate_scans)
+        OPENMS_LOG_INFO << "Aggregation across scans enabled. "
+                           "Signal will be boosted before peak picking.\n";
+    }
+    else
+    {
+      OPENMS_LOG_INFO << "No ion mobility data detected. Using PeakPickerHiRes.\n";
+      if (aggregate_scans)
+        OPENMS_LOG_WARN << "aggregate_across_scans is set but no IM data detected. "
+                           "Aggregation will be skipped.\n";
     }
 
     // ------------------------------------------------------------------
@@ -943,6 +1024,7 @@ protected:
     const Param mte_common = getParam_().copy("MassTraceExtractor:common:", true);
     const Param mte_mtd    = getParam_().copy("MassTraceExtractor:mtd:",    true);
     const Param mte_epd    = getParam_().copy("MassTraceExtractor:epd:",    true);
+    const Param ppim_param = getParam_().copy("PeakPickerIM:",              true);
     const Param pphr_param = getParam_().copy("PeakPickerHiRes:",           true);
 
     // ------------------------------------------------------------------
@@ -992,17 +1074,57 @@ protected:
       DiaWeaver::extractSingleMS2Window(on_disc, w, indices, im_info, win_exp);
       if (win_exp.empty()) continue;
 
-      if (!im_info.available)
+      if (aggregate_scans && im_info.available)
       {
-        PeakPickerHiRes picker;
-        picker.setParameters(pphr_param);
+        // Aggregate each spectrum with its RT neighbors (Gaussian weighting),
+        // then pick IM traces.  win_exp stays immutable as the source so that
+        // aggregateSpectrum_ always reads unmodified neighbors.
+        MSExperiment win_exp_picked;
+        win_exp_picked.resize(win_exp.size());
+
+        PeakPickerIM picker_im;
+        picker_im.setParameters(ppim_param);
+
+        for (Size s = 0; s < win_exp.size(); ++s)
+        {
+          if (win_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
+          {
+            MSSpectrum aggregated;
+            aggregateSpectrum_(win_exp, s, picker_im, aggregated);
+            picker_im.pickIMTraces(aggregated);
+            win_exp_picked[s] = std::move(aggregated);
+          }
+          else
+          {
+            win_exp_picked[s] = win_exp[s];
+          }
+        }
+        win_exp = std::move(win_exp_picked);
+      }
+      else
+      {
+        PeakPickerIM    picker_im;
+        PeakPickerHiRes picker_hr;
+        if (im_info.available)
+          picker_im.setParameters(ppim_param);
+        else
+          picker_hr.setParameters(pphr_param);
+
         for (auto& spec : win_exp)
         {
-          if (spec.getType(true) != SpectrumSettings::SpectrumType::CENTROID)
+          if (im_info.available)
           {
-            MSSpectrum picked;
-            picker.pick(spec, picked);
-            spec = std::move(picked);
+            if (spec.getIMPeakType() != IMPeakType::IM_CENTROIDED)
+              picker_im.pickIMTraces(spec);
+          }
+          else
+          {
+            if (spec.getType(true) != SpectrumSettings::SpectrumType::CENTROID)
+            {
+              MSSpectrum picked;
+              picker_hr.pick(spec, picked);
+              spec = std::move(picked);
+            }
           }
         }
       }
