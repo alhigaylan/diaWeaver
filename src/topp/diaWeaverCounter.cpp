@@ -62,7 +62,7 @@ and im_tolerance (1/K0).
 #include <OpenMS/CHEMISTRY/AASequence.h>
 #include <OpenMS/DATASTRUCTURES/KDTree.h>
 #include <OpenMS/CONCEPT/Constants.h>
-#include <OpenMS/MATH/STATISTICS/StatisticFunctions.h>
+#include <OpenMS/MATH/StatisticFunctions.h>
 
 #include <cmath>
 #include <fstream>
