@@ -9,12 +9,15 @@
 #pragma once
 
 #include <OpenMS/DATASTRUCTURES/DefaultParamHandler.h>
+#include <OpenMS/DATASTRUCTURES/String.h>
 #include <OpenMS/CONCEPT/ProgressLogger.h>
 #include <OpenMS/KERNEL/ConsensusMap.h>
 #include <OpenMS/KERNEL/FeatureMap.h>
 #include <OpenMS/KERNEL/MassTrace.h>
 #include <OpenMS/KERNEL/MSExperiment.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/MasstraceCorrelator.h>
+
+#include <vector>
 
 namespace OpenMS
 {
@@ -95,6 +98,40 @@ namespace OpenMS
              double swath_upper,
              MSExperiment& pseudo_spectra);
 
+    /**
+     * @brief Generate ion-accounted pseudo spectra split into orphan and annotated outputs.
+     *
+     * Identical scoring and correlation as run(FeatureMap, ...), but each pseudo spectrum
+     * is split into two flavours based on whether fragment traces were explained by an
+     * identified peptide.  The caller is responsible for pre-computing trace_claim_strings
+     * (one entry per element of ms2_traces): an empty string marks an orphan trace; a
+     * non-empty string carries the pre-formatted claim annotation for the corresponding peak
+     * (e.g. "PEPTIDER/2:y5[M+0];ANOTHERSEQ/3:b7[M+0]").
+     *
+     * Annotated pseudo spectra carry a StringDataArray named "peptide_ion_claims" with one
+     * entry per peak.  Orphan pseudo spectra have no extra arrays.
+     * Each output is subject to the min_nr_ions threshold independently.
+     *
+     * @param[in]  ms1_features          MS1 peptide features (FeatureFinderPeptide output)
+     * @param[in]  ms1_traces            MS1 mass traces (for elution profile extraction)
+     * @param[in]  ms2_traces            MS2 fragment mass traces
+     * @param[in]  trace_claim_strings   Per-trace annotation strings (size == ms2_traces.size())
+     * @param[in]  swath_lower           Lower m/z bound of the DIA isolation window
+     * @param[in]  swath_upper           Upper m/z bound of the DIA isolation window
+     * @param[out] orphan_spectra        Pseudo spectra retaining only unexplained fragment peaks
+     * @param[out] annotated_spectra     Pseudo spectra retaining only peptide-explained peaks
+     * @param[out] full_spectra          If non-null, also populated with all peaks (no split)
+     */
+    void run(const FeatureMap& ms1_features,
+             const std::vector<MassTrace>& ms1_traces,
+             const std::vector<MassTrace>& ms2_traces,
+             const std::vector<String>& trace_claim_strings,
+             double swath_lower,
+             double swath_upper,
+             MSExperiment& orphan_spectra,
+             MSExperiment& annotated_spectra,
+             MSExperiment* full_spectra = nullptr);
+
   protected:
 
     /// Update members after parameter change
@@ -138,6 +175,28 @@ namespace OpenMS
         double swath_upper,
         bool has_im_data,
         MSExperiment& pseudo_spectra);
+
+    /// Ion-accounting variant: splits output into orphan / annotated / (optionally) full spectra.
+    /// trace_claim_strings[j] is "" for orphan traces, otherwise the pre-formatted claim string.
+    void clusterAndCreateAccountedSpectra_(
+        const std::vector<MasstraceCorrelator::MasstracePointsType>& precursor_profiles,
+        const std::vector<double>& precursor_mz,
+        const std::vector<double>& precursor_rt,
+        const std::vector<double>& precursor_im,
+        const std::vector<int>& precursor_charge,
+        const std::vector<double>& precursor_intensity,
+        const std::vector<MasstraceCorrelator::MasstracePointsType>& fragment_profiles,
+        const std::vector<double>& fragment_mz,
+        const std::vector<double>& fragment_rt,
+        const std::vector<double>& fragment_im,
+        const std::vector<double>& fragment_intensity,
+        const std::vector<String>& trace_claim_strings,
+        double swath_lower,
+        double swath_upper,
+        bool has_im_data,
+        MSExperiment& orphan_spectra,
+        MSExperiment& annotated_spectra,
+        MSExperiment* full_spectra);
 
   private:
 

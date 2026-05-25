@@ -423,6 +423,134 @@ namespace OpenMS
         swath_lower, swath_upper, has_im_data, pseudo_spectra);
   }
 
+  void ClusterMassTracesByPrecursor::run(
+      const FeatureMap& ms1_features,
+      const std::vector<MassTrace>& ms1_traces,
+      const std::vector<MassTrace>& ms2_traces,
+      const std::vector<String>& trace_claim_strings,
+      double swath_lower,
+      double swath_upper,
+      MSExperiment& orphan_spectra,
+      MSExperiment& annotated_spectra,
+      MSExperiment* full_spectra)
+  {
+    if (ms1_features.empty() || ms2_traces.empty()) return;
+
+    // Build lookup map from trace label to MassTrace for O(log N) access
+    std::map<String, const MassTrace*> trace_lookup;
+    for (const auto& tr : ms1_traces)
+      trace_lookup[tr.getLabel()] = &tr;
+
+    bool has_im_data = false;
+    if (!ms1_features.empty())
+    {
+      const Feature& first = ms1_features[0];
+      if (first.metaValueExists(Constants::UserParam::ION_MOBILITY_CENTROID) ||
+          first.metaValueExists("masstrace_centroid_im"))
+        has_im_data = true;
+    }
+    if (!has_im_data && !ms2_traces.empty())
+      has_im_data = (ms2_traces[0].getCentroidIM() != 0.0);
+
+    std::vector<MasstraceCorrelator::MasstracePointsType> precursor_profiles;
+    std::vector<double> precursor_rt, precursor_mz, precursor_im;
+    std::vector<int>    precursor_charge;
+    std::vector<double> precursor_intensity;
+
+    for (Size i = 0; i < ms1_features.size(); ++i)
+    {
+      const Feature& f = ms1_features[i];
+      precursor_mz.push_back(f.getMZ());
+      precursor_rt.push_back(f.getRT());
+      precursor_charge.push_back(f.getCharge());
+      precursor_intensity.push_back(f.getIntensity());
+
+      if (has_im_data)
+      {
+        if (f.metaValueExists(Constants::UserParam::ION_MOBILITY_CENTROID))
+          precursor_im.push_back(f.getMetaValue(Constants::UserParam::ION_MOBILITY_CENTROID));
+        else if (f.metaValueExists("masstrace_centroid_im"))
+        {
+          std::vector<double> im_vals = f.getMetaValue("masstrace_centroid_im");
+          precursor_im.push_back(im_vals.empty() ? 0.0 : im_vals[0]);
+        }
+        else
+          precursor_im.push_back(0.0);
+      }
+      else
+        precursor_im.push_back(0.0);
+
+      MasstraceCorrelator::MasstracePointsType points;
+      if (f.metaValueExists("label"))
+      {
+        String feat_label = f.getMetaValue("label");
+        StringList label_tokens;
+        feat_label.split("_", label_tokens);
+        if (!label_tokens.empty())
+        {
+          auto it = trace_lookup.find(label_tokens[0]);
+          if (it != trace_lookup.end())
+          {
+            const MassTrace& mono_trace = *(it->second);
+            const std::vector<double>& smoothed = mono_trace.getSmoothedIntensities();
+            if (smooth_ms1_ && !smoothed.empty())
+            {
+              for (Size j = 0; j < mono_trace.getSize(); ++j)
+                points.push_back(std::make_pair(mono_trace[j].getRT(), smoothed[j]));
+            }
+            else
+            {
+              if (smooth_ms1_ && i == 0)
+                OPENMS_LOG_WARN << "[ClusterMassTracesByPrecursor] Smoothing requested for MS1 "
+                                << "but no EPD-smoothed intensities found. Using raw intensities." << std::endl;
+              for (const Peak2D& peak : mono_trace)
+                points.push_back(std::make_pair(peak.getRT(), peak.getIntensity()));
+            }
+          }
+        }
+      }
+      if (points.empty())
+        points.push_back(std::make_pair(f.getRT(), f.getIntensity()));
+
+      precursor_profiles.push_back(points);
+    }
+
+    std::vector<MasstraceCorrelator::MasstracePointsType> fragment_profiles;
+    std::vector<double> fragment_rt, fragment_mz, fragment_im, fragment_intensity;
+
+    if (smooth_ms2_ && !ms2_traces.empty() && ms2_traces[0].getSmoothedIntensities().empty())
+      OPENMS_LOG_WARN << "[ClusterMassTracesByPrecursor] Smoothing requested for MS2 "
+                      << "but no EPD-smoothed intensities found. Using raw intensities." << std::endl;
+
+    for (const auto& trace : ms2_traces)
+    {
+      MasstraceCorrelator::MasstracePointsType points;
+      const std::vector<double>& smoothed = trace.getSmoothedIntensities();
+      if (smooth_ms2_ && !smoothed.empty())
+      {
+        for (Size j = 0; j < trace.getSize(); ++j)
+          points.push_back(std::make_pair(trace[j].getRT(), smoothed[j]));
+      }
+      else
+      {
+        for (const Peak2D& peak : trace)
+          points.push_back(std::make_pair(peak.getRT(), peak.getIntensity()));
+      }
+      fragment_profiles.push_back(points);
+      fragment_rt.push_back(trace.getCentroidRT());
+      fragment_mz.push_back(trace.getCentroidMZ());
+      fragment_im.push_back(has_im_data ? trace.getCentroidIM() : 0.0);
+      fragment_intensity.push_back(trace.getIntensity(false));
+    }
+
+    clusterAndCreateAccountedSpectra_(
+        precursor_profiles, precursor_mz, precursor_rt, precursor_im, precursor_charge, precursor_intensity,
+        fragment_profiles, fragment_mz, fragment_rt, fragment_im, fragment_intensity,
+        trace_claim_strings,
+        swath_lower, swath_upper, has_im_data,
+        orphan_spectra, annotated_spectra, full_spectra);
+  }
+
   void ClusterMassTracesByPrecursor::clusterAndCreateSpectra_(
       const std::vector<MasstraceCorrelator::MasstracePointsType>& precursor_profiles,
       const std::vector<double>& precursor_mz,
@@ -738,6 +866,253 @@ namespace OpenMS
 
     OPENMS_LOG_INFO << "Created " << cnt_spectra << " pseudo spectra with more than "
                     << min_nr_ions_ << " fragment ions." << std::endl;
+  }
+
+  void ClusterMassTracesByPrecursor::clusterAndCreateAccountedSpectra_(
+      const std::vector<MasstraceCorrelator::MasstracePointsType>& precursor_profiles,
+      const std::vector<double>& precursor_mz,
+      const std::vector<double>& precursor_rt,
+      const std::vector<double>& precursor_im,
+      const std::vector<int>& precursor_charge,
+      const std::vector<double>& precursor_intensity,
+      const std::vector<MasstraceCorrelator::MasstracePointsType>& fragment_profiles,
+      const std::vector<double>& fragment_mz,
+      const std::vector<double>& fragment_rt,
+      const std::vector<double>& fragment_im,
+      const std::vector<double>& fragment_intensity,
+      const std::vector<String>& trace_claim_strings,
+      double swath_lower,
+      double swath_upper,
+      bool has_im_data,
+      MSExperiment& orphan_spectra,
+      MSExperiment& annotated_spectra,
+      MSExperiment* full_spectra)
+  {
+    MasstraceCorrelator mtcorr;
+
+    struct HullScore
+    {
+      int    index;
+      double pearson;
+      int    lag;
+      double lag_intensity;
+      double delta_rt;
+      double delta_im;
+    };
+
+    // -----------------------------------------------------------------------
+    // Steps 1-2: identical to clusterAndCreateSpectra_ — score and filter
+    // -----------------------------------------------------------------------
+    std::vector<std::vector<HullScore>> fragment_assignments(fragment_profiles.size());
+    std::map<int, std::vector<HullScore>> assignment_map;
+
+    startProgress(0, precursor_profiles.size(), "Assigning fragments to precursors (accounted)");
+    for (Size i = 0; i < precursor_profiles.size(); ++i)
+    {
+      setProgress(i);
+      if (precursor_mz[i] < swath_lower || precursor_mz[i] > swath_upper) continue;
+
+      double current_rt = precursor_rt[i];
+      for (Size j = 0; j < fragment_profiles.size(); ++j)
+      {
+        if (std::fabs(current_rt - fragment_rt[j]) > max_rt_apex_difference_) continue;
+        if (has_im_data && im_tolerance_ > 0)
+          if (std::fabs(precursor_im[i] - fragment_im[j]) > im_tolerance_) continue;
+        if (fragment_mz[j] >= swath_lower && fragment_mz[j] <= swath_upper) continue;
+
+        int lag; double lag_intensity, pearson_score;
+        mtcorr.scoreHullpoints(precursor_profiles[i], fragment_profiles[j],
+                               lag, lag_intensity, pearson_score,
+                               min_pearson_correlation_, max_lag_, rt_tolerance_);
+
+        if (pearson_score > min_pearson_correlation_ && lag >= -max_lag_ && lag <= max_lag_)
+        {
+          double delta_rt = std::fabs(precursor_rt[i] - fragment_rt[j]);
+          double delta_im = has_im_data ? std::fabs(precursor_im[i] - fragment_im[j]) : 0.0;
+          fragment_assignments[j].push_back({static_cast<int>(i), pearson_score, lag, lag_intensity, delta_rt, delta_im});
+        }
+      }
+    }
+    endProgress();
+
+    double pearson_range = 1.0 - min_pearson_correlation_;
+    Size cnt_filtered = 0;
+    for (Size j = 0; j < fragment_assignments.size(); ++j)
+    {
+      if (fragment_assignments[j].size() > nr_precursors_per_fragment_)
+      {
+        ++cnt_filtered;
+        std::sort(fragment_assignments[j].begin(), fragment_assignments[j].end(),
+                  [&](const HullScore& a, const HullScore& b)
+                  {
+                    if (!use_combined_scores_) return a.pearson > b.pearson;
+                    auto score = [&](const HullScore& hs)
+                    {
+                      double np = (hs.pearson - min_pearson_correlation_) / pearson_range;
+                      double nr = 1.0 - (hs.delta_rt / max_rt_apex_difference_);
+                      double ni = (has_im_data && im_tolerance_ > 0) ? 1.0 - (hs.delta_im / im_tolerance_) : 1.0;
+                      return (pearson_weight_ * np) + (delta_rt_weight_ * nr) + (delta_im_weight_ * ni);
+                    };
+                    return score(a) > score(b);
+                  });
+        fragment_assignments[j].resize(nr_precursors_per_fragment_);
+      }
+    }
+    if (cnt_filtered > 0)
+      OPENMS_LOG_INFO << "Filtered " << cnt_filtered << " fragments assigned to more than "
+                      << nr_precursors_per_fragment_ << " precursors." << std::endl;
+
+    assignment_map.clear();
+    for (Size j = 0; j < fragment_assignments.size(); ++j)
+      for (const auto& hs : fragment_assignments[j])
+        assignment_map[hs.index].push_back({static_cast<int>(j), hs.pearson, hs.lag, hs.lag_intensity, hs.delta_rt, hs.delta_im});
+
+    // -----------------------------------------------------------------------
+    // Step 3 (modified): build split spectra per precursor
+    // -----------------------------------------------------------------------
+    static const std::array<const char*, 5> score_names = {
+      "pearson_score", "xcorr_lag", "xcorr_lag_intensity", "delta_rt", "delta_im"
+    };
+
+    int cnt_spectra = 0;
+    startProgress(0, precursor_profiles.size(), "Creating accounted pseudo spectra");
+    for (Size i = 0; i < precursor_profiles.size(); ++i)
+    {
+      setProgress(i);
+      if (precursor_mz[i] < swath_lower || precursor_mz[i] > swath_upper) continue;
+
+      auto& assignments = assignment_map[i];
+      if (assignments.size() < min_nr_ions_) continue;
+
+      if (max_nr_ions_ > 0 && assignments.size() > max_nr_ions_)
+      {
+        std::sort(assignments.begin(), assignments.end(),
+                  [&](const HullScore& a, const HullScore& b)
+                  {
+                    if (!use_combined_scores_) return a.pearson > b.pearson;
+                    auto score = [&](const HullScore& hs)
+                    {
+                      double np = (hs.pearson - min_pearson_correlation_) / pearson_range;
+                      double nr = 1.0 - (hs.delta_rt / max_rt_apex_difference_);
+                      double ni = (has_im_data && im_tolerance_ > 0) ? 1.0 - (hs.delta_im / im_tolerance_) : 1.0;
+                      return (pearson_weight_ * np) + (delta_rt_weight_ * nr) + (delta_im_weight_ * ni);
+                    };
+                    return score(a) > score(b);
+                  });
+        assignments.resize(max_nr_ions_);
+      }
+
+      // Shared precursor metadata
+      auto makePrecursor = [&]() -> MSSpectrum {
+        MSSpectrum s;
+        s.setRT(precursor_rt[i]);
+        s.setMSLevel(2);
+        s.setType(SpectrumSettings::SpectrumType::CENTROID);
+        if (has_im_data) s.setDriftTime(precursor_im[i]);
+        Precursor p;
+        p.setMZ(precursor_mz[i]);
+        p.setCharge(precursor_charge[i]);
+        p.setIntensity(precursor_intensity[i]);
+        if (has_im_data) { p.setDriftTime(precursor_im[i]); p.setDriftTimeUnit(DriftTimeUnit::VSSC); }
+        s.setPrecursors({p});
+        return s;
+      };
+
+      MSSpectrum orphan_spec    = makePrecursor();
+      MSSpectrum annotated_spec = makePrecursor();
+      MSSpectrum full_spec;
+      if (full_spectra != nullptr) full_spec = makePrecursor();
+
+      // StringDataArray for annotated peaks
+      MSSpectrum::StringDataArray claim_array;
+      claim_array.setName("peptide_ion_claims");
+
+      // FloatDataArrays (optional scores) — parallel arrays, split per output
+      std::vector<std::vector<float>> orphan_scores(5), annotated_scores(5), full_scores(5);
+
+      for (const auto& hs : assignments)
+      {
+        Peak1D peak;
+        peak.setMZ(fragment_mz[hs.index]);
+        peak.setIntensity(fragment_intensity[hs.index]);
+
+        const bool explained = (static_cast<Size>(hs.index) < trace_claim_strings.size()) &&
+                               !trace_claim_strings[hs.index].empty();
+
+        if (explained)
+        {
+          annotated_spec.push_back(peak);
+          claim_array.push_back(trace_claim_strings[hs.index]);
+          if (output_fragment_scores_)
+          {
+            annotated_scores[0].push_back(static_cast<float>(hs.pearson));
+            annotated_scores[1].push_back(static_cast<float>(hs.lag));
+            annotated_scores[2].push_back(static_cast<float>(hs.lag_intensity));
+            annotated_scores[3].push_back(static_cast<float>(hs.delta_rt));
+            annotated_scores[4].push_back(static_cast<float>(hs.delta_im));
+          }
+        }
+        else
+        {
+          orphan_spec.push_back(peak);
+          if (output_fragment_scores_)
+          {
+            orphan_scores[0].push_back(static_cast<float>(hs.pearson));
+            orphan_scores[1].push_back(static_cast<float>(hs.lag));
+            orphan_scores[2].push_back(static_cast<float>(hs.lag_intensity));
+            orphan_scores[3].push_back(static_cast<float>(hs.delta_rt));
+            orphan_scores[4].push_back(static_cast<float>(hs.delta_im));
+          }
+        }
+
+        if (full_spectra != nullptr)
+        {
+          full_spec.push_back(peak);
+          if (output_fragment_scores_)
+          {
+            full_scores[0].push_back(static_cast<float>(hs.pearson));
+            full_scores[1].push_back(static_cast<float>(hs.lag));
+            full_scores[2].push_back(static_cast<float>(hs.lag_intensity));
+            full_scores[3].push_back(static_cast<float>(hs.delta_rt));
+            full_scores[4].push_back(static_cast<float>(hs.delta_im));
+          }
+        }
+      }
+
+      // Attach StringDataArray to annotated spectrum
+      if (!claim_array.empty())
+        annotated_spec.getStringDataArrays().push_back(claim_array);
+
+      // Attach FloatDataArrays if requested
+      auto attachScores = [&](MSSpectrum& spec, std::vector<std::vector<float>>& scores)
+      {
+        if (!output_fragment_scores_ || scores[0].empty()) return;
+        spec.getFloatDataArrays().resize(5);
+        for (Size k = 0; k < 5; ++k)
+        {
+          spec.getFloatDataArrays()[k].setName(score_names[k]);
+          spec.getFloatDataArrays()[k].insert(
+            spec.getFloatDataArrays()[k].end(), scores[k].begin(), scores[k].end());
+        }
+      };
+      attachScores(orphan_spec,    orphan_scores);
+      attachScores(annotated_spec, annotated_scores);
+      if (full_spectra != nullptr) attachScores(full_spec, full_scores);
+
+      if (orphan_spec.size() >= min_nr_ions_)    orphan_spectra.addSpectrum(orphan_spec);
+      if (annotated_spec.size() >= min_nr_ions_) annotated_spectra.addSpectrum(annotated_spec);
+      if (full_spectra != nullptr && full_spec.size() >= min_nr_ions_)
+        full_spectra->addSpectrum(full_spec);
+
+      ++cnt_spectra;
+    }
+    endProgress();
+
+    OPENMS_LOG_INFO << "Created " << cnt_spectra << " precursor entries; "
+                    << orphan_spectra.size() << " orphan spectra, "
+                    << annotated_spectra.size() << " annotated spectra"
+                    << (full_spectra ? (", " + String(full_spectra->size()) + " full spectra") : String(""))
+                    << "." << std::endl;
   }
 
 } // namespace OpenMS
