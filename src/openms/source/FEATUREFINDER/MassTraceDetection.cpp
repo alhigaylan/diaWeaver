@@ -30,11 +30,7 @@ namespace OpenMS
             DefaultParamHandler("MassTraceDetection"), ProgressLogger()
     {
       defaults_.setValue("mass_error_ppm", 20.0, "Allowed mass deviation (in ppm).");
-      defaults_.setValue("noise_threshold_int", 10.0, "Intensity threshold below which peaks are removed as noise. Ignored if auto_noise_threshold is true.");
-      defaults_.setValue("auto_noise_threshold", "true", "If true, automatically estimates the noise threshold from the input map using random scan sampling. Overrides noise_threshold_int.");
-      defaults_.setValidStrings("auto_noise_threshold", {"true","false"});
-      defaults_.setValue("noise_estimation_n_scans", 50, "Number of scans randomly sampled to estimate the noise level when auto_noise_threshold is true.", {"advanced"});
-      defaults_.setValue("noise_estimation_percentile", 80.0, "Intensity percentile used to define the noise level from sampled scans when auto_noise_threshold is true.", {"advanced"});
+      defaults_.setValue("noise_threshold_int", 10.0, "Intensity threshold below which peaks are removed as noise.");
       defaults_.setValue("chrom_peak_snr", 3.0, "Minimum intensity above noise_threshold_int (signal-to-noise) a peak should have to be considered an apex.");
       defaults_.setValue("ion_mobility_tolerance", 0.01, "Allowed ion mobility deviation (in 1/K0 units, e.g., 0.01-0.05). For CCS data, use larger values (e.g., 2-10 square angstroms).");
 
@@ -205,21 +201,6 @@ namespace OpenMS
     {
       // make sure the output vector is empty
       found_masstraces.clear();
-
-      // Optionally auto-estimate the noise threshold from the input map
-      if (auto_noise_threshold_)
-      {
-        double estimated = estimateNoiseLevel_(input_exp, noise_estimation_n_scans_, noise_estimation_percentile_);
-        if (estimated > 0.0)
-        {
-          noise_threshold_int_ = estimated;
-          OPENMS_LOG_INFO << "MassTraceDetection: auto noise threshold estimated as " << noise_threshold_int_ << std::endl;
-        }
-        else
-        {
-          OPENMS_LOG_WARN << "MassTraceDetection: noise estimation failed, using noise_threshold_int = " << noise_threshold_int_ << std::endl;
-        }
-      }
 
       // Check IM unit and warn if CCS data with small tolerance (single-threaded check at algorithm start)
       for (const auto& spec : input_exp)
@@ -726,51 +707,10 @@ namespace OpenMS
     }
 
 
-    double MassTraceDetection::estimateNoiseLevel_(const PeakMap& exp, UInt n_scans, double percentile, Size min_peaks)
-    {
-      std::vector<Size> spec_indices;
-      for (Size i = 0; i < exp.size(); ++i)
-      {
-        if (exp[i].getMSLevel() == 1 && exp[i].size() >= min_peaks)
-        {
-          spec_indices.push_back(i);
-        }
-      }
-
-      if (spec_indices.empty())
-      {
-        OPENMS_LOG_WARN << "MassTraceDetection: no spectra with >= " << min_peaks
-                        << " peaks found for noise estimation. Falling back to noise_threshold_int." << std::endl;
-        return 0.0;
-      }
-
-      std::default_random_engine generator(time(nullptr));
-      std::uniform_real_distribution<double> distribution(0.0, 1.0);
-
-      double noise = 0.0;
-      std::vector<float> tmp;
-      for (UInt count = 0; count < n_scans; ++count)
-      {
-        UInt scan = (UInt)(distribution(generator) * (spec_indices.size() - 1));
-        tmp.clear();
-        for (const auto& peak : exp[spec_indices[scan]])
-        {
-          tmp.push_back(peak.getIntensity());
-        }
-        Size idx = tmp.size() * percentile / 100.0;
-        std::nth_element(tmp.begin(), tmp.begin() + idx, tmp.end());
-        noise += tmp[idx];
-      }
-      return noise / n_scans;
-    }
-
     void MassTraceDetection::updateMembers_()
     {
       mass_error_ppm_ = (double)param_.getValue("mass_error_ppm");
       noise_threshold_int_ = (double)param_.getValue("noise_threshold_int");
-      auto_noise_threshold_ = param_.getValue("auto_noise_threshold").toBool();
-      noise_estimation_n_scans_ = (UInt)param_.getValue("noise_estimation_n_scans");
-      noise_estimation_percentile_ = (double)param_.getValue("noise_estimation_percentile");
       chrom_peak_snr_ = (double)param_.getValue("chrom_peak_snr");
       ion_mobility_tolerance_ = (double)param_.getValue("ion_mobility_tolerance");
       quant_method_ = MassTrace::getQuantMethod((String)param_.getValue("quant_method").toString());

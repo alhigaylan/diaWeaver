@@ -124,9 +124,6 @@ namespace OpenMS
           TraceExtensionState() : scan_counter(0), hitting_peak_count(0), consecutive_missed(0), active(true) {}
         };
 
-        /// Estimates the noise level by sampling random scans from the experiment.
-        /// Only spectra with at least min_peaks peaks are considered.
-        static double estimateNoiseLevel_(const PeakMap& exp, UInt n_scans, double percentile, Size min_peaks = 100);
 
         /// The internal run method
         void run_(const std::vector<Apex>& chrom_apices,
@@ -191,9 +188,6 @@ namespace OpenMS
         double mass_error_ppm_;
         double mass_error_da_;
         double noise_threshold_int_;
-        bool auto_noise_threshold_;
-        UInt noise_estimation_n_scans_;
-        double noise_estimation_percentile_;
         double chrom_peak_snr_;
         double ion_mobility_tolerance_;
         MassTrace::MT_QUANTMETHOD quant_method_;

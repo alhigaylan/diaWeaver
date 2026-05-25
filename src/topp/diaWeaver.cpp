@@ -285,13 +285,9 @@ protected:
 
       // Common parameters for all FFP sub-algorithms
       Param p_com;
-      p_com.setValue("noise_threshold_int", 60.0, "Intensity threshold below which peaks are regarded as noise. Ignored if auto_noise_threshold is true.");
+      p_com.setValue("noise_threshold_int", 60.0, "Intensity threshold below which peaks are regarded as noise.");
       p_com.setValue("chrom_peak_snr", 1.0, "Minimum signal-to-noise a mass trace should have.");
       p_com.setValue("chrom_fwhm", 5.0, "Expected chromatographic peak width (in seconds).");
-      p_com.setValue("auto_noise_threshold", "true", "If true, automatically estimates the noise threshold from the input map using random scan sampling. Overrides noise_threshold_int.");
-      p_com.setValidStrings("auto_noise_threshold", {"true", "false"});
-      p_com.setValue("noise_estimation_n_scans", 50, "Number of scans randomly sampled to estimate the noise level when auto_noise_threshold is true.");
-      p_com.setValue("noise_estimation_percentile", 80.0, "Intensity percentile used to define the noise level from sampled scans when auto_noise_threshold is true.");
       combined.insert("common:", p_com);
       combined.setSectionDescription("common", "Common parameters for all other subsections");
 
@@ -316,6 +312,7 @@ protected:
       // ElutionPeakDetection parameters
       Param p_epd;
       p_epd.setValue("enabled", "true", "Enable splitting of isobaric mass traces by chromatographic peak detection. Disable for direct injection.");
+
       p_epd.setValue("width_filtering", "off", "Enable filtering of unlikely peak widths. The fixed setting filters out mass traces outside the [min_fwhm, max_fwhm] interval (set parameters accordingly!). The auto setting filters with the 5 and 95% quantiles of the peak width distribution.");
       p_epd.setValidStrings("enabled", {"true", "false"});
       p_epd.insert("", ElutionPeakDetection().getDefaults());
@@ -355,13 +352,9 @@ protected:
 
       // Common parameters
       Param p_com;
-      p_com.setValue("noise_threshold_int", 30.0, "Intensity threshold below which peaks are regarded as noise. Ignored if auto_noise_threshold is true.");
+      p_com.setValue("noise_threshold_int", 30.0, "Intensity threshold below which peaks are regarded as noise.");
       p_com.setValue("chrom_peak_snr", 1.0, "Minimum signal-to-noise a mass trace should have.");
       p_com.setValue("chrom_fwhm", 3.0, "Expected chromatographic peak width (in seconds).");
-      p_com.setValue("auto_noise_threshold", "true", "If true, automatically estimates the noise threshold from the input map using random scan sampling. Overrides noise_threshold_int.");
-      p_com.setValidStrings("auto_noise_threshold", {"true", "false"});
-      p_com.setValue("noise_estimation_n_scans", 50, "Number of scans randomly sampled to estimate the noise level when auto_noise_threshold is true.");
-      p_com.setValue("noise_estimation_percentile", 80.0, "Intensity percentile used to define the noise level from sampled scans when auto_noise_threshold is true.");
 
       combined.insert("common:", p_com);
       combined.setSectionDescription("common", "Common parameters for all other subsections");
