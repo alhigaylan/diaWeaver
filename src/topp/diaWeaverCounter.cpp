@@ -756,12 +756,14 @@ protected:
           const String ion_name = ion_names[ion_i];
           const int    frag_z   = frag_charges[ion_i];
 
-          recordHits(queryAndRecord(mz_mono, ion_name + "[M+0]", pep.rt, pep.im), ion_name + "[M+0]");
-          for (int iso = 1; iso <= 3; ++iso)
+          auto prev_hits = queryAndRecord(mz_mono, ion_name + "[M+0]", pep.rt, pep.im);
+          recordHits(prev_hits, ion_name + "[M+0]");
+          for (int iso = 1; iso <= 3 && !prev_hits.empty(); ++iso)
           {
             const double mz_iso = mz_mono + iso * Constants::C13C12_MASSDIFF_U / frag_z;
             const String iso_label = ion_name + "[M+" + String(iso) + "]";
-            recordHits(queryAndRecord(mz_iso, iso_label, pep.rt, pep.im), iso_label);
+            prev_hits = queryAndRecord(mz_iso, iso_label, pep.rt, pep.im);
+            recordHits(prev_hits, iso_label);
           }
         }
       }
@@ -798,12 +800,14 @@ protected:
             if (seen_labels.count(ion_label)) continue;
             seen_labels.insert(ion_label);
 
-            recordHits(queryAndRecord(mz_mono, ion_label + "[M+0]", pep.rt, pep.im), ion_label + "[M+0]");
-            for (int iso = 1; iso <= 3; ++iso)
+            auto prev_hits = queryAndRecord(mz_mono, ion_label + "[M+0]", pep.rt, pep.im);
+            recordHits(prev_hits, ion_label + "[M+0]");
+            for (int iso = 1; iso <= 3 && !prev_hits.empty(); ++iso)
             {
               const double mz_iso = mz_mono + iso * Constants::C13C12_MASSDIFF_U / frag_z;
-              const String iso_label = ion_label + "[M+" + String(iso) + "]";
-              recordHits(queryAndRecord(mz_iso, iso_label, pep.rt, pep.im), iso_label);
+              const String iso_label_i = ion_label + "[M+" + String(iso) + "]";
+              prev_hits = queryAndRecord(mz_iso, iso_label_i, pep.rt, pep.im);
+              recordHits(prev_hits, iso_label_i);
             }
           }
         }
