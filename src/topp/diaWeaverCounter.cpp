@@ -110,6 +110,19 @@ struct PeptideEntry
   std::vector<int>    localization_candidates;
 };
 
+// ---------------------------------------------------------------------------
+// Per-window ion accounting tallies
+// ---------------------------------------------------------------------------
+struct WindowStats
+{
+  double lower_mz      = 0.0;
+  double upper_mz      = 0.0;
+  Size   traces_total  = 0;
+  Size   traces_orphan = 0;  ///< trace_claim_strings[i] == ""
+  Size   traces_annotated  = 0;  ///< claimed by ≥1 peptide
+  Size   traces_ambiguous  = 0;  ///< claimed by ≥2 distinct peptides
+};
+
 // ===========================================================================
 
 class TOPPDiaWeaverCounter : public TOPPBase
@@ -623,6 +636,42 @@ protected:
   }
 
   // -------------------------------------------------------------------------
+  // Count distinct peptide IDs in a semicolon-separated claim string.
+  // A claim string has the form "SEQ/z:ion[iso];SEQ/z:ion[iso];..."
+  // Returns 0 for empty strings (orphan traces).
+  // -------------------------------------------------------------------------
+  static Size countDistinctPeptides_(const String& claim_str)
+  {
+    if (claim_str.empty()) return 0;
+    std::vector<String> parts;
+    claim_str.split(";", parts);
+    std::set<String> pep_ids;
+    for (const String& part : parts)
+    {
+      Size colon = part.find(':');
+      if (colon != String::npos) pep_ids.insert(part.prefix(colon));
+    }
+    return pep_ids.size();
+  }
+
+  // -------------------------------------------------------------------------
+  // Fill WindowStats from a finalized trace_claim_strings vector.
+  // -------------------------------------------------------------------------
+  static void tallyTraces_(const std::vector<String>& trace_claim_strings, WindowStats& ws)
+  {
+    ws.traces_total = trace_claim_strings.size();
+    for (const String& s : trace_claim_strings)
+    {
+      if (s.empty()) { ++ws.traces_orphan; }
+      else
+      {
+        ++ws.traces_annotated;
+        if (countDistinctPeptides_(s) >= 2) ++ws.traces_ambiguous;
+      }
+    }
+  }
+
+  // -------------------------------------------------------------------------
   // Ion accounting: build trace_claim_strings for one window's ms2_traces.
   //
   // For each trace index i, trace_claim_strings[i] is either "" (orphan)
@@ -805,6 +854,12 @@ protected:
                         "Leave empty to skip (default).", false);
     setValidFormats_("out_full", {"mzML"});
 
+    registerOutputFile_("out_summary", "<file>", "",
+                        "Output TSV: per-window and global ion accounting summary "
+                        "(traces_total, traces_orphan, traces_annotated, traces_ambiguous). "
+                        "Leave empty to skip (default).", false);
+    setValidFormats_("out_summary", {"tsv"});
+
     // --- Ion accounting tolerances ---
     registerDoubleOption_("mz_tolerance", "<ppm>", 20.0,
                           "Fragment ion m/z tolerance for peptide-to-trace mapping (±, ppm)", false);
@@ -984,6 +1039,7 @@ protected:
     const String out_orphan  = getStringOption_("out_orphan");
     const String out_ann     = getStringOption_("out_annotated");
     const String out_full    = getStringOption_("out_full");
+    const String out_summary = getStringOption_("out_summary");
 
     const double mz_tol      = getDoubleOption_("mz_tolerance");
     const double rt_tol      = getDoubleOption_("rt_tolerance");
@@ -1073,6 +1129,9 @@ protected:
     std::vector<std::pair<DiaWeaver::DIAWindow, std::vector<Size>>> window_vec(
       windows.begin(), windows.end());
     const Size total_windows = window_vec.size();
+
+    // Per-window ion accounting tallies (each idx written by exactly one thread)
+    std::vector<WindowStats> win_stats(total_windows);
 
     // ------------------------------------------------------------------
     // Step 3: Output consumers
@@ -1208,6 +1267,14 @@ protected:
         }
         else
           trace_claim_strings.assign(ms2_traces.size(), String());
+
+        // Tally ion accounting stats for this window (no critical section needed — unique idx)
+        {
+          WindowStats& ws = win_stats[idx];
+          ws.lower_mz = w.lower_mz;
+          ws.upper_mz = w.upper_mz;
+          tallyTraces_(trace_claim_strings, ws);
+        }
 
         // ---- 3d: Extract + peak-pick MS1 ----
         MSExperiment ms1_exp;
@@ -1346,7 +1413,57 @@ protected:
                     << " pseudo spectra." << std::endl;
 
     // ------------------------------------------------------------------
-    // Step 4: Sort, re-ID, compress and rewrite each output
+    // Step 4: Write ion accounting summary TSV (if requested)
+    // ------------------------------------------------------------------
+    if (!out_summary.empty())
+    {
+      // Sort windows by lower m/z for a readable table
+      std::sort(win_stats.begin(), win_stats.end(),
+                [](const WindowStats& a, const WindowStats& b){ return a.lower_mz < b.lower_mz; });
+
+      WindowStats totals;
+      totals.lower_mz = 0.0; totals.upper_mz = 0.0;
+      for (const WindowStats& ws : win_stats)
+      {
+        totals.traces_total      += ws.traces_total;
+        totals.traces_orphan     += ws.traces_orphan;
+        totals.traces_annotated  += ws.traces_annotated;
+        totals.traces_ambiguous  += ws.traces_ambiguous;
+      }
+
+      std::ofstream tsv(out_summary.c_str());
+      if (!tsv.is_open())
+      {
+        OPENMS_LOG_ERROR << "Cannot write summary TSV: " << out_summary << "\n";
+      }
+      else
+      {
+        tsv << "window_mz_lower\twindow_mz_upper\ttraces_total\ttraces_orphan\t"
+               "traces_annotated\ttraces_ambiguous\n";
+        for (const WindowStats& ws : win_stats)
+        {
+          tsv << ws.lower_mz     << "\t"
+              << ws.upper_mz     << "\t"
+              << ws.traces_total << "\t"
+              << ws.traces_orphan << "\t"
+              << ws.traces_annotated << "\t"
+              << ws.traces_ambiguous << "\n";
+        }
+        tsv << "TOTAL\tTOTAL\t"
+            << totals.traces_total     << "\t"
+            << totals.traces_orphan    << "\t"
+            << totals.traces_annotated << "\t"
+            << totals.traces_ambiguous << "\n";
+        OPENMS_LOG_INFO << "Summary TSV written: " << out_summary << "\n"
+                        << "  Total traces  : " << totals.traces_total     << "\n"
+                        << "  Orphan        : " << totals.traces_orphan    << "\n"
+                        << "  Annotated     : " << totals.traces_annotated << "\n"
+                        << "  Ambiguous (2+ peptides): " << totals.traces_ambiguous << "\n";
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // Step 5: Sort, re-ID, compress and rewrite each output
     // ------------------------------------------------------------------
     auto sortAndRewrite = [&](const String& path, Size n_written)
     {
