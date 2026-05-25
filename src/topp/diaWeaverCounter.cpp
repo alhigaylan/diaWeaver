@@ -62,6 +62,7 @@ and im_tolerance (1/K0).
 #include <OpenMS/CHEMISTRY/AASequence.h>
 #include <OpenMS/DATASTRUCTURES/KDTree.h>
 #include <OpenMS/CONCEPT/Constants.h>
+#include <OpenMS/MATH/STATISTICS/StatisticFunctions.h>
 
 #include <cmath>
 #include <fstream>
@@ -655,6 +656,32 @@ protected:
   }
 
   // -------------------------------------------------------------------------
+  // Pearson correlation between two MassTrace elution profiles.
+  // Aligns by RT (same approach as FeatureFindingPeptide::scoreRT_): iterates
+  // both traces in parallel, pairing points whose RTs agree within 0.5 s.
+  // Returns 0 if fewer than 3 matched points exist.
+  // -------------------------------------------------------------------------
+  static double pearsonOfTraces_(const MassTrace& t1, const MassTrace& t2)
+  {
+    std::vector<double> vec1, vec2;
+    auto it1 = t1.begin(), it2 = t2.begin();
+    while (it1 != t1.end() && it2 != t2.end())
+    {
+      const double rt1 = it1->getRT(), rt2 = it2->getRT();
+      if (std::fabs(rt1 - rt2) < 0.5)
+      {
+        vec1.push_back(it1->getIntensity());
+        vec2.push_back(it2->getIntensity());
+        ++it1; ++it2;
+      }
+      else if (rt1 < rt2) ++it1;
+      else                ++it2;
+    }
+    if (vec1.size() < 3) return 0.0;
+    return Math::pearsonCorrelationCoefficient(vec1.begin(), vec1.end(), vec2.begin(), vec2.end());
+  }
+
+  // -------------------------------------------------------------------------
   // Fill WindowStats from a finalized trace_claim_strings vector.
   // -------------------------------------------------------------------------
   static void tallyTraces_(const std::vector<String>& trace_claim_strings, WindowStats& ws)
@@ -685,6 +712,7 @@ protected:
       double mz_tol_ppm,
       double rt_tol,
       double im_tol,
+      double isotope_pearson_min,
       const TheoreticalSpectrumGenerator& tsg,
       std::vector<String>& trace_claim_strings)
   {
@@ -727,15 +755,45 @@ protected:
       const PeptideEntry& pep = peptides[pi];
       const String pep_id = pep.sequence + "/" + String(pep.charge);
 
-      auto recordHits = [&](const std::vector<MS2TraceNode>& cands, const String& ion_label)
+      // Returns the subset of cands that passed the IM filter (and records them).
+      auto recordHits = [&](const std::vector<MS2TraceNode>& cands, const String& ion_label) -> std::vector<MS2TraceNode>
       {
+        std::vector<MS2TraceNode> accepted;
         for (const auto& cand : cands)
         {
           if (has_im && pep.im > 0.0 && ms2_traces[cand.trace_idx].containsIMData())
             if (std::abs(cand.im - pep.im) > im_tol) continue;
           raw_claims[cand.trace_idx].emplace_back(pep_id, ion_label);
+          accepted.push_back(cand);
         }
+        return accepted;
       };
+
+      // Like recordHits but also requires Pearson ≥ pearson_min with at least
+      // one trace from prev_accepted (the preceding isotope's accepted hits).
+      auto recordHitsWithPearson = [&](const std::vector<MS2TraceNode>& cands,
+                                       const String& ion_label,
+                                       const std::vector<MS2TraceNode>& prev_accepted,
+                                       double pearson_min) -> std::vector<MS2TraceNode>
+      {
+        std::vector<MS2TraceNode> accepted;
+        for (const auto& cand : cands)
+        {
+          if (has_im && pep.im > 0.0 && ms2_traces[cand.trace_idx].containsIMData())
+            if (std::abs(cand.im - pep.im) > im_tol) continue;
+          bool corr_ok = false;
+          for (const auto& prev : prev_accepted)
+          {
+            if (pearsonOfTraces_(ms2_traces[prev.trace_idx], ms2_traces[cand.trace_idx]) >= pearson_min)
+            { corr_ok = true; break; }
+          }
+          if (!corr_ok) continue;
+          raw_claims[cand.trace_idx].emplace_back(pep_id, ion_label);
+          accepted.push_back(cand);
+        }
+        return accepted;
+      };
+
 
       if (pep.localization_candidates.empty())
       {
@@ -756,14 +814,14 @@ protected:
           const String ion_name = ion_names[ion_i];
           const int    frag_z   = frag_charges[ion_i];
 
-          auto prev_hits = queryAndRecord(mz_mono, ion_name + "[M+0]", pep.rt, pep.im);
-          recordHits(prev_hits, ion_name + "[M+0]");
-          for (int iso = 1; iso <= 3 && !prev_hits.empty(); ++iso)
+          auto m0_accepted = recordHits(queryAndRecord(mz_mono, ion_name + "[M+0]", pep.rt, pep.im), ion_name + "[M+0]");
+          auto prev_found = m0_accepted;
+          for (int iso = 1; iso <= 3 && !prev_found.empty(); ++iso)
           {
             const double mz_iso = mz_mono + iso * Constants::C13C12_MASSDIFF_U / frag_z;
             const String iso_label = ion_name + "[M+" + String(iso) + "]";
-            prev_hits = queryAndRecord(mz_iso, iso_label, pep.rt, pep.im);
-            recordHits(prev_hits, iso_label);
+            prev_found = recordHitsWithPearson(queryAndRecord(mz_iso, iso_label, pep.rt, pep.im),
+                                               iso_label, m0_accepted, isotope_pearson_min);
           }
         }
       }
@@ -800,14 +858,14 @@ protected:
             if (seen_labels.count(ion_label)) continue;
             seen_labels.insert(ion_label);
 
-            auto prev_hits = queryAndRecord(mz_mono, ion_label + "[M+0]", pep.rt, pep.im);
-            recordHits(prev_hits, ion_label + "[M+0]");
-            for (int iso = 1; iso <= 3 && !prev_hits.empty(); ++iso)
+            auto m0_accepted = recordHits(queryAndRecord(mz_mono, ion_label + "[M+0]", pep.rt, pep.im), ion_label + "[M+0]");
+            auto prev_found = m0_accepted;
+            for (int iso = 1; iso <= 3 && !prev_found.empty(); ++iso)
             {
               const double mz_iso = mz_mono + iso * Constants::C13C12_MASSDIFF_U / frag_z;
               const String iso_label_i = ion_label + "[M+" + String(iso) + "]";
-              prev_hits = queryAndRecord(mz_iso, iso_label_i, pep.rt, pep.im);
-              recordHits(prev_hits, iso_label_i);
+              prev_found = recordHitsWithPearson(queryAndRecord(mz_iso, iso_label_i, pep.rt, pep.im),
+                                                 iso_label_i, m0_accepted, isotope_pearson_min);
             }
           }
         }
@@ -877,6 +935,13 @@ protected:
                           "Ion mobility tolerance for peptide-to-trace mapping (±, 1/K0; "
                           "applied only when IM data are present)", false);
     setMinFloat_("im_tolerance", 0.0);
+
+    registerDoubleOption_("isotope_pearson_correlation", "<r>", 0.7,
+                          "Minimum Pearson correlation between a heavier isotope trace and the M+0 trace "
+                          "for the isotope to be accepted as a valid claim. "
+                          "Applied to M+1, M+2, and M+3 independently (each vs. M+0).", false);
+    setMinFloat_("isotope_pearson_correlation", 0.0);
+    setMaxFloat_("isotope_pearson_correlation", 1.0);
 
     // --- Flags (mirrored from diaWeaver) ---
     registerFlag_("keep_ms1",
@@ -1048,6 +1113,7 @@ protected:
     const double mz_tol      = getDoubleOption_("mz_tolerance");
     const double rt_tol      = getDoubleOption_("rt_tolerance");
     const double im_tol      = getDoubleOption_("im_tolerance");
+    const double iso_pearson = getDoubleOption_("isotope_pearson_correlation");
     const bool   keep_ms1    = getFlag_("keep_ms1");
     const bool   aggregate   = getFlag_("aggregate_across_scans");
 
@@ -1266,7 +1332,7 @@ protected:
               win_pep_indices.push_back(pi);
           }
           explainTraces_(ms2_traces, peptides, win_pep_indices,
-                         im_info.available, mz_tol, rt_tol, im_tol,
+                         im_info.available, mz_tol, rt_tol, im_tol, iso_pearson,
                          tsg, trace_claim_strings);
         }
         else
