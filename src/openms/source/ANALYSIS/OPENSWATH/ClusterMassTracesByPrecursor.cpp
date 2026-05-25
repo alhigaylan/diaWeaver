@@ -1083,6 +1083,22 @@ namespace OpenMS
       if (!claim_array.empty())
         annotated_spec.getStringDataArrays().push_back(claim_array);
 
+      // Count distinct peptides across all annotated peaks and store as UserParam
+      {
+        std::set<String> distinct_peps;
+        for (const String& claim : claim_array)
+        {
+          std::vector<String> parts;
+          claim.split(";", parts);
+          for (const String& part : parts)
+          {
+            Size colon = part.find(':');
+            if (colon != String::npos) distinct_peps.insert(part.prefix(colon));
+          }
+        }
+        annotated_spec.setMetaValue("nr_peptides", static_cast<Int>(distinct_peps.size()));
+      }
+
       // Attach FloatDataArrays if requested
       auto attachScores = [&](MSSpectrum& spec, std::vector<std::vector<float>>& scores)
       {
