@@ -116,11 +116,13 @@ struct PeptideEntry
 // ---------------------------------------------------------------------------
 struct CollisionRow
 {
-  String anchor;    ///< "y5[M+0]-PEPTIDER/2"  (this claim)
-  String colliders; ///< "b7[M+1]-ANOTHERSEQ/3;y3[M+0]-YETANOTHER/2"  (other claims)
+  String anchor;    ///< "PEPTIDER-y5[M+0]"  (this claim, sequence first)
+  String colliders; ///< "ANOTHERSEQ-b7[M+1];YETANOTHER-y3[M+0]"  (other claims)
   double mz = 0.0;
   double rt = 0.0;
   double im = 0.0;  ///< 0.0 when IM data absent
+  String diann_rt;  ///< "PEPTIDER:42.3;ANOTHERSEQ:61.7"
+  String diann_im;  ///< "PEPTIDER:0.981;ANOTHERSEQ:1.043"  (empty when IM absent)
 };
 
 // ---------------------------------------------------------------------------
@@ -699,10 +701,12 @@ protected:
   // One row is emitted per individual claim entry (peptide+ion), with all
   // other entries on the same trace listed as colliders.
   // -------------------------------------------------------------------------
+  // pep_diann: pep_id ("SEQUENCE/charge") -> (diann_rt_sec, diann_im); im == 0 if absent
   static std::vector<CollisionRow> buildCollisionRows_(
       const std::vector<String>& trace_claim_strings,
       const std::vector<MassTrace>& ms2_traces,
-      bool has_im)
+      bool has_im,
+      const std::map<String, std::pair<double,double>>& pep_diann)
   {
     std::vector<CollisionRow> rows;
     for (Size i = 0; i < trace_claim_strings.size(); ++i)
@@ -713,21 +717,53 @@ protected:
       std::vector<String> raw;
       claim_str.split(";", raw);
 
-      // Convert "PEPTIDER/2:y5[M+0]" -> "y5[M+0]-PEPTIDER/2"
-      std::vector<String> display;
-      display.reserve(raw.size());
-      for (const String& c : raw)
+      // "PEPTIDER/2:y5[M+0]" -> display "PEPTIDER-y5[M+0]"  (sequence before ion, no charge)
+      auto toDisplay = [](const String& c) -> String
       {
         Size colon = c.find(':');
-        if (colon == String::npos) continue;
-        display.push_back(c.substr(colon + 1) + "-" + c.prefix(colon));
-      }
+        if (colon == String::npos) return c;
+        const String pep_id = c.prefix(colon);
+        const String ion    = c.substr(colon + 1);
+        Size slash = pep_id.find('/');
+        const String seq = (slash != String::npos) ? pep_id.prefix(slash) : pep_id;
+        return seq + "-" + ion;
+      };
+
+      std::vector<String> display;
+      display.reserve(raw.size());
+      for (const String& c : raw) display.push_back(toDisplay(c));
       if (display.size() < 2) continue;
 
       const double mz = ms2_traces[i].getCentroidMZ();
       const double rt = ms2_traces[i].getCentroidRT();
       const double im = (has_im && ms2_traces[i].containsIMData())
                           ? ms2_traces[i].getCentroidIM() : 0.0;
+
+      // Build diann_rt / diann_im strings — one entry per distinct peptide
+      String diann_rt_str, diann_im_str;
+      std::set<String> seen_peps;
+      for (const String& c : raw)
+      {
+        Size colon = c.find(':');
+        if (colon == String::npos) continue;
+        const String pep_id = c.prefix(colon);
+        if (!seen_peps.insert(pep_id).second) continue;  // already added
+
+        Size slash = pep_id.find('/');
+        const String seq = (slash != String::npos) ? pep_id.prefix(slash) : pep_id;
+
+        auto it = pep_diann.find(pep_id);
+        if (it == pep_diann.end()) continue;
+
+        if (!diann_rt_str.empty()) diann_rt_str += ";";
+        diann_rt_str += seq + ":" + String(it->second.first);
+
+        if (has_im && it->second.second > 0.0)
+        {
+          if (!diann_im_str.empty()) diann_im_str += ";";
+          diann_im_str += seq + ":" + String(it->second.second);
+        }
+      }
 
       for (Size k = 0; k < display.size(); ++k)
       {
@@ -738,7 +774,7 @@ protected:
           if (!colliders.empty()) colliders += ";";
           colliders += display[j];
         }
-        rows.push_back({display[k], colliders, mz, rt, im});
+        rows.push_back({display[k], colliders, mz, rt, im, diann_rt_str, diann_im_str});
       }
     }
     return rows;
@@ -1006,6 +1042,10 @@ protected:
                           "applied only when IM data are present)", false);
     setMinFloat_("im_tolerance", 0.0);
 
+    registerFlag_("neutral_losses",
+                  "If set, include neutral loss fragment ions (e.g. -H2O, -NH3) when matching "
+                  "theoretical ions to MS2 mass traces. Disabled by default.");
+
     registerDoubleOption_("isotope_pearson_correlation", "<r>", 0.7,
                           "Minimum Pearson correlation between a heavier isotope trace and the M+0 trace "
                           "for the isotope to be accepted as a valid claim. "
@@ -1177,8 +1217,9 @@ protected:
     const double rt_tol      = getDoubleOption_("rt_tolerance");
     const double im_tol      = getDoubleOption_("im_tolerance");
     const double iso_pearson = getDoubleOption_("isotope_pearson_correlation");
-    const bool   keep_ms1    = getFlag_("keep_ms1");
-    const bool   aggregate   = getFlag_("aggregate_across_scans");
+    const bool   keep_ms1      = getFlag_("keep_ms1");
+    const bool   aggregate     = getFlag_("aggregate_across_scans");
+    const bool   neutral_losses = getFlag_("neutral_losses");
 
     const Param ppim_params    = getParam_().copy("PeakPickerIM:", true);
     const Param pphr_params    = getParam_().copy("PeakPickerHiRes:", true);
@@ -1253,8 +1294,8 @@ protected:
       p.setValue("add_c_ions",      "false", "");
       p.setValue("add_x_ions",      "false", "");
       p.setValue("add_z_ions",      "false", "");
-      p.setValue("add_losses",      "true",  "");
-      p.setValue("add_term_losses", "true",  "");
+      p.setValue("add_losses",      neutral_losses ? "true" : "false", "");
+      p.setValue("add_term_losses", neutral_losses ? "true" : "false", "");
       tsg.setParameters(p);
     }
 
@@ -1382,6 +1423,7 @@ protected:
 
         // ---- 3c: Ion accounting — build trace_claim_strings ----
         std::vector<String> trace_claim_strings;
+        std::map<String, std::pair<double,double>> win_pep_diann; // pep_id -> (rt, im)
         if (!ms2_traces.empty() && !peptides.empty())
         {
           // Filter peptides to this window by precursor m/z
@@ -1395,7 +1437,11 @@ protected:
               catch (...) { continue; }
             }
             if (pmz >= w.lower_mz && pmz <= w.upper_mz)
+            {
               win_pep_indices.push_back(pi);
+              const String pep_id = peptides[pi].sequence + "/" + String(peptides[pi].charge);
+              win_pep_diann.emplace(pep_id, std::make_pair(peptides[pi].rt, peptides[pi].im));
+            }
           }
           explainTraces_(ms2_traces, peptides, win_pep_indices,
                          im_info.available, mz_tol, rt_tol, im_tol, iso_pearson,
@@ -1415,7 +1461,7 @@ protected:
         // Collect collision rows for this window
         if (!out_collisions.empty())
         {
-          auto win_rows = buildCollisionRows_(trace_claim_strings, ms2_traces, im_info.available);
+          auto win_rows = buildCollisionRows_(trace_claim_strings, ms2_traces, im_info.available, win_pep_diann);
           if (!win_rows.empty())
           {
 #pragma omp critical (collision_rows)
@@ -1629,10 +1675,11 @@ protected:
       }
       else
       {
-        col_tsv << "peptide_ion\tcolliding_peptide_ions\tmz\trt\tim\n";
+        col_tsv << "peptide_ion\tcolliding_peptide_ions\tmz\trt\tim\tdiann_rt\tdiann_im\n";
         for (const CollisionRow& r : collision_rows)
-          col_tsv << r.anchor << "\t" << r.colliders << "\t"
-                  << r.mz << "\t" << r.rt << "\t" << r.im << "\n";
+          col_tsv << r.anchor   << "\t" << r.colliders << "\t"
+                  << r.mz      << "\t" << r.rt        << "\t" << r.im << "\t"
+                  << r.diann_rt << "\t" << r.diann_im  << "\n";
         OPENMS_LOG_INFO << "Collision report written: " << out_collisions
                         << " (" << collision_rows.size() << " rows)\n";
       }
