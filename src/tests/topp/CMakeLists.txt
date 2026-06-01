@@ -169,6 +169,92 @@ set_tests_properties("TOPP_IDMerger_6_out1" PROPERTIES DEPENDS "TOPP_IDMerger_6"
 add_test("TOPP_IDMerger_6_out2" ${DIFF} -in1 ${TESTS_TEMP_DIR}/IDMerger_6_output2.tmp.idXML -in2 ${DATA_DIR_TOPP}/IDMerger_6_output.idXML)
 set_tests_properties("TOPP_IDMerger_6_out2" PROPERTIES DEPENDS "TOPP_IDMerger_6_out1")
 
+# .idparquet merge: two idparquet inputs -> merged idparquet -> convert to idXML -> diff
+# fixtures generated with: IDFileConverter -in IDMerger_1_inputX.idXML -out IDMerger_idparquet_inputX.idparquet
+add_test("TOPP_IDMerger_idparquet"
+  ${TOPP_BIN_PATH}/IDMerger -test
+    -in ${DATA_DIR_TOPP}/IDMerger_idparquet_input1.idparquet ${DATA_DIR_TOPP}/IDMerger_idparquet_input2.idparquet
+    -out ${TESTS_TEMP_DIR}/IDMerger_idparquet_output.tmp.idparquet
+    -out_type idparquet)
+add_test("TOPP_IDMerger_idparquet_convert"
+  ${TOPP_BIN_PATH}/IDFileConverter
+    -in ${TESTS_TEMP_DIR}/IDMerger_idparquet_output.tmp.idparquet
+    -out ${TESTS_TEMP_DIR}/IDMerger_idparquet_output.tmp.idXML)
+set_tests_properties("TOPP_IDMerger_idparquet_convert" PROPERTIES DEPENDS "TOPP_IDMerger_idparquet")
+add_test("TOPP_IDMerger_idparquet_diff"
+  ${DIFF}
+    -in1 ${TESTS_TEMP_DIR}/IDMerger_idparquet_output.tmp.idXML
+    -in2 ${DATA_DIR_TOPP}/IDMerger_idparquet_output.idXML
+    -whitelist "IdentificationRun date" "UserParam.*file_origin")
+set_tests_properties("TOPP_IDMerger_idparquet_diff" PROPERTIES DEPENDS "TOPP_IDMerger_idparquet_convert")
+
+# .idparquet rip: split the merged .idparquet from TOPP_IDMerger_idparquet back into
+# per-run .idparquet directories.  -numeric_filenames + -split_ident_runs make output
+# names deterministic (merged_<ident_run_idx>_<file_origin_idx>.idparquet) so the diff
+# also implicitly verifies that the per-run output ordering matches the input order.
+file(MAKE_DIRECTORY ${TESTS_TEMP_DIR}/IDRipper_idparquet_out)
+add_test("TOPP_IDRipper_idparquet"
+  ${TOPP_BIN_PATH}/IDRipper -test
+    -in ${TESTS_TEMP_DIR}/IDMerger_idparquet_output.tmp.idparquet
+    -out ${TESTS_TEMP_DIR}/IDRipper_idparquet_out
+    -split_ident_runs -numeric_filenames)
+set_tests_properties("TOPP_IDRipper_idparquet" PROPERTIES DEPENDS "TOPP_IDMerger_idparquet")
+
+add_test("TOPP_IDRipper_idparquet_convert_0"
+  ${TOPP_BIN_PATH}/IDFileConverter
+    -in ${TESTS_TEMP_DIR}/IDRipper_idparquet_out/IDMerger_idparquet_output.tmp_0_0.idparquet
+    -out ${TESTS_TEMP_DIR}/IDRipper_idparquet_out_0.tmp.idXML)
+set_tests_properties("TOPP_IDRipper_idparquet_convert_0" PROPERTIES DEPENDS "TOPP_IDRipper_idparquet")
+add_test("TOPP_IDRipper_idparquet_diff_0"
+  ${DIFF}
+    -in1 ${TESTS_TEMP_DIR}/IDRipper_idparquet_out_0.tmp.idXML
+    -in2 ${DATA_DIR_TOPP}/IDRipper_idparquet_0.idXML
+    -whitelist "IdentificationRun date")
+set_tests_properties("TOPP_IDRipper_idparquet_diff_0" PROPERTIES DEPENDS "TOPP_IDRipper_idparquet_convert_0")
+
+add_test("TOPP_IDRipper_idparquet_convert_1"
+  ${TOPP_BIN_PATH}/IDFileConverter
+    -in ${TESTS_TEMP_DIR}/IDRipper_idparquet_out/IDMerger_idparquet_output.tmp_1_1.idparquet
+    -out ${TESTS_TEMP_DIR}/IDRipper_idparquet_out_1.tmp.idXML)
+set_tests_properties("TOPP_IDRipper_idparquet_convert_1" PROPERTIES DEPENDS "TOPP_IDRipper_idparquet")
+add_test("TOPP_IDRipper_idparquet_diff_1"
+  ${DIFF}
+    -in1 ${TESTS_TEMP_DIR}/IDRipper_idparquet_out_1.tmp.idXML
+    -in2 ${DATA_DIR_TOPP}/IDRipper_idparquet_1.idXML
+    -whitelist "IdentificationRun date")
+set_tests_properties("TOPP_IDRipper_idparquet_diff_1" PROPERTIES DEPENDS "TOPP_IDRipper_idparquet_convert_1")
+
+# IDRipper_4: Fix-#2a end-to-end. Input is a single merged .idparquet whose
+# stored run_identifier "TopPerc_test" the post-Percolator FFI->FLUKD chain
+# produces (memory: [[idparquet-quant-chain]] cause-2). IDRipper splits by
+# file_origin into 2 per-file .idparquet outputs that both carry the shared
+# stored identifier. IDMerger remerging them must produce 2 distinct
+# IdentificationRuns — only possible if loader-side synthesizeRunIdentifiers
+# (mirroring IdXMLFile.cpp:530) re-stamps each file's ProtID with a fresh
+# UniqueIdGenerator suffix. Without the fix, IDMerger would collapse to 1
+# IdentificationRun. Fixture regenerated via IDRipper_4_input_generate.py.
+file(MAKE_DIRECTORY ${TESTS_TEMP_DIR}/IDRipper_4_split)
+add_test("TOPP_IDRipper_4_split"
+  ${TOPP_BIN_PATH}/IDRipper -test
+    -in ${DATA_DIR_TOPP}/IDRipper_4_input.idparquet
+    -out ${TESTS_TEMP_DIR}/IDRipper_4_split)
+add_test("TOPP_IDRipper_4_remerge"
+  ${TOPP_BIN_PATH}/IDMerger -test
+    -in ${TESTS_TEMP_DIR}/IDRipper_4_split/fileA.idparquet
+        ${TESTS_TEMP_DIR}/IDRipper_4_split/fileB.idparquet
+    -out ${TESTS_TEMP_DIR}/IDRipper_4_remerged.tmp.idparquet)
+set_tests_properties("TOPP_IDRipper_4_remerge" PROPERTIES DEPENDS "TOPP_IDRipper_4_split")
+add_test("TOPP_IDRipper_4_convert"
+  ${TOPP_BIN_PATH}/IDFileConverter -test
+    -in ${TESTS_TEMP_DIR}/IDRipper_4_remerged.tmp.idparquet
+    -out ${TESTS_TEMP_DIR}/IDRipper_4_remerged.tmp.idXML)
+set_tests_properties("TOPP_IDRipper_4_convert" PROPERTIES DEPENDS "TOPP_IDRipper_4_remerge")
+# Count IdentificationRun elements directly — synthesized identifiers carry a
+# non-deterministic UniqueIdGenerator suffix that can't byte-DIFF.
+add_test("TOPP_IDRipper_4_assert"
+  bash -c "test $(grep -c '<IdentificationRun' ${TESTS_TEMP_DIR}/IDRipper_4_remerged.tmp.idXML) -eq 2")
+set_tests_properties("TOPP_IDRipper_4_assert" PROPERTIES DEPENDS "TOPP_IDRipper_4_convert")
+
 #------------------------------------------------------------------------------
 # BaselineFilter tests
 add_test("TOPP_BaselineFilter_1" ${TOPP_BIN_PATH}/BaselineFilter -test -in ${DATA_DIR_TOPP}/BaselineFilter_input.mzML -out ${TESTS_TEMP_DIR}/BaselineFilter.tmp.mzML -struc_elem_length 1.5)
@@ -488,6 +574,35 @@ set_tests_properties("TOPP_FileConverter_30_out" PROPERTIES DEPENDS "TOPP_FileCo
 add_test("TOPP_FileConverter_31" ${TOPP_BIN_PATH}/FileConverter -test -in ${DATA_DIR_CLASS_TESTS}/MSPGenericFile_input.msp -out ${TESTS_TEMP_DIR}/FileConverter_31.tmp.msp -out_type msp)
 add_test("TOPP_FileConverter_31_out" ${DIFF} -in1 ${TESTS_TEMP_DIR}/FileConverter_31.tmp.msp -in2 ${DATA_DIR_TOPP}/FileConverter_31_output.msp)
 set_tests_properties("TOPP_FileConverter_31_out" PROPERTIES DEPENDS "TOPP_FileConverter_31")
+
+# TOPP_FileConverter_32: featureparquet -> featureXML round-trip; validates parquet->XML load path.
+add_test("TOPP_FileConverter_32" ${TOPP_BIN_PATH}/FileConverter -test -in ${DATA_DIR_TOPP}/FileConverter_9_output.featureparquet -no_progress -out ${TESTS_TEMP_DIR}/FileConverter_32.tmp.featureXML -out_type featureXML)
+add_test("TOPP_FileConverter_32_out1" ${DIFF} -whitelist "id=" "href=" -in1 ${TESTS_TEMP_DIR}/FileConverter_32.tmp.featureXML -in2 ${DATA_DIR_TOPP}/FileConverter_32_output.featureXML)
+set_tests_properties("TOPP_FileConverter_32_out1" PROPERTIES DEPENDS "TOPP_FileConverter_32")
+
+# TOPP_FileConverter_33: consensusparquet -> consensusXML round-trip; validates parquet->XML load path.
+add_test("TOPP_FileConverter_33" ${TOPP_BIN_PATH}/FileConverter -test -in ${DATA_DIR_TOPP}/FileConverter_14_output.consensusparquet -no_progress -out ${TESTS_TEMP_DIR}/FileConverter_33.tmp.consensusXML -out_type consensusXML)
+add_test("TOPP_FileConverter_33_out1" ${DIFF} -whitelist "id=" "href=" -in1 ${TESTS_TEMP_DIR}/FileConverter_33.tmp.consensusXML -in2 ${DATA_DIR_TOPP}/FileConverter_33_output.consensusXML)
+set_tests_properties("TOPP_FileConverter_33_out1" PROPERTIES DEPENDS "TOPP_FileConverter_33")
+
+# TOPP_FileConverter_34: featureparquet -> consensusparquet (mhcquant parquet-lane promote); content verified via XML round-trip.
+add_test("TOPP_FileConverter_34" ${TOPP_BIN_PATH}/FileConverter -test -in ${DATA_DIR_TOPP}/FileConverter_9_output.featureparquet -no_progress -out ${TESTS_TEMP_DIR}/FileConverter_34.tmp.consensusparquet -out_type consensusparquet)
+add_test("TOPP_FileConverter_34_back" ${TOPP_BIN_PATH}/FileConverter -test -in ${TESTS_TEMP_DIR}/FileConverter_34.tmp.consensusparquet -in_type consensusparquet -out ${TESTS_TEMP_DIR}/FileConverter_34.back.tmp.consensusXML -out_type consensusXML)
+add_test("TOPP_FileConverter_34_out1" ${DIFF} -whitelist "id=" "href=" -in1 ${TESTS_TEMP_DIR}/FileConverter_34.back.tmp.consensusXML -in2 ${DATA_DIR_TOPP}/FileConverter_34_output.consensusXML)
+set_tests_properties("TOPP_FileConverter_34_back" PROPERTIES DEPENDS "TOPP_FileConverter_34")
+set_tests_properties("TOPP_FileConverter_34_out1" PROPERTIES DEPENDS "TOPP_FileConverter_34_back")
+
+# TOPP_FileConverter_35: featureXML -> consensusparquet (cross-serialization); content verified via XML round-trip.
+add_test("TOPP_FileConverter_35" ${TOPP_BIN_PATH}/FileConverter -test -in ${DATA_DIR_TOPP}/FileConverter_9_output.featureXML -no_progress -out ${TESTS_TEMP_DIR}/FileConverter_35.tmp.consensusparquet -out_type consensusparquet)
+add_test("TOPP_FileConverter_35_back" ${TOPP_BIN_PATH}/FileConverter -test -in ${TESTS_TEMP_DIR}/FileConverter_35.tmp.consensusparquet -in_type consensusparquet -out ${TESTS_TEMP_DIR}/FileConverter_35.back.tmp.consensusXML -out_type consensusXML)
+add_test("TOPP_FileConverter_35_out1" ${DIFF} -whitelist "id=" "href=" -in1 ${TESTS_TEMP_DIR}/FileConverter_35.back.tmp.consensusXML -in2 ${DATA_DIR_TOPP}/FileConverter_35_output.consensusXML)
+set_tests_properties("TOPP_FileConverter_35_back" PROPERTIES DEPENDS "TOPP_FileConverter_35")
+set_tests_properties("TOPP_FileConverter_35_out1" PROPERTIES DEPENDS "TOPP_FileConverter_35_back")
+
+# TOPP_FileConverter_36: featureparquet -> consensusXML (cross-serialization); validates rejection-guard correctness.
+add_test("TOPP_FileConverter_36" ${TOPP_BIN_PATH}/FileConverter -test -in ${DATA_DIR_TOPP}/FileConverter_9_output.featureparquet -no_progress -out ${TESTS_TEMP_DIR}/FileConverter_36.tmp.consensusXML -out_type consensusXML)
+add_test("TOPP_FileConverter_36_out1" ${DIFF} -whitelist "id=" "href=" -in1 ${TESTS_TEMP_DIR}/FileConverter_36.tmp.consensusXML -in2 ${DATA_DIR_TOPP}/FileConverter_36_output.consensusXML)
+set_tests_properties("TOPP_FileConverter_36_out1" PROPERTIES DEPENDS "TOPP_FileConverter_36")
 
 #------------------------------------------------------------------------------
 # FileFilter tests
@@ -1909,6 +2024,74 @@ ${TOPP_BIN_PATH}/OpenSwathDecoyGenerator -test -in ${DATA_DIR_TOPP}/OpenSwathDec
   set_tests_properties("TOPP_OpenSwathWorkflow_27_out1" PROPERTIES DEPENDS "TOPP_OpenSwathWorkflow_27")
 endif(NOT DISABLE_OPENSWATH)
 
+if(NOT DISABLE_OPENSWATH)
+  # OpenSwath inference/export tests
+  # The shared PyProphet-derived fixture is single-run only, so these tests
+  # deliberately avoid alignment-dependent options.
+  set(OPENSWATH_SHARED_INFERENCE_OSW ${OPENMS_HOST_DIRECTORY}/src/tests/class_tests/openms/data/PyProphet_inference_test.osw)
+
+  add_test("TOPP_OpenSwathInfer_1_prepare" ${CMAKE_COMMAND} -E copy_if_different ${OPENSWATH_SHARED_INFERENCE_OSW} ${TESTS_TEMP_DIR}/OpenSwathInfer_1_input.osw)
+  add_test("TOPP_OpenSwathInfer_1" ${TOPP_BIN_PATH}/OpenSwathInfer -test -in ${TESTS_TEMP_DIR}/OpenSwathInfer_1_input.osw
+    -peptidoform:run true
+    -peptidoform:ipf_ms1_scoring false
+    -peptidoform:ipf_ms2_scoring false
+    -peptidoform:propagate_signal_across_runs false
+    -peptide:global true
+    -peptide:experiment_wide false
+    -peptide:run_specific false
+    -protein:global true
+    -protein:experiment_wide false
+    -protein:run_specific false
+    -gene:global false
+    -gene:experiment_wide false
+    -gene:run_specific false)
+  add_test("TOPP_OpenSwathInfer_1_export" ${TOPP_BIN_PATH}/OpenSwathExport -test -in ${TESTS_TEMP_DIR}/OpenSwathInfer_1_input.osw -out_dir ${TESTS_TEMP_DIR}/OpenSwathInfer_1_out
+    -parquet:run false
+    -results:run true
+    -results:format tsv
+    -results:ipf peptidoform
+    -results:ipf_max_peptidoform_pep 1.0
+    -results:use_peptide_scores false
+    -results:use_protein_scores false
+    -results:use_gene_scores false
+    -results:use_alignment false
+    -matrix:precursor false
+    -matrix:peptide false
+    -matrix:protein false
+    -matrix:gene false)
+  add_test("TOPP_OpenSwathInfer_1_out1" ${DIFF} -in1 ${TESTS_TEMP_DIR}/OpenSwathInfer_1_out/OpenSwathInfer_1_input.results.tsv -in2 ${DATA_DIR_TOPP}/OpenSwathInfer_1_output.results.tsv)
+  set_tests_properties("TOPP_OpenSwathInfer_1" PROPERTIES DEPENDS "TOPP_OpenSwathInfer_1_prepare")
+  set_tests_properties("TOPP_OpenSwathInfer_1_export" PROPERTIES DEPENDS "TOPP_OpenSwathInfer_1")
+  set_tests_properties("TOPP_OpenSwathInfer_1_out1" PROPERTIES DEPENDS "TOPP_OpenSwathInfer_1_export")
+  add_test("TOPP_OpenSwathExport_1_prepare" ${CMAKE_COMMAND} -E copy_if_different ${OPENSWATH_SHARED_INFERENCE_OSW} ${TESTS_TEMP_DIR}/OpenSwathExport_1_input.osw)
+  add_test("TOPP_OpenSwathExport_1" ${TOPP_BIN_PATH}/OpenSwathExport -test -in ${TESTS_TEMP_DIR}/OpenSwathExport_1_input.osw -out_dir ${TESTS_TEMP_DIR}/OpenSwathExport_1_out
+    -parquet:run false
+    -results:run true
+    -results:format tsv
+    -results:ipf disable
+    -results:use_peptide_scores false
+    -results:use_protein_scores false
+    -results:use_gene_scores false
+    -results:use_alignment false
+    -matrix:precursor false
+    -matrix:peptide true
+    -matrix:protein true
+    -matrix:gene false
+    -matrix:format tsv
+    -matrix:ipf disable
+    -matrix:use_peptide_scores false
+    -matrix:use_protein_scores false
+    -matrix:use_gene_scores false
+    -matrix:use_alignment false)
+  add_test("TOPP_OpenSwathExport_1_out1" ${DIFF} -in1 ${TESTS_TEMP_DIR}/OpenSwathExport_1_out/OpenSwathExport_1_input.results.tsv -in2 ${DATA_DIR_TOPP}/OpenSwathExport_1_output.results.tsv)
+  add_test("TOPP_OpenSwathExport_1_out2" ${DIFF} -in1 ${TESTS_TEMP_DIR}/OpenSwathExport_1_out/OpenSwathExport_1_input.peptide.matrix.tsv -in2 ${DATA_DIR_TOPP}/OpenSwathExport_1_output.peptide.matrix.tsv)
+  add_test("TOPP_OpenSwathExport_1_out3" ${DIFF} -in1 ${TESTS_TEMP_DIR}/OpenSwathExport_1_out/OpenSwathExport_1_input.protein.matrix.tsv -in2 ${DATA_DIR_TOPP}/OpenSwathExport_1_output.protein.matrix.tsv)
+  set_tests_properties("TOPP_OpenSwathExport_1" PROPERTIES DEPENDS "TOPP_OpenSwathExport_1_prepare")
+  set_tests_properties("TOPP_OpenSwathExport_1_out1" PROPERTIES DEPENDS "TOPP_OpenSwathExport_1")
+  set_tests_properties("TOPP_OpenSwathExport_1_out2" PROPERTIES DEPENDS "TOPP_OpenSwathExport_1")
+  set_tests_properties("TOPP_OpenSwathExport_1_out3" PROPERTIES DEPENDS "TOPP_OpenSwathExport_1")
+endif(NOT DISABLE_OPENSWATH)
+
 #------------------------------------------------------------------------------
 # NoiseFilter tests
 add_test("TOPP_NoiseFilterGaussian_1" ${TOPP_BIN_PATH}/NoiseFilterGaussian -test -ini ${DATA_DIR_TOPP}/NoiseFilterGaussian_1_parameters.ini -in ${DATA_DIR_TOPP}/NoiseFilterGaussian_1_input.mzML -out ${TESTS_TEMP_DIR}/NoiseFilterGaussian_1.tmp.mzML)
@@ -2255,7 +2438,12 @@ set_tests_properties("TOPP_FeatureLinkerUnlabeledKD_7_out1" PROPERTIES DEPENDS "
 add_test("TOPP_FeatureLinkerUnlabeledKD_8" ${TOPP_BIN_PATH}/FeatureLinkerUnlabeledKD -test -in ${DATA_DIR_TOPP}/FeatureLinkerUnlabeledKD_charge_any_input1.featureXML ${DATA_DIR_TOPP}/FeatureLinkerUnlabeledKD_charge_any_input2.featureXML -out ${TESTS_TEMP_DIR}/FeatureLinkerUnlabeledKD_8_output.tmp.consensusXML -algorithm:link:charge_merging Any)
 add_test("TOPP_FeatureLinkerUnlabeledKD_8_out1" ${DIFF} -whitelist "id=" "href=" -in1 ${TESTS_TEMP_DIR}/FeatureLinkerUnlabeledKD_8_output.tmp.consensusXML -in2 ${DATA_DIR_TOPP}/FeatureLinkerUnlabeledKD_8_output.consensusXML )
 set_tests_properties("TOPP_FeatureLinkerUnlabeledKD_8_out1" PROPERTIES DEPENDS "TOPP_FeatureLinkerUnlabeledKD_8")
-
+if(WITH_WNETALIGN)
+  # FeatureLinkerWNet
+  add_test("TOPP_FeatureLinkerWNet_1" ${TOPP_BIN_PATH}/FeatureLinkerWNet -test -ini ${DATA_DIR_TOPP}/FeatureLinkerWNet_1_parameters.ini -in ${DATA_DIR_TOPP}/FeatureLinkerUnlabeled_1_input1.featureXML ${DATA_DIR_TOPP}/FeatureLinkerUnlabeled_1_input2.featureXML ${DATA_DIR_TOPP}/FeatureLinkerUnlabeled_1_input3.featureXML -out ${TESTS_TEMP_DIR}/FeatureLinkerWNet_1_output.tmp.consensusXML)
+  add_test("TOPP_FeatureLinkerWNet_1_out1" ${DIFF} -whitelist "id=" "href=" -in1 ${TESTS_TEMP_DIR}/FeatureLinkerWNet_1_output.tmp.consensusXML -in2 ${DATA_DIR_TOPP}/FeatureLinkerWNet_1_output.consensusXML )
+  set_tests_properties("TOPP_FeatureLinkerWNet_1_out1" PROPERTIES DEPENDS "TOPP_FeatureLinkerWNet_1")
+endif()
 
 
 #------------------------------------------------------------------------------

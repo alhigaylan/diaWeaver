@@ -97,6 +97,8 @@ OpenSwathChromatogramExtractor
 OpenSwathConfidenceScoring
 OpenSwathDecoyGenerator
 OpenSwathFeatureXMLToTSV
+OpenSwathExport
+OpenSwathInfer
 OpenSwathRTNormalizer
 PeakPickerHiRes
 PeakPickerIterative
@@ -162,6 +164,13 @@ set(TOPP_executables
   QPXConverter
   ParquetConverter
 )
+
+if(WITH_WNETALIGN)
+  set(TOPP_executables
+    ${TOPP_executables}
+    FeatureLinkerWNet
+  )
+endif()
 
 ### add filenames to Visual Studio solution tree
 set(sources_VS)

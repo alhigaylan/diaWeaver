@@ -133,10 +133,15 @@ list(APPEND sources_list_h ProteinGroupArrowExport.h)
 list(APPEND sources_list_h ProteinIdentificationArrowIO.h)
 list(APPEND sources_list_h FeatureMapArrowIO.h)
 list(APPEND sources_list_h ConsensusMapArrowIO.h)
+list(APPEND sources_list_h PSMArrowIO.h)
 
 if (WITH_OPENTIMS)
   list(APPEND sources_list_h BrukerTimsFile.h)
   list(APPEND sources_list_h RationalScan2ImConverter.h)
+endif()
+
+if (WITH_THERMO_RAW)
+  list(APPEND sources_list_h ThermoRawFile.h)
 endif()
 
 ### add path to the filenames
