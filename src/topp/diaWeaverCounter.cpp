@@ -112,6 +112,18 @@ struct PeptideEntry
 };
 
 // ---------------------------------------------------------------------------
+// One row in the collision report TSV
+// ---------------------------------------------------------------------------
+struct CollisionRow
+{
+  String anchor;    ///< "y5[M+0]-PEPTIDER/2"  (this claim)
+  String colliders; ///< "b7[M+1]-ANOTHERSEQ/3;y3[M+0]-YETANOTHER/2"  (other claims)
+  double mz = 0.0;
+  double rt = 0.0;
+  double im = 0.0;  ///< 0.0 when IM data absent
+};
+
+// ---------------------------------------------------------------------------
 // Per-window ion accounting tallies
 // ---------------------------------------------------------------------------
 struct WindowStats
@@ -682,6 +694,57 @@ protected:
   }
 
   // -------------------------------------------------------------------------
+  // Build collision rows for one window.
+  // A collision is a trace claimed by >=2 distinct peptides.
+  // One row is emitted per individual claim entry (peptide+ion), with all
+  // other entries on the same trace listed as colliders.
+  // -------------------------------------------------------------------------
+  static std::vector<CollisionRow> buildCollisionRows_(
+      const std::vector<String>& trace_claim_strings,
+      const std::vector<MassTrace>& ms2_traces,
+      bool has_im)
+  {
+    std::vector<CollisionRow> rows;
+    for (Size i = 0; i < trace_claim_strings.size(); ++i)
+    {
+      const String& claim_str = trace_claim_strings[i];
+      if (claim_str.empty() || countDistinctPeptides_(claim_str) < 2) continue;
+
+      std::vector<String> raw;
+      claim_str.split(";", raw);
+
+      // Convert "PEPTIDER/2:y5[M+0]" -> "y5[M+0]-PEPTIDER/2"
+      std::vector<String> display;
+      display.reserve(raw.size());
+      for (const String& c : raw)
+      {
+        Size colon = c.find(':');
+        if (colon == String::npos) continue;
+        display.push_back(c.substr(colon + 1) + "-" + c.prefix(colon));
+      }
+      if (display.size() < 2) continue;
+
+      const double mz = ms2_traces[i].getCentroidMZ();
+      const double rt = ms2_traces[i].getCentroidRT();
+      const double im = (has_im && ms2_traces[i].containsIMData())
+                          ? ms2_traces[i].getCentroidIM() : 0.0;
+
+      for (Size k = 0; k < display.size(); ++k)
+      {
+        String colliders;
+        for (Size j = 0; j < display.size(); ++j)
+        {
+          if (j == k) continue;
+          if (!colliders.empty()) colliders += ";";
+          colliders += display[j];
+        }
+        rows.push_back({display[k], colliders, mz, rt, im});
+      }
+    }
+    return rows;
+  }
+
+  // -------------------------------------------------------------------------
   // Fill WindowStats from a finalized trace_claim_strings vector.
   // -------------------------------------------------------------------------
   static void tallyTraces_(const std::vector<String>& trace_claim_strings, WindowStats& ws)
@@ -922,6 +985,13 @@ protected:
                         "Leave empty to skip (default).", false);
     setValidFormats_("out_summary", {"tsv"});
 
+    registerOutputFile_("out_collisions", "<file>", "",
+                        "Output TSV: per-trace collision report listing every pair of peptides "
+                        "that share the same MS2 mass trace. "
+                        "Columns: peptide_ion, colliding_peptide_ions, mz, rt, im. "
+                        "Leave empty to skip (default).", false);
+    setValidFormats_("out_collisions", {"tsv"});
+
     // --- Ion accounting tolerances ---
     registerDoubleOption_("mz_tolerance", "<ppm>", 20.0,
                           "Fragment ion m/z tolerance for peptide-to-trace mapping (±, ppm)", false);
@@ -1100,7 +1170,8 @@ protected:
     const String out_orphan  = getStringOption_("out_orphan");
     const String out_ann     = getStringOption_("out_annotated");
     const String out_full    = getStringOption_("out_full");
-    const String out_summary = getStringOption_("out_summary");
+    const String out_summary    = getStringOption_("out_summary");
+    const String out_collisions = getStringOption_("out_collisions");
 
     const double mz_tol      = getDoubleOption_("mz_tolerance");
     const double rt_tol      = getDoubleOption_("rt_tolerance");
@@ -1194,6 +1265,9 @@ protected:
 
     // Per-window ion accounting tallies (each idx written by exactly one thread)
     std::vector<WindowStats> win_stats(total_windows);
+
+    // Collision report rows accumulated across all windows
+    std::vector<CollisionRow> collision_rows;
 
     // ------------------------------------------------------------------
     // Step 3: Output consumers
@@ -1338,6 +1412,21 @@ protected:
           tallyTraces_(trace_claim_strings, ws);
         }
 
+        // Collect collision rows for this window
+        if (!out_collisions.empty())
+        {
+          auto win_rows = buildCollisionRows_(trace_claim_strings, ms2_traces, im_info.available);
+          if (!win_rows.empty())
+          {
+#pragma omp critical (collision_rows)
+            {
+              collision_rows.insert(collision_rows.end(),
+                                    std::make_move_iterator(win_rows.begin()),
+                                    std::make_move_iterator(win_rows.end()));
+            }
+          }
+        }
+
         // ---- 3d: Extract + peak-pick MS1 ----
         MSExperiment ms1_exp;
         DiaWeaver::extractSingleMS1Window(on_disc, w, im_info, ms1_exp);
@@ -1477,6 +1566,7 @@ protected:
     // ------------------------------------------------------------------
     // Step 4: Write ion accounting summary TSV (if requested)
     // ------------------------------------------------------------------
+
     if (!out_summary.empty())
     {
       // Sort windows by lower m/z for a readable table
@@ -1525,7 +1615,31 @@ protected:
     }
 
     // ------------------------------------------------------------------
-    // Step 5: Sort, re-ID, compress and rewrite each output
+    // Step 5: Write collision report TSV (if requested)
+    // ------------------------------------------------------------------
+    if (!out_collisions.empty())
+    {
+      std::sort(collision_rows.begin(), collision_rows.end(),
+                [](const CollisionRow& a, const CollisionRow& b){ return a.rt < b.rt; });
+
+      std::ofstream col_tsv(out_collisions.c_str());
+      if (!col_tsv.is_open())
+      {
+        OPENMS_LOG_ERROR << "Cannot write collision TSV: " << out_collisions << "\n";
+      }
+      else
+      {
+        col_tsv << "peptide_ion\tcolliding_peptide_ions\tmz\trt\tim\n";
+        for (const CollisionRow& r : collision_rows)
+          col_tsv << r.anchor << "\t" << r.colliders << "\t"
+                  << r.mz << "\t" << r.rt << "\t" << r.im << "\n";
+        OPENMS_LOG_INFO << "Collision report written: " << out_collisions
+                        << " (" << collision_rows.size() << " rows)\n";
+      }
+    }
+
+    // ------------------------------------------------------------------
+    // Step 6: Sort, re-ID, compress and rewrite each output
     // ------------------------------------------------------------------
     auto sortAndRewrite = [&](const String& path, Size n_written)
     {
