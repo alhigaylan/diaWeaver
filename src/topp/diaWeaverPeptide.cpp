@@ -1079,11 +1079,6 @@ protected:
     merged_prot_ids[0].setPrimaryMSRunPath(all_window_labels);
     merged_prot_ids[0].getSearchParameters().db = database;
 
-    // Cross-window protein inference via BasicProteinInferenceAlgorithm.
-    OPENMS_LOG_INFO << "[diaWeaverPeptide] Running cross-window protein inference..." << std::endl;
-    BasicProteinInferenceAlgorithm bpia;
-    bpia.run(merged_peptides, merged_prot_ids);
-
     // Check whether decoys are present (needed for FDR).
     bool has_decoys = false;
     for (const auto& ph : merged_prot_ids[0].getHits())
@@ -1096,7 +1091,8 @@ protected:
       }
     }
 
-    // PSM-level FDR
+    // PSM-level FDR — applied before protein inference so BPIA sees only
+    // confident PSMs (mirrors ProSE's per-file FDR-before-merge approach).
     if (user_psm_fdr > 0.0)
     {
       if (!has_decoys)
@@ -1112,10 +1108,29 @@ protected:
         FalseDiscoveryRate fdr_tool;
         fdr_tool.apply(merged_peptides);
         IDFilter::filterHitsByScore(merged_peptides, user_psm_fdr);
+        IDFilter::removeEmptyIdentifications(merged_peptides);
         OPENMS_LOG_INFO << "[diaWeaverPeptide] " << merged_peptides.size()
                         << " PSMs retained after PSM FDR." << std::endl;
       }
     }
+
+    // If protein FDR is not requested, strip decoys before BPIA so protein
+    // inference runs on target-only PSMs (same as ProSE merged flow).
+    // If protein FDR is requested, decoys must survive so picked-protein FDR
+    // has target/decoy protein pairs to work with.
+    if (user_protein_fdr == 0.0)
+    {
+      IDFilter::removeDecoyHits(merged_prot_ids);
+      IDFilter::removeDecoyHits(merged_peptides);
+      IDFilter::removeEmptyIdentifications(merged_peptides);
+      IDFilter::removeUnreferencedProteins(merged_prot_ids, merged_peptides);
+    }
+
+    // Cross-window protein inference via BasicProteinInferenceAlgorithm.
+    OPENMS_LOG_INFO << "[diaWeaverPeptide] Running cross-window protein inference on "
+                    << merged_peptides.size() << " PSMs..." << std::endl;
+    BasicProteinInferenceAlgorithm bpia;
+    bpia.run(merged_peptides, merged_prot_ids);
 
     // Protein-level picked-protein FDR
     if (user_protein_fdr > 0.0)
