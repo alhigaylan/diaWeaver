@@ -838,6 +838,9 @@ namespace OpenMS
         spectrum.getFloatDataArrays()[4].setName("delta_im");
       }
 
+      MSSpectrum::IntegerDataArray trace_id_array;
+      trace_id_array.setName("fragment_trace_id");
+
       // Add fragment ions with their scores, RT, and ion mobility
       for (const auto& hs : assignments)
       {
@@ -845,6 +848,7 @@ namespace OpenMS
         peak.setMZ(fragment_mz[hs.index]);
         peak.setIntensity(fragment_intensity[hs.index]);
         spectrum.push_back(peak);
+        trace_id_array.push_back(hs.index);
 
         if (output_fragment_scores_)
         {
@@ -855,6 +859,8 @@ namespace OpenMS
           spectrum.getFloatDataArrays()[4].push_back(hs.delta_im);
         }
       }
+
+      spectrum.getIntegerDataArrays().push_back(std::move(trace_id_array));
 
       if (spectrum.size() >= min_nr_ions_)
       {
@@ -1027,6 +1033,12 @@ namespace OpenMS
       MSSpectrum::StringDataArray claim_array;
       claim_array.setName("peptide_ion_claims");
 
+      // IntegerDataArrays for trace indices — parallel arrays, split per output
+      MSSpectrum::IntegerDataArray orphan_trace_ids, annotated_trace_ids, full_trace_ids;
+      orphan_trace_ids.setName("fragment_trace_id");
+      annotated_trace_ids.setName("fragment_trace_id");
+      full_trace_ids.setName("fragment_trace_id");
+
       // FloatDataArrays (optional scores) — parallel arrays, split per output
       std::vector<std::vector<float>> orphan_scores(5), annotated_scores(5), full_scores(5);
 
@@ -1042,6 +1054,7 @@ namespace OpenMS
         if (explained)
         {
           annotated_spec.push_back(peak);
+          annotated_trace_ids.push_back(hs.index);
           claim_array.push_back(trace_claim_strings[hs.index]);
           if (output_fragment_scores_)
           {
@@ -1055,6 +1068,7 @@ namespace OpenMS
         else
         {
           orphan_spec.push_back(peak);
+          orphan_trace_ids.push_back(hs.index);
           if (output_fragment_scores_)
           {
             orphan_scores[0].push_back(static_cast<float>(hs.pearson));
@@ -1068,6 +1082,7 @@ namespace OpenMS
         if (full_spectra != nullptr)
         {
           full_spec.push_back(peak);
+          full_trace_ids.push_back(hs.index);
           if (output_fragment_scores_)
           {
             full_scores[0].push_back(static_cast<float>(hs.pearson));
@@ -1098,6 +1113,11 @@ namespace OpenMS
         }
         annotated_spec.setMetaValue("nr_peptides", static_cast<Int>(distinct_peps.size()));
       }
+
+      // Attach IntegerDataArrays (trace ids) — always present
+      if (!orphan_trace_ids.empty())    orphan_spec.getIntegerDataArrays().push_back(std::move(orphan_trace_ids));
+      if (!annotated_trace_ids.empty()) annotated_spec.getIntegerDataArrays().push_back(std::move(annotated_trace_ids));
+      if (full_spectra != nullptr && !full_trace_ids.empty()) full_spec.getIntegerDataArrays().push_back(std::move(full_trace_ids));
 
       // Attach FloatDataArrays if requested
       auto attachScores = [&](MSSpectrum& spec, std::vector<std::vector<float>>& scores)

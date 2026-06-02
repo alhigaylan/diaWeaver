@@ -142,6 +142,7 @@ TriqlerConverter
 XFDR
 XMLValidator
 diaWeaver
+diaWeaverPeptide
 diaWeaverCounter
 SpokeML
 )

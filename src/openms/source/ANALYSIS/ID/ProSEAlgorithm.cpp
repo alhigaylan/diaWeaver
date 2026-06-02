@@ -8,6 +8,8 @@
 
 #include <OpenMS/ANALYSIS/ID/ProSEAlgorithm.h>
 
+#include <OpenMS/ANALYSIS/ID/ExperimentalFragmentIndex.h>
+#include <OpenMS/ANALYSIS/ID/FragmentClaimRegistry.h>
 #include <OpenMS/ANALYSIS/ID/BasicProteinInferenceAlgorithm.h>
 #include <OpenMS/ANALYSIS/ID/FalseDiscoveryRate.h>
 #include <OpenMS/ANALYSIS/ID/IDMergerAlgorithm.h>
@@ -1552,6 +1554,158 @@ namespace OpenMS
     restore_fi_params();
 
     logSearchDiagnostics_(spectra, protein_ids, peptide_ids);
+
+    return ExitCodes::EXECUTION_OK;
+  }
+
+  // =====================================================================
+  // Iterative fragment claiming search (diaWeaverPeptide)
+  // =====================================================================
+  ProSEAlgorithm::ExitCodes ProSEAlgorithm::searchWithClaiming(
+      PeakMap& pseudo_spectra,
+      SearchContext& ctx,
+      vector<ProteinIdentification>& protein_ids,
+      PeptideIdentificationList& peptide_ids,
+      Size min_unique_fragments) const
+  {
+    // Phase 1: initial search — produces scored PSMs for all pseudo spectra.
+    // FDR is expected to be disabled by the caller (set to 0.0 in params)
+    // so all PSMs survive into peptide_ids for claiming.
+    ExitCodes ec = search(pseudo_spectra, ctx, protein_ids, peptide_ids);
+    if (ec != ExitCodes::EXECUTION_OK) return ec;
+
+    // Phase 2: build the fragment trace mapping from the spectra's IntegerDataArrays.
+    ExperimentalFragmentIndex efi;
+    efi.build(pseudo_spectra);
+
+    if (efi.size() == 0)
+    {
+      // No fragment_trace_id arrays present — nothing to claim. Return as-is.
+      OPENMS_LOG_WARN << "[ProSE] searchWithClaiming: no fragment_trace_id arrays found in "
+                         "pseudo spectra. Skipping claiming pass." << std::endl;
+      return ExitCodes::EXECUTION_OK;
+    }
+
+    // Phase 3: collect all PSMs with their spectrum index and score.
+    // PeptideIdentification carries the spectrum reference as RT (the scan RT).
+    // We need to map RT back to spectrum index for the exclusion mask.
+    // Build a RT → spectrum_idx lookup from pseudo_spectra.
+    std::unordered_map<double, Size> rt_to_spec_idx;
+    rt_to_spec_idx.reserve(pseudo_spectra.size());
+    for (Size i = 0; i < pseudo_spectra.size(); ++i)
+      rt_to_spec_idx[pseudo_spectra[i].getRT()] = i;
+
+    struct PSMEntry
+    {
+      double score;
+      Size   spectrum_idx;
+      Size   pep_id_idx;   // index into peptide_ids
+      Size   hit_idx;      // index of PeptideHit within the PeptideIdentification
+      String sequence;
+    };
+
+    std::vector<PSMEntry> psm_list;
+    psm_list.reserve(peptide_ids.size());
+
+    for (Size pid = 0; pid < peptide_ids.size(); ++pid)
+    {
+      auto rt_it = rt_to_spec_idx.find(peptide_ids[pid].getRT());
+      if (rt_it == rt_to_spec_idx.end()) continue;
+      const Size spec_idx = rt_it->second;
+
+      for (Size hid = 0; hid < peptide_ids[pid].getHits().size(); ++hid)
+      {
+        const PeptideHit& hit = peptide_ids[pid].getHits()[hid];
+        psm_list.push_back({hit.getScore(), spec_idx, pid, hid,
+                            hit.getSequence().toUnmodifiedString()});
+      }
+    }
+
+    // Sort descending by score so highest-scoring PSMs claim first.
+    std::sort(psm_list.begin(), psm_list.end(),
+              [](const PSMEntry& a, const PSMEntry& b) { return a.score > b.score; });
+
+    // Phase 4: iterative claiming.
+    FragmentClaimRegistry registry;
+
+    // Helper: retrieve trace_ids for all peaks in a spectrum matching this PSM's sequence.
+    // We read the IntegerDataArray directly from the pseudo_spectra.
+    auto getTraceIds = [&](Size spec_idx) -> std::vector<Int>
+    {
+      std::vector<Int> ids;
+      const MSSpectrum& spec = pseudo_spectra[spec_idx];
+      for (const auto& arr : spec.getIntegerDataArrays())
+      {
+        if (arr.getName() == "fragment_trace_id")
+        {
+          ids.assign(arr.begin(), arr.end());
+          break;
+        }
+      }
+      return ids;
+    };
+
+    // Track which PSMs survive after claiming filter.
+    // Key: (pep_id_idx, hit_idx) → number of unique (unclaimed-by-others) fragments.
+    std::unordered_map<Size, std::unordered_map<Size, Size>> unique_fragment_counts;
+
+    for (const PSMEntry& psm : psm_list)
+    {
+      std::vector<Int> all_trace_ids = getTraceIds(psm.spectrum_idx);
+      if (all_trace_ids.empty())
+      {
+        // Spectrum has no trace ids — count all peaks as unique.
+        const Size n_peaks = pseudo_spectra[psm.spectrum_idx].size();
+        unique_fragment_counts[psm.pep_id_idx][psm.hit_idx] = n_peaks;
+        continue;
+      }
+
+      // Count how many trace IDs are currently unclaimed (or claimed by this same sequence).
+      Size unique_count = 0;
+      std::vector<Int> claimable;
+      for (Int tid : all_trace_ids)
+      {
+        const FragmentClaimRegistry::ClaimRecord* rec = registry.getClaimRecord(tid);
+        if (rec == nullptr || rec->peptide_seq == psm.sequence)
+        {
+          ++unique_count;
+          if (rec == nullptr) claimable.push_back(tid);
+        }
+      }
+
+      unique_fragment_counts[psm.pep_id_idx][psm.hit_idx] = unique_count;
+
+      // Claim all currently unclaimed trace IDs for this PSM.
+      if (unique_count >= min_unique_fragments)
+        registry.tryClaim(claimable, psm.sequence, psm.score, psm.spectrum_idx);
+    }
+
+    // Phase 5: remove PSMs that do not meet the min_unique_fragments threshold.
+    for (Size pid = 0; pid < peptide_ids.size(); ++pid)
+    {
+      std::vector<PeptideHit>& hits = peptide_ids[pid].getHits();
+      std::vector<PeptideHit> surviving_hits;
+      surviving_hits.reserve(hits.size());
+      for (Size hid = 0; hid < hits.size(); ++hid)
+      {
+        auto it_pid = unique_fragment_counts.find(pid);
+        if (it_pid == unique_fragment_counts.end())
+        {
+          surviving_hits.push_back(hits[hid]);
+          continue;
+        }
+        auto it_hid = it_pid->second.find(hid);
+        if (it_hid == it_pid->second.end() || it_hid->second >= min_unique_fragments)
+          surviving_hits.push_back(hits[hid]);
+      }
+      peptide_ids[pid].setHits(std::move(surviving_hits));
+    }
+
+    IDFilter::removeEmptyIdentifications(peptide_ids);
+
+    OPENMS_LOG_INFO << "[ProSE] searchWithClaiming: " << registry.claimedCount()
+                    << " fragment trace IDs claimed across " << peptide_ids.size()
+                    << " surviving PSM spectra." << std::endl;
 
     return ExitCodes::EXECUTION_OK;
   }

@@ -22,6 +22,8 @@ ConsensusMapMergerAlgorithm.cpp
 FalseDiscoveryRate.cpp
 FIAMSDataProcessor.cpp
 FIAMSScheduler.cpp
+ExperimentalFragmentIndex.cpp
+FragmentClaimRegistry.cpp
 FragmentIndex.cpp
 HyperScore.cpp
 IDBoostGraph.cpp
