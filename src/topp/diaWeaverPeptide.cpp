@@ -853,7 +853,16 @@ protected:
       const DiaWeaver::DIAWindow& w = window_vec[idx].first;
       const std::vector<Size>& indices = window_vec[idx].second;
 
-      const String window_label = "window_" + String(w.lower_mz) + "_" + String(w.upper_mz);
+      auto fmt_mz = [](double mz) -> String {
+        char buf[32];
+        std::snprintf(buf, sizeof(buf), "%.4f", mz);
+        String s(buf);
+        auto last = s.find_last_not_of('0');
+        if (last != String::npos) s = s.substr(0, last + 1);
+        if (!s.empty() && s.back() == '.') s += '0';
+        return s;
+      };
+      const String window_label = "window_" + fmt_mz(w.lower_mz) + "_" + fmt_mz(w.upper_mz);
 
       MSExperiment ms2_exp, ms1_exp, precursor_exp;
       std::vector<MassTrace> ms2_traces;
