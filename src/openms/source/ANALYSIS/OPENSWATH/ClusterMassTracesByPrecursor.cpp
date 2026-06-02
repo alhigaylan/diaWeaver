@@ -792,6 +792,7 @@ namespace OpenMS
       if (has_im_data)
       {
         spectrum.setDriftTime(precursor_im[i]);
+        spectrum.setDriftTimeUnit(DriftTimeUnit::VSSC);
       }
 
       // Set precursor information
@@ -1014,7 +1015,7 @@ namespace OpenMS
         s.setRT(precursor_rt[i]);
         s.setMSLevel(2);
         s.setType(SpectrumSettings::SpectrumType::CENTROID);
-        if (has_im_data) s.setDriftTime(precursor_im[i]);
+        if (has_im_data) { s.setDriftTime(precursor_im[i]); s.setDriftTimeUnit(DriftTimeUnit::VSSC); }
         Precursor p;
         p.setMZ(precursor_mz[i]);
         p.setCharge(precursor_charge[i]);
