@@ -9,6 +9,8 @@
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
 #include <OpenMS/FORMAT/MzMLFile.h>
 #include <OpenMS/FORMAT/FileHandler.h>
+#include <OpenMS/FORMAT/DATAACCESS/MSDataWritingConsumer.h>
+#include <OpenMS/METADATA/SourceFile.h>
 #include <OpenMS/FORMAT/FileTypes.h>
 #include <OpenMS/FORMAT/FASTAFile.h>
 #include <OpenMS/KERNEL/OnDiscMSExperiment.h>
@@ -390,6 +392,19 @@ protected:
       "All per-window PSMs are pooled before inference.");
     setValidFormats_("out_idxml", ListUtils::create<String>("idXML"));
 
+    registerOutputFile_("out_mzml", "<file>", "",
+      "Plain pseudo spectra mzML: all diaWeaver pseudo spectra written as-is, "
+      "streamed to disk window-by-window without holding the full experiment in memory.", false);
+    setValidFormats_("out_mzml", ListUtils::create<String>("mzML"));
+
+    registerOutputFile_("out_annotated_mzml", "<file>", "",
+      "Annotated pseudo spectra mzML: one spectrum per identified pseudo spectrum, "
+      "containing only peaks matched to b/y ions. Each peak carries a "
+      "'fragment_annotation' StringDataArray with entries like 'PEPTIDER-y5'. "
+      "Peaks from all peptides identified in the same pseudo spectrum are merged "
+      "into a single output spectrum. Written after 1% FDR filtering.", false);
+    setValidFormats_("out_annotated_mzml", ListUtils::create<String>("mzML"));
+
     // Preprocessing flags (identical to diaWeaver)
     registerFlag_("save_unfragmented_precursors",
       "Also run FeatureFinderPeptide on peaks within the precursor isolation window.");
@@ -465,6 +480,12 @@ protected:
     registerIntOption_("threads", "<n>", 1,
       "Number of threads for peak picking and ProSE search.", false);
     setMinInt_("threads", 1);
+
+    registerIntOption_("threads_outer_loop", "<n>", -1,
+      "Number of threads for the outer loop (over DIA windows). Remaining threads are used for "
+      "inner loop (peak picking within each window). Set to -1 to use all threads in the outer "
+      "loop only (no nested parallelism). Example: with 24 total threads and 4 outer threads, "
+      "each window gets 6 threads for peak picking.", false);
   }
 
   // -------------------------------------------------------------------------
@@ -612,7 +633,9 @@ protected:
   {
     const String in         = getStringOption_("in");
     const String database   = getStringOption_("database");
-    const String out_idxml  = getStringOption_("out_idxml");
+    const String out_idxml          = getStringOption_("out_idxml");
+    const String out_mzml           = getStringOption_("out_mzml");
+    const String out_annotated_mzml = getStringOption_("out_annotated_mzml");
 
     if (out_idxml.empty())
     {
@@ -650,6 +673,7 @@ protected:
 
 #ifdef _OPENMP
     const int num_threads = getIntOption_("threads");
+    const int threads_outer_loop = getIntOption_("threads_outer_loop");
     omp_set_num_threads(num_threads);
 #endif
 
@@ -770,24 +794,66 @@ protected:
     std::vector<std::vector<ProteinIdentification>> all_prot_ids;
     std::vector<PeptideIdentificationList> all_pep_ids;
 
-    PeakPickerIM  picker_im;  picker_im.setParameters(ppim_params);
-    PeakPickerHiRes picker_hr; picker_hr.setParameters(pphr_params);
+    // Pickers passed as const-ref to peakPickInPlace_(), which creates per-inner-thread
+    // copies internally — safe to share across outer threads.
+    PeakPickerIM    picker_im;  picker_im.setParameters(ppim_params);
+    PeakPickerHiRes picker_hr;  picker_hr.setParameters(pphr_params);
 
-    // inner_threads=1 here: each window search uses all threads via ProSE's
-    // internal OMP. Peak picking within the window also uses all threads.
-    const int inner_threads = num_threads;
+#ifdef _OPENMP
+    const int total_threads = num_threads;
+    int outer_threads = total_threads;
+    int inner_threads = 1;
+
+    if (threads_outer_loop > 0)
+    {
+      outer_threads = std::min(threads_outer_loop, total_threads);
+      inner_threads = std::max(1, total_threads / outer_threads);
+      omp_set_nested(1);
+      omp_set_dynamic(0);
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] Nested parallelism: "
+                      << outer_threads << " outer x " << inner_threads << " inner threads." << std::endl;
+    }
+    else
+    {
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] " << outer_threads
+                      << " threads for window processing (no nested parallelism)." << std::endl;
+    }
+    omp_set_num_threads(outer_threads);
+#else
+    const int inner_threads = 1;
+#endif
 
     Size processed = 0;
     Size total_pseudo_spectra = 0;
 
-    for (Size idx = 0; idx < total_windows; ++idx)
+    // Set up streaming consumer for plain pseudo spectra (optional).
+    // PlainMSDataWritingConsumer finalizes the mzML file when it goes out of scope,
+    // so it must enclose the entire window loop.
+    std::unique_ptr<PlainMSDataWritingConsumer> plain_consumer;
+    if (!out_mzml.empty())
+    {
+      plain_consumer = std::make_unique<PlainMSDataWritingConsumer>(out_mzml);
+      plain_consumer->setExpectedSize(0, 0);
+      SourceFile sf;
+      sf.setNameOfFile(File::basename(in));
+      sf.setPathToFile(File::path(in));
+      ExperimentalSettings es;
+      es.setSourceFiles({sf});
+      plain_consumer->setExperimentalSettings(es);
+    }
+
+    // prose is copied per-thread via firstprivate: each outer thread operates on its
+    // own ProSEAlgorithm instance (identical parameters, independent mutable state).
+    // ctx (SearchContext / FragmentIndex) is shared read-only — concurrent reads safe.
+#ifdef _OPENMP
+#pragma omp parallel for schedule(dynamic, 1) firstprivate(on_disc, prose)
+#endif
+    for (SignedSize idx = 0; idx < static_cast<SignedSize>(total_windows); ++idx)
     {
       const DiaWeaver::DIAWindow& w = window_vec[idx].first;
       const std::vector<Size>& indices = window_vec[idx].second;
 
       const String window_label = "window_" + String(w.lower_mz) + "_" + String(w.upper_mz);
-      OPENMS_LOG_INFO << "[diaWeaverPeptide] Window " << (idx + 1) << "/" << total_windows
-                      << " m/z=[" << w.lower_mz << "," << w.upper_mz << "]" << std::endl;
 
       MSExperiment ms2_exp, ms1_exp, precursor_exp;
       std::vector<MassTrace> ms2_traces;
@@ -796,14 +862,17 @@ protected:
       if (is_bruker)
       {
 #ifdef WITH_OPENTIMS
-        auto it_ms2 = bruker_ms2_windows.find(w);
-        if (it_ms2 != bruker_ms2_windows.end()) ms2_exp = it_ms2->second;
-        auto it_ms1 = bruker_ms1_windows.find(w);
-        if (it_ms1 != bruker_ms1_windows.end()) ms1_exp = it_ms1->second;
-        if (save_precursors)
+#pragma omp critical (bruker_window_access)
         {
-          auto it_prec = bruker_precursor_windows.find(w);
-          if (it_prec != bruker_precursor_windows.end()) precursor_exp = it_prec->second;
+          auto it_ms2 = bruker_ms2_windows.find(w);
+          if (it_ms2 != bruker_ms2_windows.end()) ms2_exp = std::move(it_ms2->second);
+          auto it_ms1 = bruker_ms1_windows.find(w);
+          if (it_ms1 != bruker_ms1_windows.end()) ms1_exp = std::move(it_ms1->second);
+          if (save_precursors)
+          {
+            auto it_prec = bruker_precursor_windows.find(w);
+            if (it_prec != bruker_precursor_windows.end()) precursor_exp = std::move(it_prec->second);
+          }
         }
 #endif
       }
@@ -826,13 +895,16 @@ protected:
 
       if (ms2_traces.empty())
       {
-        OPENMS_LOG_INFO << "[diaWeaverPeptide] No MS2 traces for window " << window_label
-                        << ". Skipping." << std::endl;
-        ++processed;
+#pragma omp critical (progress_log)
+        {
+          OPENMS_LOG_INFO << "[diaWeaverPeptide] No MS2 traces for window " << window_label
+                          << ". Skipping." << std::endl;
+          ++processed;
+        }
         continue;
       }
 
-      // --- 3d. Extract MS1 (mzML path only; Bruker already extracted above) ---
+      // --- 3d. Extract MS1 ---
       if (!is_bruker)
       {
         DiaWeaver::extractSingleMS1Window(on_disc, w, im_info, ms1_exp);
@@ -887,55 +959,72 @@ protected:
 
       if (pseudo_spectra.empty())
       {
-        OPENMS_LOG_INFO << "[diaWeaverPeptide] No pseudo spectra generated for window "
-                        << window_label << ". Skipping." << std::endl;
-        ++processed;
+#pragma omp critical (progress_log)
+        {
+          OPENMS_LOG_INFO << "[diaWeaverPeptide] No pseudo spectra generated for window "
+                          << window_label << ". Skipping." << std::endl;
+          ++processed;
+        }
         continue;
       }
 
-      total_pseudo_spectra += pseudo_spectra.size();
-      OPENMS_LOG_INFO << "[diaWeaverPeptide] " << pseudo_spectra.size()
-                      << " pseudo spectra for window " << window_label
-                      << ". Running ProSE search..." << std::endl;
+      // Assign globally unique native IDs. idx is loop-private (OMP parallel for),
+      // so "window=<idx>_scan=<si>" is collision-free across threads.
+      for (Size si = 0; si < pseudo_spectra.size(); ++si)
+        pseudo_spectra[si].setNativeID("window=" + String(idx) + "_scan=" + String(si));
+
+      // Stream plain pseudo spectra to disk (thread-safe via critical section).
+      if (plain_consumer)
+      {
+#pragma omp critical (write_spectra)
+        {
+          for (const auto& spec : pseudo_spectra)
+            plain_consumer->consumeSpectrum(spec);
+        }
+      }
 
       // --- 3h. ProSE search with iterative fragment claiming ---
+      // prose is a per-thread firstprivate copy; ctx (FragmentIndex) is shared read-only.
       std::vector<ProteinIdentification> window_prot_ids;
       PeptideIdentificationList window_pep_ids;
 
-      ProSEAlgorithm::ExitCodes ec =
+      const ProSEAlgorithm::ExitCodes ec =
         prose.searchWithClaiming(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
                                  min_unique_fragments_);
 
-      if (ec != ProSEAlgorithm::ExitCodes::EXECUTION_OK)
+      if (ec != ProSEAlgorithm::ExitCodes::EXECUTION_OK || window_prot_ids.empty() || window_pep_ids.empty())
       {
-        OPENMS_LOG_WARN << "[diaWeaverPeptide] ProSE search returned non-OK exit code ("
-                        << static_cast<int>(ec) << ") for window " << window_label
-                        << ". Skipping window." << std::endl;
-        ++processed;
+#pragma omp critical (progress_log)
+        {
+          if (ec != ProSEAlgorithm::ExitCodes::EXECUTION_OK)
+            OPENMS_LOG_WARN << "[diaWeaverPeptide] ProSE non-OK exit code ("
+                            << static_cast<int>(ec) << ") for window " << window_label << std::endl;
+          else
+            OPENMS_LOG_INFO << "[diaWeaverPeptide] No PSMs for window " << window_label << std::endl;
+          ++processed;
+        }
         continue;
       }
 
-      if (window_prot_ids.empty() || window_pep_ids.empty())
-      {
-        OPENMS_LOG_INFO << "[diaWeaverPeptide] No PSMs found for window " << window_label << "." << std::endl;
-        ++processed;
-        continue;
-      }
-
-      // Tag each window's protein run with a unique MS run path so IDMergerAlgorithm
-      // can distinguish per-window results during cross-window merging.
       window_prot_ids[0].setPrimaryMSRunPath({window_label});
       window_prot_ids[0].getSearchParameters().db = database;
 
-      OPENMS_LOG_INFO << "[diaWeaverPeptide] Window " << window_label << ": "
-                      << window_pep_ids.size() << " PSMs, "
-                      << window_prot_ids[0].getHits().size() << " protein hits." << std::endl;
-
-      all_prot_ids.push_back(std::move(window_prot_ids));
-      all_pep_ids.push_back(std::move(window_pep_ids));
-
-      ++processed;
+#pragma omp critical (results_collect)
+      {
+        total_pseudo_spectra += pseudo_spectra.size();
+        OPENMS_LOG_INFO << "[diaWeaverPeptide] Window " << window_label << ": "
+                        << window_pep_ids.size() << " PSMs, "
+                        << window_prot_ids[0].getHits().size() << " protein hits." << std::endl;
+        all_prot_ids.push_back(std::move(window_prot_ids));
+        all_pep_ids.push_back(std::move(window_pep_ids));
+        ++processed;
+      }
     } // end window loop
+
+#ifdef _OPENMP
+    if (threads_outer_loop > 0)
+      omp_set_num_threads(total_threads);
+#endif
 
     OPENMS_LOG_INFO << "[diaWeaverPeptide] All " << total_windows << " windows processed. "
                     << total_pseudo_spectra << " pseudo spectra searched across all windows." << std::endl;
@@ -1048,10 +1137,108 @@ protected:
     // ------------------------------------------------------------------
     // Step 5: Write output.
     // ------------------------------------------------------------------
-    OPENMS_LOG_INFO << "[diaWeaverPeptide] Writing output: " << out_idxml << std::endl;
     OPENMS_LOG_INFO << "[diaWeaverPeptide] Final result: " << merged_peptides.size() << " PSMs, "
                     << merged_prot_ids[0].getHits().size() << " proteins." << std::endl;
 
+    // --- 5a. Annotated pseudo spectra mzML ---
+    // Group surviving PeptideIdentifications by spectrum native ID (getSpectrumReference()).
+    // All peptide hits sharing the same native ID originated from the same pseudo spectrum
+    // and are written as one output spectrum containing only b/y-matched peaks.
+    if (!out_annotated_mzml.empty())
+    {
+      // native_id → ordered list of PeptideIdentification indices in merged_peptides
+      std::map<String, std::vector<Size>> native_id_to_pids;
+      for (Size pid = 0; pid < merged_peptides.size(); ++pid)
+      {
+        const String& ref = merged_peptides[pid].getSpectrumReference();
+        if (!ref.empty())
+          native_id_to_pids[ref].push_back(pid);
+      }
+
+      MSExperiment annotated_exp;
+
+      for (const auto& [native_id, pid_indices] : native_id_to_pids)
+      {
+        // Collect all PeakAnnotations from all PeptideHits across all identifications
+        // sharing this native ID. Key: mz → combined annotation string.
+        // mz values are exact float copies from the original spectrum so map equality is safe.
+        std::map<double, std::pair<double, String>> mz_to_annotation;
+
+        double spectrum_rt  = 0.0;
+        double precursor_mz = 0.0;
+        int    precursor_charge = 0;
+        bool   first = true;
+
+        for (Size pid : pid_indices)
+        {
+          const PeptideIdentification& pep_id = merged_peptides[pid];
+          if (first)
+          {
+            spectrum_rt     = pep_id.getRT();
+            precursor_mz    = pep_id.getMZ();
+            first           = false;
+          }
+
+          for (const PeptideHit& hit : pep_id.getHits())
+          {
+            if (precursor_charge == 0)
+              precursor_charge = hit.getCharge();
+
+            const String seq = hit.getSequence().toString();
+
+            for (const PeptideHit::PeakAnnotation& pa : hit.getPeakAnnotations())
+            {
+              // Format: "PEPTIDER-y5" or "PEPTIDER-y5+2" for charge > 1
+              String label = seq + "-" + pa.annotation;
+              if (pa.charge > 1)
+                label += "+" + String(pa.charge);
+
+              auto it = mz_to_annotation.find(pa.mz);
+              if (it == mz_to_annotation.end())
+                mz_to_annotation[pa.mz] = {pa.intensity, label};
+              else
+                it->second.second += ";" + label;  // chimeric: merge annotations
+            }
+          }
+        }
+
+        if (mz_to_annotation.empty()) continue;
+
+        // Build the annotated spectrum (peaks already sorted by mz via std::map).
+        MSSpectrum spec;
+        spec.setNativeID(native_id);
+        spec.setRT(spectrum_rt);
+        spec.setMSLevel(2);
+
+        Precursor prec;
+        prec.setMZ(precursor_mz);
+        prec.setCharge(precursor_charge);
+        spec.getPrecursors().push_back(prec);
+
+        MSSpectrum::StringDataArray annotation_array;
+        annotation_array.setName("fragment_annotation");
+
+        for (const auto& [mz, inty_label] : mz_to_annotation)
+        {
+          Peak1D peak;
+          peak.setMZ(mz);
+          peak.setIntensity(inty_label.first);
+          spec.push_back(peak);
+          annotation_array.push_back(inty_label.second);
+        }
+
+        spec.getStringDataArrays().push_back(std::move(annotation_array));
+        annotated_exp.addSpectrum(std::move(spec));
+      }
+
+      annotated_exp.sortSpectra(true);
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] Writing " << annotated_exp.size()
+                      << " annotated pseudo spectra to: " << out_annotated_mzml << std::endl;
+      MzMLFile().store(out_annotated_mzml, annotated_exp);
+    }
+
+    // --- 5b. Peptide/protein identifications ---
+    OPENMS_LOG_INFO << "[diaWeaverPeptide] Writing output: " << out_idxml << std::endl;
     FileHandler().storeIdentifications(out_idxml, merged_prot_ids, merged_peptides,
                                        {FileTypes::IDXML});
 
