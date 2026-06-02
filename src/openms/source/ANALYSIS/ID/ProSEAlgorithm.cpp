@@ -1628,42 +1628,93 @@ namespace OpenMS
     // Phase 4: iterative claiming.
     FragmentClaimRegistry registry;
 
-    // Helper: retrieve trace_ids for all peaks in a spectrum matching this PSM's sequence.
-    // We read the IntegerDataArray directly from the pseudo_spectra.
-    auto getTraceIds = [&](Size spec_idx) -> std::vector<Int>
+    // Per-spectrum cache: mz values array (parallel to peaks) for binary search.
+    // Built lazily on first access for each spectrum.
+    std::unordered_map<Size, std::vector<double>> spec_mz_cache;
+
+    // Per-spectrum cache: the fragment_trace_id IntegerDataArray pointer (into pseudo_spectra).
+    // nullptr if the spectrum has no such array.
+    std::unordered_map<Size, const MSSpectrum::IntegerDataArray*> spec_trace_array_cache;
+
+    auto getSpecTraceArray = [&](Size spec_idx) -> const MSSpectrum::IntegerDataArray*
     {
-      std::vector<Int> ids;
+      auto it = spec_trace_array_cache.find(spec_idx);
+      if (it != spec_trace_array_cache.end()) return it->second;
       const MSSpectrum& spec = pseudo_spectra[spec_idx];
       for (const auto& arr : spec.getIntegerDataArrays())
       {
         if (arr.getName() == "fragment_trace_id")
         {
-          ids.assign(arr.begin(), arr.end());
-          break;
+          spec_trace_array_cache[spec_idx] = &arr;
+          return &arr;
         }
       }
-      return ids;
+      spec_trace_array_cache[spec_idx] = nullptr;
+      return nullptr;
+    };
+
+    // Returns only the trace IDs that the peptide hit actually matched — i.e. trace IDs
+    // for peaks in PeptideHit::getPeakAnnotations(). Claiming only matched traces prevents
+    // over-claiming: a peptide must not block unrelated traces it never scored against.
+    // pa.mz is an exact copy of spec[exp_idx].getMZ() (no arithmetic), so binary search
+    // on the sorted spectrum is safe with exact double comparison.
+    auto getMatchedTraceIds = [&](Size spec_idx, const PeptideHit& hit) -> std::vector<Int>
+    {
+      const MSSpectrum::IntegerDataArray* trace_arr = getSpecTraceArray(spec_idx);
+      if (trace_arr == nullptr) return {};
+
+      const MSSpectrum& spec = pseudo_spectra[spec_idx];
+
+      // Build mz cache for this spectrum if not already present.
+      auto& mz_vec = spec_mz_cache[spec_idx];
+      if (mz_vec.empty() && !spec.empty())
+      {
+        mz_vec.reserve(spec.size());
+        for (const auto& pk : spec) mz_vec.push_back(pk.getMZ());
+        // Spectrum is already sorted by mz in OpenMS — no re-sort needed.
+      }
+
+      std::vector<Int> matched_ids;
+      matched_ids.reserve(hit.getPeakAnnotations().size());
+
+      for (const auto& pa : hit.getPeakAnnotations())
+      {
+        // Binary search for the exact mz value (safe: pa.mz = spec[exp_idx].getMZ()).
+        auto lb = std::lower_bound(mz_vec.begin(), mz_vec.end(), pa.mz);
+        if (lb != mz_vec.end() && *lb == pa.mz)
+        {
+          const Size pk_idx = static_cast<Size>(lb - mz_vec.begin());
+          if (pk_idx < trace_arr->size())
+            matched_ids.push_back((*trace_arr)[pk_idx]);
+        }
+      }
+      return matched_ids;
     };
 
     // Track which PSMs survive after claiming filter.
-    // Key: (pep_id_idx, hit_idx) → number of unique (unclaimed-by-others) fragments.
+    // Key: (pep_id_idx, hit_idx) → number of unique (unclaimed-by-others) matched fragments.
     std::unordered_map<Size, std::unordered_map<Size, Size>> unique_fragment_counts;
 
     for (const PSMEntry& psm : psm_list)
     {
-      std::vector<Int> all_trace_ids = getTraceIds(psm.spectrum_idx);
-      if (all_trace_ids.empty())
+      const PeptideHit& hit = peptide_ids[psm.pep_id_idx].getHits()[psm.hit_idx];
+      std::vector<Int> matched_trace_ids = getMatchedTraceIds(psm.spectrum_idx, hit);
+
+      if (matched_trace_ids.empty())
       {
-        // Spectrum has no trace ids — count all peaks as unique.
-        const Size n_peaks = pseudo_spectra[psm.spectrum_idx].size();
-        unique_fragment_counts[psm.pep_id_idx][psm.hit_idx] = n_peaks;
+        // No trace IDs resolvable (no PeakAnnotations or no trace array) — treat as
+        // surviving with peak count so it is not incorrectly discarded.
+        unique_fragment_counts[psm.pep_id_idx][psm.hit_idx] =
+            hit.getPeakAnnotations().size();
         continue;
       }
 
-      // Count how many trace IDs are currently unclaimed (or claimed by this same sequence).
+      // Count matched trace IDs that are unclaimed or already claimed by this same sequence.
+      // Only matched traces count toward unique_count — unmatched traces in the spectrum
+      // are irrelevant and must not block other peptides in other pseudo spectra.
       Size unique_count = 0;
       std::vector<Int> claimable;
-      for (Int tid : all_trace_ids)
+      for (Int tid : matched_trace_ids)
       {
         const FragmentClaimRegistry::ClaimRecord* rec = registry.getClaimRecord(tid);
         if (rec == nullptr || rec->peptide_seq == psm.sequence)
@@ -1675,7 +1726,8 @@ namespace OpenMS
 
       unique_fragment_counts[psm.pep_id_idx][psm.hit_idx] = unique_count;
 
-      // Claim all currently unclaimed trace IDs for this PSM.
+      // Claim the unclaimed matched trace IDs for this PSM so lower-scoring PSMs
+      // (in this spectrum or any other spectrum in the window) cannot reuse them.
       if (unique_count >= min_unique_fragments)
         registry.tryClaim(claimable, psm.sequence, psm.score, psm.spectrum_idx);
     }
