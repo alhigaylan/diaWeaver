@@ -978,7 +978,7 @@ protected:
       {
 #pragma omp critical (write_spectra)
         {
-          for (const auto& spec : pseudo_spectra)
+          for (auto& spec : pseudo_spectra)
             plain_consumer->consumeSpectrum(spec);
         }
       }
