@@ -1129,10 +1129,14 @@ protected:
     }
 
     // Remove decoys and dangling references from final output.
+    IDFilter::removeDecoyHits(merged_prot_ids);
     IDFilter::removeDecoyHits(merged_peptides);
     IDFilter::removeEmptyIdentifications(merged_peptides);
     IDFilter::removeUnreferencedProteins(merged_prot_ids, merged_peptides);
     IDFilter::removeDanglingProteinReferences(merged_peptides, merged_prot_ids);
+    // Protein groups built by BPIA may reference decoy accessions that were removed above.
+    IDFilter::updateProteinGroups(merged_prot_ids[0].getProteinGroups(), merged_prot_ids[0].getHits());
+    IDFilter::updateProteinGroups(merged_prot_ids[0].getIndistinguishableProteins(), merged_prot_ids[0].getHits());
 
     // ------------------------------------------------------------------
     // Step 5: Write output.
