@@ -1106,6 +1106,9 @@ protected:
         OPENMS_LOG_INFO << "[diaWeaverPeptide] Applying PSM FDR at " << user_psm_fdr * 100
                         << "% threshold..." << std::endl;
         FalseDiscoveryRate fdr_tool;
+        Param fdr_params = fdr_tool.getParameters();
+        fdr_params.setValue("use_all_hits", "true");
+        fdr_tool.setParameters(fdr_params);
         fdr_tool.apply(merged_peptides);
         IDFilter::filterHitsByScore(merged_peptides, user_psm_fdr);
         IDFilter::removeEmptyIdentifications(merged_peptides);
