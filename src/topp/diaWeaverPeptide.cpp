@@ -38,6 +38,7 @@
 #endif
 
 #include <cmath>
+#include <fstream>
 #include <set>
 #include <chrono>
 
@@ -405,6 +406,13 @@ protected:
       "into a single output spectrum. Written after 1% FDR filtering.", false);
     setValidFormats_("out_annotated_mzml", ListUtils::create<String>("mzML"));
 
+    registerOutputFile_("out_debug_tsv", "<file>", "",
+      "Debug TSV: one row per PSM hit, written after FDR scoring but before score "
+      "threshold filtering. Columns: spectrum_native_id, sequence, hyperscore, q_value. "
+      "If FDR is not applied, q_value is reported as NA and hyperscore is the raw "
+      "ln(hyperscore). Useful for inspecting the full ranked hit list.", false);
+    setValidFormats_("out_debug_tsv", ListUtils::create<String>("tsv"));
+
     // Preprocessing flags (identical to diaWeaver)
     registerFlag_("save_unfragmented_precursors",
       "Also run FeatureFinderPeptide on peaks within the precursor isolation window.");
@@ -636,6 +644,7 @@ protected:
     const String out_idxml          = getStringOption_("out_idxml");
     const String out_mzml           = getStringOption_("out_mzml");
     const String out_annotated_mzml = getStringOption_("out_annotated_mzml");
+    const String out_debug_tsv      = getStringOption_("out_debug_tsv");
 
     if (out_idxml.empty())
     {
@@ -1091,6 +1100,49 @@ protected:
       }
     }
 
+    // Helper: write debug TSV of all scored PSM hits.
+    // Written after FDR assigns q-values (before score-threshold filtering) so
+    // the full ranked list is visible. If FDR was not applied, q_value is "NA".
+    auto write_debug_tsv = [&](bool has_qvalues)
+    {
+      if (out_debug_tsv.empty()) return;
+      std::ofstream tsv(out_debug_tsv);
+      if (!tsv)
+      {
+        OPENMS_LOG_WARN << "[diaWeaverPeptide] Cannot open debug TSV for writing: "
+                        << out_debug_tsv << std::endl;
+        return;
+      }
+      tsv << "spectrum_native_id\tsequence\thyperscore\tq_value\n";
+      const String orig_score_key = "ln(hyperscore)_score";
+      for (const auto& pi : merged_peptides)
+      {
+        const String& native_id = pi.getSpectrumReference();
+        for (const auto& hit : pi.getHits())
+        {
+          double hyperscore, qval;
+          if (has_qvalues && hit.metaValueExists(orig_score_key))
+          {
+            hyperscore = static_cast<double>(hit.getMetaValue(orig_score_key));
+            qval       = hit.getScore();
+          }
+          else
+          {
+            hyperscore = hit.getScore();
+            qval       = -1.0;
+          }
+          tsv << native_id << "\t"
+              << hit.getSequence().toString() << "\t"
+              << hyperscore << "\t";
+          if (qval >= 0.0) tsv << qval;
+          else             tsv << "NA";
+          tsv << "\n";
+        }
+      }
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] Debug PSM TSV written to " << out_debug_tsv
+                      << std::endl;
+    };
+
     // PSM-level FDR — applied before protein inference so BPIA sees only
     // confident PSMs (mirrors ProSE's per-file FDR-before-merge approach).
     if (user_psm_fdr > 0.0)
@@ -1100,6 +1152,7 @@ protected:
         OPENMS_LOG_WARN << "[diaWeaverPeptide] FDR:PSM requested but no decoy PSMs found. "
                         << "Enable Search:decoys or provide a FASTA with decoy proteins. "
                         << "Skipping PSM FDR filtering." << std::endl;
+        write_debug_tsv(false);
       }
       else
       {
@@ -1110,11 +1163,16 @@ protected:
         fdr_params.setValue("use_all_hits", "true");
         fdr_tool.setParameters(fdr_params);
         fdr_tool.apply(merged_peptides);
+        write_debug_tsv(true);
         IDFilter::filterHitsByScore(merged_peptides, user_psm_fdr);
         IDFilter::removeEmptyIdentifications(merged_peptides);
         OPENMS_LOG_INFO << "[diaWeaverPeptide] " << merged_peptides.size()
                         << " PSMs retained after PSM FDR." << std::endl;
       }
+    }
+    else
+    {
+      write_debug_tsv(false);
     }
 
     // If protein FDR is not requested, strip decoys before BPIA so protein

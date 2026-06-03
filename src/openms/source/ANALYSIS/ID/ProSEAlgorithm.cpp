@@ -1653,12 +1653,14 @@ namespace OpenMS
       return nullptr;
     };
 
-    // Returns only the trace IDs that the peptide hit actually matched — i.e. trace IDs
-    // for peaks in PeptideHit::getPeakAnnotations(). Claiming only matched traces prevents
-    // over-claiming: a peptide must not block unrelated traces it never scored against.
+    // Returns (trace_id, annotation_index) pairs for peaks that the peptide hit actually
+    // matched.  The annotation_index is the index into hit.getPeakAnnotations() so that
+    // callers can retrieve ion-type and intensity information for the recalculation step.
     // pa.mz is an exact copy of spec[exp_idx].getMZ() (no arithmetic), so binary search
     // on the sorted spectrum is safe with exact double comparison.
-    auto getMatchedTraceIds = [&](Size spec_idx, const PeptideHit& hit) -> std::vector<Int>
+    using TraceAnnotPair = std::pair<Int, Size>;
+    auto getMatchedTraceIdsIndexed = [&](Size spec_idx, const PeptideHit& hit)
+        -> std::vector<TraceAnnotPair>
     {
       const MSSpectrum::IntegerDataArray* trace_arr = getSpecTraceArray(spec_idx);
       if (trace_arr == nullptr) return {};
@@ -1674,21 +1676,31 @@ namespace OpenMS
         // Spectrum is already sorted by mz in OpenMS — no re-sort needed.
       }
 
-      std::vector<Int> matched_ids;
-      matched_ids.reserve(hit.getPeakAnnotations().size());
+      const auto& annotations = hit.getPeakAnnotations();
+      std::vector<TraceAnnotPair> result;
+      result.reserve(annotations.size());
 
-      for (const auto& pa : hit.getPeakAnnotations())
+      for (Size ai = 0; ai < annotations.size(); ++ai)
       {
         // Binary search for the exact mz value (safe: pa.mz = spec[exp_idx].getMZ()).
-        auto lb = std::lower_bound(mz_vec.begin(), mz_vec.end(), pa.mz);
-        if (lb != mz_vec.end() && *lb == pa.mz)
+        auto lb = std::lower_bound(mz_vec.begin(), mz_vec.end(), annotations[ai].mz);
+        if (lb != mz_vec.end() && *lb == annotations[ai].mz)
         {
           const Size pk_idx = static_cast<Size>(lb - mz_vec.begin());
           if (pk_idx < trace_arr->size())
-            matched_ids.push_back((*trace_arr)[pk_idx]);
+            result.emplace_back((*trace_arr)[pk_idx], ai);
         }
       }
-      return matched_ids;
+      return result;
+    };
+
+    // Log-factorial helper replicating the HyperScore formula:
+    //   logfact(x)       = ln(x!) relative to base 2  (i.e. ln(x!/1!))
+    //   logfact(x, base) = ln(x! / (base-1)!)         (partial factorial)
+    auto logfact = [](int x, int base = 2) -> double {
+      base = std::max(base, 2);
+      if (x < base - 1) return 0.0;
+      return std::lgamma(double(x + 1)) - std::lgamma(double(base));
     };
 
     // Track which PSMs survive after claiming filter.
@@ -1698,9 +1710,10 @@ namespace OpenMS
     for (const PSMEntry& psm : psm_list)
     {
       const PeptideHit& hit = peptide_ids[psm.pep_id_idx].getHits()[psm.hit_idx];
-      std::vector<Int> matched_trace_ids = getMatchedTraceIds(psm.spectrum_idx, hit);
+      std::vector<TraceAnnotPair> matched_indexed =
+          getMatchedTraceIdsIndexed(psm.spectrum_idx, hit);
 
-      if (matched_trace_ids.empty())
+      if (matched_indexed.empty())
       {
         // No trace IDs resolvable (no PeakAnnotations or no trace array) — treat as
         // surviving with peak count so it is not incorrectly discarded.
@@ -1709,27 +1722,64 @@ namespace OpenMS
         continue;
       }
 
-      // Count matched trace IDs that are unclaimed or already claimed by this same sequence.
-      // Only matched traces count toward unique_count — unmatched traces in the spectrum
-      // are irrelevant and must not block other peptides in other pseudo spectra.
+      // Partition matched (trace_id, annot_idx) pairs into:
+      //   claimable        — unclaimed traces this PSM will register
+      //   owned_annot_idxs — annotation indices for all uniquely owned traces
+      //                      (unclaimed OR already claimed by the same sequence)
       Size unique_count = 0;
-      std::vector<Int> claimable;
-      for (Int tid : matched_trace_ids)
+      std::vector<Int>  claimable;
+      std::vector<Size> owned_annot_idxs;
+
+      for (const auto& [tid, ai] : matched_indexed)
       {
         const FragmentClaimRegistry::ClaimRecord* rec = registry.getClaimRecord(tid);
         if (rec == nullptr || rec->peptide_seq == psm.sequence)
         {
           ++unique_count;
+          owned_annot_idxs.push_back(ai);
           if (rec == nullptr) claimable.push_back(tid);
         }
       }
 
       unique_fragment_counts[psm.pep_id_idx][psm.hit_idx] = unique_count;
 
-      // Claim the unclaimed matched trace IDs for this PSM so lower-scoring PSMs
-      // (in this spectrum or any other spectrum in the window) cannot reuse them.
       if (unique_count >= min_unique_fragments)
+      {
+        // Recalculate hyperscore using only the uniquely owned fragment peaks.
+        // pa.intensity is the experimental peak intensity; the theoretical
+        // peak intensity from TheoreticalSpectrumGenerator is 1.0, so
+        // dot_product = sum(exp_intensity) — identical to the original scoring.
+        const auto& annotations = hit.getPeakAnnotations();
+        int prefix_count = 0, suffix_count = 0;
+        double dot_product = 0.0;
+
+        for (Size ai : owned_annot_idxs)
+        {
+          const auto& pa = annotations[ai];
+          if (pa.annotation.empty()) continue;
+          const char c = pa.annotation[0];
+          if      (c == 'a' || c == 'b' || c == 'c') ++prefix_count;
+          else if (c == 'x' || c == 'y' || c == 'z') ++suffix_count;
+          dot_product += pa.intensity;
+        }
+
+        const int i_min = std::min(prefix_count, suffix_count);
+        const int i_max = std::max(prefix_count, suffix_count);
+        const double new_score = std::log1p(dot_product)
+                                 + 2.0 * logfact(i_min)
+                                 + logfact(i_max, i_min + 1);
+
+        // Write updated score and ion counts back onto the PeptideHit so that
+        // Phase 5 and downstream FDR operate on the corrected value.
+        PeptideHit& mhit = peptide_ids[psm.pep_id_idx].getHits()[psm.hit_idx];
+        mhit.setScore(new_score);
+        mhit.setMetaValue(Constants::UserParam::MATCHED_PREFIX_IONS, prefix_count);
+        mhit.setMetaValue(Constants::UserParam::MATCHED_SUFFIX_IONS, suffix_count);
+
+        // Claim unclaimed traces using the original score so the registry
+        // ordering stays consistent with the globally sorted psm_list.
         registry.tryClaim(claimable, psm.sequence, psm.score, psm.spectrum_idx);
+      }
     }
 
     // Phase 5: remove PSMs that do not meet the min_unique_fragments threshold.
