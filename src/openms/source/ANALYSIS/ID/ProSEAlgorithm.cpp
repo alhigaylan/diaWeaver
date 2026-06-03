@@ -1729,10 +1729,29 @@ namespace OpenMS
 
       if (matched_indexed.empty())
       {
-        // No trace IDs resolvable (no PeakAnnotations or no trace array) — treat as
-        // surviving with peak count so it is not incorrectly discarded.
-        unique_fragment_counts[psm.pep_id_idx][psm.hit_idx] =
-            hit.getPeakAnnotations().size();
+        const MSSpectrum* spec_ptr = (psm.spectrum_idx < pseudo_spectra.size())
+                                       ? &pseudo_spectra[psm.spectrum_idx]
+                                       : nullptr;
+        const String native_id = spec_ptr ? spec_ptr->getNativeID() : String("unknown");
+        const Size   n_annots  = hit.getPeakAnnotations().size();
+        const bool   has_arr   = (getSpecTraceArray(psm.spectrum_idx) != nullptr);
+
+        OPENMS_LOG_ERROR << "[ProSE/searchWithClaiming] matched_indexed is empty for PSM:\n"
+                         << "  spectrum native_id  : " << native_id << "\n"
+                         << "  spectrum_idx        : " << psm.spectrum_idx << "\n"
+                         << "  sequence            : " << psm.sequence << "\n"
+                         << "  score               : " << psm.score << "\n"
+                         << "  PeakAnnotations     : " << n_annots << "\n"
+                         << "  fragment_trace_id array present: " << (has_arr ? "YES" : "NO") << "\n"
+                         << "  Cause: "
+                         << (!has_arr
+                               ? "spectrum has no 'fragment_trace_id' IntegerDataArray"
+                               : (n_annots == 0
+                                    ? "PeptideHit has zero PeakAnnotations"
+                                    : "no annotation mz matched any spectrum peak mz (tolerance or sorting issue)"))
+                         << std::endl;
+        // PSM is not inserted into unique_fragment_counts, so it will be
+        // treated as having 0 unique fragments and discarded by the filter below.
         continue;
       }
 
