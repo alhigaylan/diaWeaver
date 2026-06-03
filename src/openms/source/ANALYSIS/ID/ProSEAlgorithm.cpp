@@ -1601,13 +1601,13 @@ namespace OpenMS
     }
 
     // Phase 3: collect all PSMs with their spectrum index and score.
-    // PeptideIdentification carries the spectrum reference as RT (the scan RT).
-    // We need to map RT back to spectrum index for the exclusion mask.
-    // Build a RT → spectrum_idx lookup from pseudo_spectra.
-    std::unordered_map<double, Size> rt_to_spec_idx;
-    rt_to_spec_idx.reserve(pseudo_spectra.size());
+    // Use native ID (set by postProcessHits_ via setSpectrumReference) for lookup —
+    // multiple pseudo spectra can share the same RT when they differ only by IM,
+    // so an RT-keyed map would silently map them all to the last-inserted index.
+    std::unordered_map<String, Size> nativeid_to_spec_idx;
+    nativeid_to_spec_idx.reserve(pseudo_spectra.size());
     for (Size i = 0; i < pseudo_spectra.size(); ++i)
-      rt_to_spec_idx[pseudo_spectra[i].getRT()] = i;
+      nativeid_to_spec_idx[pseudo_spectra[i].getNativeID()] = i;
 
     struct PSMEntry
     {
@@ -1623,9 +1623,9 @@ namespace OpenMS
 
     for (Size pid = 0; pid < peptide_ids.size(); ++pid)
     {
-      auto rt_it = rt_to_spec_idx.find(peptide_ids[pid].getRT());
-      if (rt_it == rt_to_spec_idx.end()) continue;
-      const Size spec_idx = rt_it->second;
+      auto it = nativeid_to_spec_idx.find(peptide_ids[pid].getSpectrumReference());
+      if (it == nativeid_to_spec_idx.end()) continue;
+      const Size spec_idx = it->second;
 
       for (Size hid = 0; hid < peptide_ids[pid].getHits().size(); ++hid)
       {
