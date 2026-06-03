@@ -900,6 +900,14 @@ namespace OpenMS
       const double snes_realize_tol_lo = precursor_mass_tolerance_lower_;
       const double snes_realize_tol_hi = precursor_mass_tolerance_upper_;
 
+      // Per-spectrum dedup: the same AASequence (including modifications) can
+      // arrive multiple times from querySpectrum when it matches at different
+      // charge states or isotope offsets. Keep only the best-scoring entry per
+      // unique sequence string so top_hits reports N distinct peptides, not N
+      // copies of the best peptide at different charges.
+      // Maps sequence string → index into annotated_hits[scan_index].
+      std::unordered_map<String, Size> seq_best_idx;
+
       // Reused across candidates of this spectrum. Avoids per-candidate heap
       // churn of a fresh PeakSpectrum + its DataArrays (TSG's add_metainfo fills
       // StringDataArrays with ion names — these are a notable allocation hot spot
@@ -992,7 +1000,13 @@ namespace OpenMS
           ah.delta_mass = exp_mh_plus - theo_mh_plus;
         }
 
-        annotated_hits[scan_index].push_back(std::move(ah));
+        // Deduplicate: insert new entry or replace existing if this score is better.
+        const String seq_str = ah.sequence.toString();
+        auto [it, inserted] = seq_best_idx.emplace(seq_str, annotated_hits[scan_index].size());
+        if (inserted)
+          annotated_hits[scan_index].push_back(std::move(ah));
+        else if (ah.score > annotated_hits[scan_index][it->second].score)
+          annotated_hits[scan_index][it->second] = std::move(ah);
       }
     }
     endProgress();
