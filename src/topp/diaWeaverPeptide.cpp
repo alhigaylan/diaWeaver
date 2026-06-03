@@ -37,6 +37,7 @@
 #include <OpenMS/FORMAT/BrukerTimsFile.h>
 #endif
 
+#include <OpenMS/CONCEPT/Constants.h>
 #include <cmath>
 #include <fstream>
 #include <set>
@@ -1113,11 +1114,16 @@ protected:
                         << out_debug_tsv << std::endl;
         return;
       }
-      tsv << "spectrum_native_id\tsequence\thyperscore\tq_value\n";
+      tsv << "spectrum_native_id\tRT\tIM\tprecursor_mz\tsequence\thyperscore\tq_value\n";
       const String orig_score_key = "ln(hyperscore)_score";
       for (const auto& pi : merged_peptides)
       {
         const String& native_id = pi.getSpectrumReference();
+        const double  rt        = pi.getRT();
+        const double  prec_mz   = pi.getMZ();
+        const String  im_str    = pi.metaValueExists(Constants::UserParam::IM)
+                                    ? String(static_cast<double>(pi.getMetaValue(Constants::UserParam::IM)))
+                                    : "NA";
         for (const auto& hit : pi.getHits())
         {
           double hyperscore, qval;
@@ -1132,6 +1138,9 @@ protected:
             qval       = -1.0;
           }
           tsv << native_id << "\t"
+              << rt        << "\t"
+              << im_str    << "\t"
+              << prec_mz   << "\t"
               << hit.getSequence().toString() << "\t"
               << hyperscore << "\t";
           if (qval >= 0.0) tsv << qval;
