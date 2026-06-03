@@ -1747,7 +1747,8 @@ namespace OpenMS
       for (const auto& [tid, ai] : matched_indexed)
       {
         const FragmentClaimRegistry::ClaimRecord* rec = registry.getClaimRecord(tid);
-        if (rec == nullptr || rec->peptide_seq == psm.sequence)
+        if (rec == nullptr ||
+            (rec->peptide_seq == psm.sequence && rec->spectrum_idx == psm.spectrum_idx))
         {
           ++unique_count;
           owned_annot_idxs.push_back(ai);
