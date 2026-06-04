@@ -244,7 +244,7 @@ namespace OpenMS
     clusterAndCreateSpectra_(
         precursor_profiles, precursor_mz, precursor_rt, precursor_im, precursor_charge, precursor_intensity,
         fragment_profiles, fragment_mz, fragment_rt, fragment_im, fragment_intensity,
-        swath_lower, swath_upper, has_im_data, pseudo_spectra);
+        swath_lower, swath_upper, has_im_data, /*window_idx=*/0, pseudo_spectra);
   }
 
   void ClusterMassTracesByPrecursor::run(
