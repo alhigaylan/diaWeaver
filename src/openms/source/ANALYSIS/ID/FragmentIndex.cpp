@@ -1509,6 +1509,21 @@ init_hits.hits_.erase(it_zero, init_hits.hits_.end());
     }
   }
 
+  void FragmentIndex::searchDifferentPrecursorRanges(const MSSpectrum& spectrum,
+                                                     float precursor_mass,
+                                                     SpectrumMatchesTopN& sms,
+                                                     uint16_t charge,
+                                                     std::pair<float, float> window_override)
+  {
+    // DIA-window mode: use the caller-supplied window directly.
+    // No isotope-error iteration — the DIA window captures all isotopes within it.
+    auto candidates_range = getPeptidesInMassWindow(precursor_mass, window_override);
+    SpectrumMatchesTopN candidates;
+    candidates.hits_.resize(candidates_range.second - candidates_range.first);
+    queryPeaks(candidates, spectrum, candidates_range, /*isotope_error=*/0, charge);
+    sms += candidates;
+  }
+
   void FragmentIndex::querySpectrumSNES_(const MSSpectrum& spectrum,
                                           const std::vector<FASTAFile::FASTAEntry>& fasta_entries,
                                           SpectrumMatchesTopN& sms)
@@ -2069,12 +2084,31 @@ init_hits.hits_.erase(it_zero, init_hits.hits_.end());
         }
       }
 
+      // DIA-window mode: replace the configured mass tolerance with the spectrum's
+      // isolation window when use_isolation_window_ is set and the window is non-zero.
+      const bool use_iso_window = use_isolation_window_ &&
+          (precursor[0].getIsolationWindowLowerOffset() > 0.0 ||
+           precursor[0].getIsolationWindowUpperOffset() > 0.0);
+
       for (uint16_t charge : charges)
       {
         SpectrumMatchesTopN candidates_charge;
-        float mz;
-        mz = (float)precursor[0].getMZ() * charge - ((charge-1) * Constants::PROTON_MASS_U);
-        searchDifferentPrecursorRanges(spectrum, mz, candidates_charge, charge);
+        const float prec_mz = (float)precursor[0].getMZ();
+        const float mz = prec_mz * charge - ((charge - 1) * (float)Constants::PROTON_MASS_U);
+
+        if (use_iso_window)
+        {
+          const float lo_mz = prec_mz - (float)precursor[0].getIsolationWindowLowerOffset();
+          const float hi_mz = prec_mz + (float)precursor[0].getIsolationWindowUpperOffset();
+          const float lo_mass = lo_mz * charge - ((charge - 1) * (float)Constants::PROTON_MASS_U);
+          const float hi_mass = hi_mz * charge - ((charge - 1) * (float)Constants::PROTON_MASS_U);
+          searchDifferentPrecursorRanges(spectrum, mz, candidates_charge, charge,
+                                         {lo_mass - mz, hi_mass - mz});
+        }
+        else
+        {
+          searchDifferentPrecursorRanges(spectrum, mz, candidates_charge, charge);
+        }
 
         sms += candidates_charge;
       }
@@ -2116,6 +2150,13 @@ init_hits.hits_.erase(it_zero, init_hits.hits_.end());
     defaults_.setMinFloat("precursor:mass_tolerance_upper", 0.0);
     defaults_.setValue("precursor:mass_tolerance_unit", "ppm", "Unit of precursor mass tolerance.");
     defaults_.setValidStrings("precursor:mass_tolerance_unit", {"ppm", "Da"});
+    defaults_.setValue("precursor:use_isolation_window", "false",
+      "If 'true' and the queried spectrum carries isolation-window offsets (set automatically "
+      "by diaWeaverPeptide for DIA pseudo spectra), use the DIA acquisition window as the "
+      "precursor search range instead of the configured mass tolerance. Isotope-error shifting "
+      "is disabled in this mode (the full DIA window already encompasses all co-eluting "
+      "isotopes). Falls back to tolerance-based search for spectra without isolation-window offsets.");
+    defaults_.setValidStrings("precursor:use_isolation_window", {"true", "false"});
 
     defaults_.setValue("fragment:mass_tolerance", 10.0, "Fragment mass tolerance");
     std::vector<std::string> fragment_mass_tolerance_unit_valid_strings;
@@ -2238,6 +2279,7 @@ init_hits.hits_.erase(it_zero, init_hits.hits_.end());
     precursor_mass_tolerance_lower_ = param_.getValue("precursor:mass_tolerance_lower");
     precursor_mass_tolerance_upper_ = param_.getValue("precursor:mass_tolerance_upper");
     precursor_mass_tolerance_unit_ppm_ = param_.getValue("precursor:mass_tolerance_unit").toString() == "ppm";
+    use_isolation_window_ = param_.getValue("precursor:use_isolation_window").toBool();
     fragment_mz_tolerance_ = param_.getValue("fragment:mass_tolerance");
     fragment_mz_tolerance_unit_ppm_ = param_.getValue("fragment:mass_tolerance_unit").toString() == "ppm";
 

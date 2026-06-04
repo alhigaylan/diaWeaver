@@ -76,6 +76,14 @@ namespace OpenMS
     defaults_.setMinFloat("precursor:mass_tolerance_upper", 0.0);
     defaults_.setValue("precursor:mass_tolerance_unit", "ppm", "Unit of precursor mass tolerance.");
     defaults_.setValidStrings("precursor:mass_tolerance_unit", {"ppm", "Da"});
+    defaults_.setValue("precursor:use_isolation_window", "false",
+      "If 'true', use the DIA isolation window stored on each pseudo spectrum as the "
+      "precursor search range instead of the configured mass tolerance. Enables whole-window "
+      "searching across the actual DIA acquisition window (e.g. [400, 425] m/z) rather than "
+      "a symmetric tolerance around the observed precursor m/z. Isotope-error shifting is "
+      "disabled in this mode. Only effective when spectra carry isolation-window offsets "
+      "(set automatically by diaWeaverPeptide).");
+    defaults_.setValidStrings("precursor:use_isolation_window", {"true", "false"});
 
     defaults_.setValue("precursor:min_charge", 2, "Minimum precursor charge to be considered.");
     defaults_.setValue("precursor:max_charge", 5, "Maximum precursor charge to be considered.");

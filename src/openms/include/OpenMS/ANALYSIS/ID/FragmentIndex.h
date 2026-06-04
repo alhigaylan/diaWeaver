@@ -604,6 +604,7 @@ protected:
     double precursor_mass_tolerance_lower_{20.0};   ///< positive magnitude, effective lower bound is -lower
     double precursor_mass_tolerance_upper_{20.0};   ///< positive magnitude, effective upper bound is +upper
     bool precursor_mass_tolerance_unit_ppm_{true};
+    bool use_isolation_window_{false};  ///< if true, DIA isolation window overrides mass tolerance
     float fragment_mz_tolerance_;
     bool fragment_mz_tolerance_unit_ppm_{true};    
 private:
@@ -680,6 +681,13 @@ private:
                                         float precursor_mass,
                                         SpectrumMatchesTopN& sms,
                                         uint16_t charge);
+
+    /// DIA-window overload: uses @p window_override directly, skipping isotope-error iteration.
+    void searchDifferentPrecursorRanges(const MSSpectrum& spectrum,
+                                        float precursor_mass,
+                                        SpectrumMatchesTopN& sms,
+                                        uint16_t charge,
+                                        std::pair<float, float> window_override);
 
     /** @brief places the k-largest elements in the front of the input array. Inside of the k-largest elements and outside the elements are not sorted
      *

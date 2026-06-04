@@ -803,6 +803,8 @@ namespace OpenMS
       p.setMZ(precursor_mz[i]);
       p.setCharge(precursor_charge[i]);
       p.setIntensity(precursor_intensity[i]);
+      p.setIsolationWindowLowerOffset(precursor_mz[i] - swath_lower);
+      p.setIsolationWindowUpperOffset(swath_upper - precursor_mz[i]);
       if (has_im_data)
       {
         p.setDriftTime(precursor_im[i]);
@@ -1028,6 +1030,8 @@ namespace OpenMS
         p.setMZ(precursor_mz[i]);
         p.setCharge(precursor_charge[i]);
         p.setIntensity(precursor_intensity[i]);
+        p.setIsolationWindowLowerOffset(precursor_mz[i] - swath_lower);
+        p.setIsolationWindowUpperOffset(swath_upper - precursor_mz[i]);
         if (has_im_data) { p.setDriftTime(precursor_im[i]); p.setDriftTimeUnit(DriftTimeUnit::VSSC); }
         s.setPrecursors({p});
         return s;
