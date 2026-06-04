@@ -401,11 +401,17 @@ protected:
 
     registerOutputFile_("out_annotated_mzml", "<file>", "",
       "Annotated pseudo spectra mzML: one spectrum per identified pseudo spectrum, "
-      "containing only peaks matched to b/y ions. Each peak carries a "
-      "'fragment_annotation' StringDataArray with entries like 'PEPTIDER-y5'. "
-      "Peaks from all peptides identified in the same pseudo spectrum are merged "
-      "into a single output spectrum. Written after 1% FDR filtering.", false);
+      "containing only peaks matched to b/y ions of FDR-passing PSMs. Each peak carries "
+      "'fragment_annotation' (StringDataArray), 'fragment_trace_id', and "
+      "'fragment_window_id' (IntegerDataArrays) for ion accounting. Written after FDR filtering.", false);
     setValidFormats_("out_annotated_mzml", ListUtils::create<String>("mzML"));
+
+    registerOutputFile_("out_orphan_mzml", "<file>", "",
+      "Orphan peaks mzML: one spectrum per pseudo spectrum, containing only MS2 peaks "
+      "NOT matched to any FDR-passing PSM. Each peak carries 'fragment_trace_id' and "
+      "'fragment_window_id' IntegerDataArrays for downstream ion accounting. "
+      "Written after FDR filtering.", false);
+    setValidFormats_("out_orphan_mzml", ListUtils::create<String>("mzML"));
 
     registerOutputFile_("out_debug_tsv", "<file>", "",
       "Debug TSV: one row per PSM hit, written after FDR scoring but before score "
@@ -645,6 +651,7 @@ protected:
     const String out_idxml          = getStringOption_("out_idxml");
     const String out_mzml           = getStringOption_("out_mzml");
     const String out_annotated_mzml = getStringOption_("out_annotated_mzml");
+    const String out_orphan_mzml    = getStringOption_("out_orphan_mzml");
     const String out_debug_tsv      = getStringOption_("out_debug_tsv");
 
     if (out_idxml.empty())
@@ -803,6 +810,9 @@ protected:
     // Accumulate per-window identification results for cross-window merging.
     std::vector<std::vector<ProteinIdentification>> all_prot_ids;
     std::vector<PeptideIdentificationList> all_pep_ids;
+    // Keyed by native_id: preprocessed pseudo spectra (post-searchWithClaiming) held for
+    // post-FDR orphan and annotated mzML writing.
+    std::unordered_map<String, MSSpectrum> all_pseudo_spectra;
 
     // Pickers passed as const-ref to peakPickInPlace_(), which creates per-inner-thread
     // copies internally — safe to share across outer threads.
@@ -950,7 +960,7 @@ protected:
           ClusterMassTracesByPrecursor clusterer;
           clusterer.setParameters(cluster_param);
           clusterer.run(precursor_features, precursor_traces, ms2_traces,
-                        w.lower_mz, w.upper_mz, pseudo_precursor);
+                        w.lower_mz, w.upper_mz, pseudo_precursor, static_cast<Int>(idx));
         }
       }
 
@@ -967,7 +977,7 @@ protected:
           ClusterMassTracesByPrecursor clusterer;
           clusterer.setParameters(cluster_param);
           clusterer.run(ms1_features, ms1_traces, ms2_traces,
-                        w.lower_mz, w.upper_mz, pseudo_ms1);
+                        w.lower_mz, w.upper_mz, pseudo_ms1, static_cast<Int>(idx));
         }
       }
 
@@ -1010,6 +1020,13 @@ protected:
       const ProSEAlgorithm::ExitCodes ec =
         prose.searchWithClaiming(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
                                  min_unique_fragments_);
+
+      // Always collect preprocessed pseudo spectra for post-FDR orphan/annotated output.
+#pragma omp critical (collect_pseudo_spectra)
+      {
+        for (auto& spec : pseudo_spectra)
+          all_pseudo_spectra[spec.getNativeID()] = spec;
+      }
 
       if (ec != ProSEAlgorithm::ExitCodes::EXECUTION_OK || window_prot_ids.empty() || window_pep_ids.empty())
       {
@@ -1242,97 +1259,158 @@ protected:
     // Group surviving PeptideIdentifications by spectrum native ID (getSpectrumReference()).
     // All peptide hits sharing the same native ID originated from the same pseudo spectrum
     // and are written as one output spectrum containing only b/y-matched peaks.
-    if (!out_annotated_mzml.empty())
+    // Build claimed-mz lookup from FDR-surviving PSMs: native_id → set of claimed peak mz values.
+    // Used for both annotated and orphan mzML writing.
+    const bool need_ion_accounting = !out_annotated_mzml.empty() || !out_orphan_mzml.empty();
+    std::unordered_map<String, std::unordered_set<double>> claimed_mzs_by_id;
+    std::map<String, std::vector<Size>> native_id_to_pids;  // for annotation labels
+
+    if (need_ion_accounting)
     {
-      // native_id → ordered list of PeptideIdentification indices in merged_peptides
-      std::map<String, std::vector<Size>> native_id_to_pids;
       for (Size pid = 0; pid < merged_peptides.size(); ++pid)
       {
         const String& ref = merged_peptides[pid].getSpectrumReference();
-        if (!ref.empty())
-          native_id_to_pids[ref].push_back(pid);
+        if (ref.empty()) continue;
+        native_id_to_pids[ref].push_back(pid);
+        for (const PeptideHit& hit : merged_peptides[pid].getHits())
+          for (const PeptideHit::PeakAnnotation& pa : hit.getPeakAnnotations())
+            claimed_mzs_by_id[ref].insert(pa.mz);
       }
+    }
 
+    // Helper: get fragment_trace_id and fragment_window_id arrays from a spectrum.
+    auto getTraceArrays = [](const MSSpectrum& s,
+                             const MSSpectrum::IntegerDataArray*& tid_arr,
+                             const MSSpectrum::IntegerDataArray*& wid_arr)
+    {
+      tid_arr = nullptr; wid_arr = nullptr;
+      for (const auto& arr : s.getIntegerDataArrays())
+      {
+        if      (arr.getName() == "fragment_trace_id")  tid_arr = &arr;
+        else if (arr.getName() == "fragment_window_id") wid_arr = &arr;
+      }
+    };
+
+    if (!out_annotated_mzml.empty())
+    {
       MSExperiment annotated_exp;
 
       for (const auto& [native_id, pid_indices] : native_id_to_pids)
       {
-        // Collect all PeakAnnotations from all PeptideHits across all identifications
-        // sharing this native ID. Key: mz → combined annotation string.
-        // mz values are exact float copies from the original spectrum so map equality is safe.
-        std::map<double, std::pair<double, String>> mz_to_annotation;
+        auto spec_it = all_pseudo_spectra.find(native_id);
+        if (spec_it == all_pseudo_spectra.end()) continue;
+        const MSSpectrum& orig = spec_it->second;
 
-        double spectrum_rt  = 0.0;
-        double precursor_mz = 0.0;
-        int    precursor_charge = 0;
-        bool   first = true;
+        // Build mz → annotation label map from all FDR-passing hits for this spectrum.
+        std::map<double, String> mz_to_label;
+        double spectrum_rt = orig.getRT();
+        double precursor_mz = orig.getPrecursors().empty() ? 0.0 : orig.getPrecursors()[0].getMZ();
+        int    precursor_charge = orig.getPrecursors().empty() ? 0 : orig.getPrecursors()[0].getCharge();
 
         for (Size pid : pid_indices)
         {
-          const PeptideIdentification& pep_id = merged_peptides[pid];
-          if (first)
+          for (const PeptideHit& hit : merged_peptides[pid].getHits())
           {
-            spectrum_rt     = pep_id.getRT();
-            precursor_mz    = pep_id.getMZ();
-            first           = false;
-          }
-
-          for (const PeptideHit& hit : pep_id.getHits())
-          {
-            if (precursor_charge == 0)
-              precursor_charge = hit.getCharge();
-
             const String seq = hit.getSequence().toString();
-
             for (const PeptideHit::PeakAnnotation& pa : hit.getPeakAnnotations())
             {
-              // Format: "PEPTIDER-y5" or "PEPTIDER-y5+2" for charge > 1
               String label = seq + "-" + pa.annotation;
-              if (pa.charge > 1)
-                label += "+" + String(pa.charge);
-
-              auto it = mz_to_annotation.find(pa.mz);
-              if (it == mz_to_annotation.end())
-                mz_to_annotation[pa.mz] = {pa.intensity, label};
-              else
-                it->second.second += ";" + label;  // chimeric: merge annotations
+              if (pa.charge > 1) label += "+" + String(pa.charge);
+              auto it = mz_to_label.find(pa.mz);
+              if (it == mz_to_label.end()) mz_to_label[pa.mz] = label;
+              else                         it->second += ";" + label;
             }
           }
         }
+        if (mz_to_label.empty()) continue;
 
-        if (mz_to_annotation.empty()) continue;
+        // Build sorted mz vector from original spectrum for binary search.
+        std::vector<double> orig_mzs;
+        orig_mzs.reserve(orig.size());
+        for (const auto& pk : orig) orig_mzs.push_back(pk.getMZ());
 
-        // Build the annotated spectrum (peaks already sorted by mz via std::map).
-        MSSpectrum spec;
-        spec.setNativeID(native_id);
-        spec.setRT(spectrum_rt);
-        spec.setMSLevel(2);
+        const MSSpectrum::IntegerDataArray* tid_arr = nullptr;
+        const MSSpectrum::IntegerDataArray* wid_arr = nullptr;
+        getTraceArrays(orig, tid_arr, wid_arr);
 
-        Precursor prec;
-        prec.setMZ(precursor_mz);
-        prec.setCharge(precursor_charge);
-        spec.getPrecursors().push_back(prec);
+        MSSpectrum out_spec;
+        out_spec.setNativeID(native_id);
+        out_spec.setRT(spectrum_rt);
+        out_spec.setMSLevel(2);
+        Precursor prec; prec.setMZ(precursor_mz); prec.setCharge(precursor_charge);
+        out_spec.getPrecursors().push_back(prec);
 
-        MSSpectrum::StringDataArray annotation_array;
-        annotation_array.setName("fragment_annotation");
+        MSSpectrum::StringDataArray annot_arr;  annot_arr.setName("fragment_annotation");
+        MSSpectrum::IntegerDataArray out_tid;   out_tid.setName("fragment_trace_id");
+        MSSpectrum::IntegerDataArray out_wid;   out_wid.setName("fragment_window_id");
 
-        for (const auto& [mz, inty_label] : mz_to_annotation)
+        for (const auto& [mz, label] : mz_to_label)
         {
-          Peak1D peak;
-          peak.setMZ(mz);
-          peak.setIntensity(inty_label.first);
-          spec.push_back(peak);
-          annotation_array.push_back(inty_label.second);
+          // Find the peak in the original spectrum by exact mz.
+          auto lb = std::lower_bound(orig_mzs.begin(), orig_mzs.end(), mz);
+          if (lb == orig_mzs.end() || *lb != mz) continue;
+          const Size pk_idx = static_cast<Size>(lb - orig_mzs.begin());
+
+          Peak1D pk; pk.setMZ(mz); pk.setIntensity(orig[pk_idx].getIntensity());
+          out_spec.push_back(pk);
+          annot_arr.push_back(label);
+          if (tid_arr && pk_idx < tid_arr->size()) out_tid.push_back((*tid_arr)[pk_idx]);
+          if (wid_arr && pk_idx < wid_arr->size()) out_wid.push_back((*wid_arr)[pk_idx]);
         }
 
-        spec.getStringDataArrays().push_back(std::move(annotation_array));
-        annotated_exp.addSpectrum(std::move(spec));
+        if (out_spec.empty()) continue;
+        out_spec.getStringDataArrays().push_back(std::move(annot_arr));
+        if (!out_tid.empty()) out_spec.getIntegerDataArrays().push_back(std::move(out_tid));
+        if (!out_wid.empty()) out_spec.getIntegerDataArrays().push_back(std::move(out_wid));
+        annotated_exp.addSpectrum(std::move(out_spec));
       }
 
       annotated_exp.sortSpectra(true);
       OPENMS_LOG_INFO << "[diaWeaverPeptide] Writing " << annotated_exp.size()
                       << " annotated pseudo spectra to: " << out_annotated_mzml << std::endl;
       MzMLFile().store(out_annotated_mzml, annotated_exp);
+    }
+
+    if (!out_orphan_mzml.empty())
+    {
+      MSExperiment orphan_exp;
+
+      for (const auto& [native_id, orig] : all_pseudo_spectra)
+      {
+        const auto& claimed = claimed_mzs_by_id[native_id];  // empty set if no PSMs
+
+        const MSSpectrum::IntegerDataArray* tid_arr = nullptr;
+        const MSSpectrum::IntegerDataArray* wid_arr = nullptr;
+        getTraceArrays(orig, tid_arr, wid_arr);
+
+        MSSpectrum orphan_spec;
+        orphan_spec.setNativeID(native_id);
+        orphan_spec.setRT(orig.getRT());
+        orphan_spec.setMSLevel(2);
+        if (!orig.getPrecursors().empty())
+          orphan_spec.getPrecursors() = orig.getPrecursors();
+
+        MSSpectrum::IntegerDataArray out_tid; out_tid.setName("fragment_trace_id");
+        MSSpectrum::IntegerDataArray out_wid; out_wid.setName("fragment_window_id");
+
+        for (Size i = 0; i < orig.size(); ++i)
+        {
+          if (claimed.find(orig[i].getMZ()) != claimed.end()) continue;  // skip claimed
+          orphan_spec.push_back(orig[i]);
+          if (tid_arr && i < tid_arr->size()) out_tid.push_back((*tid_arr)[i]);
+          if (wid_arr && i < wid_arr->size()) out_wid.push_back((*wid_arr)[i]);
+        }
+
+        if (orphan_spec.empty()) continue;
+        if (!out_tid.empty()) orphan_spec.getIntegerDataArrays().push_back(std::move(out_tid));
+        if (!out_wid.empty()) orphan_spec.getIntegerDataArrays().push_back(std::move(out_wid));
+        orphan_exp.addSpectrum(std::move(orphan_spec));
+      }
+
+      orphan_exp.sortSpectra(true);
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] Writing " << orphan_exp.size()
+                      << " orphan pseudo spectra to: " << out_orphan_mzml << std::endl;
+      MzMLFile().store(out_orphan_mzml, orphan_exp);
     }
 
     // --- 5b. Peptide/protein identifications ---

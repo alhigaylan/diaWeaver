@@ -253,7 +253,8 @@ namespace OpenMS
       const std::vector<MassTrace>& ms2_traces,
       double swath_lower,
       double swath_upper,
-      MSExperiment& pseudo_spectra)
+      MSExperiment& pseudo_spectra,
+      Int window_idx)
   {
     if (ms1_features.empty() || ms2_traces.empty())
     {
@@ -420,7 +421,7 @@ namespace OpenMS
     clusterAndCreateSpectra_(
         precursor_profiles, precursor_mz, precursor_rt, precursor_im, precursor_charge, precursor_intensity,
         fragment_profiles, fragment_mz, fragment_rt, fragment_im, fragment_intensity,
-        swath_lower, swath_upper, has_im_data, pseudo_spectra);
+        swath_lower, swath_upper, has_im_data, window_idx, pseudo_spectra);
   }
 
   void ClusterMassTracesByPrecursor::run(
@@ -430,6 +431,7 @@ namespace OpenMS
       const std::vector<String>& trace_claim_strings,
       double swath_lower,
       double swath_upper,
+      Int window_idx,
       MSExperiment& orphan_spectra,
       MSExperiment& annotated_spectra,
       MSExperiment* full_spectra)
@@ -547,7 +549,7 @@ namespace OpenMS
         precursor_profiles, precursor_mz, precursor_rt, precursor_im, precursor_charge, precursor_intensity,
         fragment_profiles, fragment_mz, fragment_rt, fragment_im, fragment_intensity,
         trace_claim_strings,
-        swath_lower, swath_upper, has_im_data,
+        swath_lower, swath_upper, has_im_data, window_idx,
         orphan_spectra, annotated_spectra, full_spectra);
   }
 
@@ -566,6 +568,7 @@ namespace OpenMS
       double swath_lower,
       double swath_upper,
       bool has_im_data,
+      Int window_idx,
       MSExperiment& pseudo_spectra)
   {
     MasstraceCorrelator mtcorr;
@@ -841,6 +844,8 @@ namespace OpenMS
 
       MSSpectrum::IntegerDataArray trace_id_array;
       trace_id_array.setName("fragment_trace_id");
+      MSSpectrum::IntegerDataArray window_id_array;
+      window_id_array.setName("fragment_window_id");
 
       // Add fragment ions with their scores, RT, and ion mobility
       for (const auto& hs : assignments)
@@ -850,6 +855,7 @@ namespace OpenMS
         peak.setIntensity(fragment_intensity[hs.index]);
         spectrum.push_back(peak);
         trace_id_array.push_back(hs.index);
+        window_id_array.push_back(window_idx);
 
         if (output_fragment_scores_)
         {
@@ -862,6 +868,7 @@ namespace OpenMS
       }
 
       spectrum.getIntegerDataArrays().push_back(std::move(trace_id_array));
+      spectrum.getIntegerDataArrays().push_back(std::move(window_id_array));
 
       if (spectrum.size() >= min_nr_ions_)
       {
@@ -891,6 +898,7 @@ namespace OpenMS
       double swath_lower,
       double swath_upper,
       bool has_im_data,
+      Int window_idx,
       MSExperiment& orphan_spectra,
       MSExperiment& annotated_spectra,
       MSExperiment* full_spectra)
@@ -1034,11 +1042,15 @@ namespace OpenMS
       MSSpectrum::StringDataArray claim_array;
       claim_array.setName("peptide_ion_claims");
 
-      // IntegerDataArrays for trace indices — parallel arrays, split per output
+      // IntegerDataArrays for trace indices and window indices — parallel arrays, split per output
       MSSpectrum::IntegerDataArray orphan_trace_ids, annotated_trace_ids, full_trace_ids;
       orphan_trace_ids.setName("fragment_trace_id");
       annotated_trace_ids.setName("fragment_trace_id");
       full_trace_ids.setName("fragment_trace_id");
+      MSSpectrum::IntegerDataArray orphan_window_ids, annotated_window_ids, full_window_ids;
+      orphan_window_ids.setName("fragment_window_id");
+      annotated_window_ids.setName("fragment_window_id");
+      full_window_ids.setName("fragment_window_id");
 
       // FloatDataArrays (optional scores) — parallel arrays, split per output
       std::vector<std::vector<float>> orphan_scores(5), annotated_scores(5), full_scores(5);
@@ -1056,6 +1068,7 @@ namespace OpenMS
         {
           annotated_spec.push_back(peak);
           annotated_trace_ids.push_back(hs.index);
+          annotated_window_ids.push_back(window_idx);
           claim_array.push_back(trace_claim_strings[hs.index]);
           if (output_fragment_scores_)
           {
@@ -1070,6 +1083,7 @@ namespace OpenMS
         {
           orphan_spec.push_back(peak);
           orphan_trace_ids.push_back(hs.index);
+          orphan_window_ids.push_back(window_idx);
           if (output_fragment_scores_)
           {
             orphan_scores[0].push_back(static_cast<float>(hs.pearson));
@@ -1084,6 +1098,7 @@ namespace OpenMS
         {
           full_spec.push_back(peak);
           full_trace_ids.push_back(hs.index);
+          full_window_ids.push_back(window_idx);
           if (output_fragment_scores_)
           {
             full_scores[0].push_back(static_cast<float>(hs.pearson));
@@ -1115,10 +1130,22 @@ namespace OpenMS
         annotated_spec.setMetaValue("nr_peptides", static_cast<Int>(distinct_peps.size()));
       }
 
-      // Attach IntegerDataArrays (trace ids) — always present
-      if (!orphan_trace_ids.empty())    orphan_spec.getIntegerDataArrays().push_back(std::move(orphan_trace_ids));
-      if (!annotated_trace_ids.empty()) annotated_spec.getIntegerDataArrays().push_back(std::move(annotated_trace_ids));
-      if (full_spectra != nullptr && !full_trace_ids.empty()) full_spec.getIntegerDataArrays().push_back(std::move(full_trace_ids));
+      // Attach IntegerDataArrays (trace ids and window ids) — always present as a pair
+      if (!orphan_trace_ids.empty())
+      {
+        orphan_spec.getIntegerDataArrays().push_back(std::move(orphan_trace_ids));
+        orphan_spec.getIntegerDataArrays().push_back(std::move(orphan_window_ids));
+      }
+      if (!annotated_trace_ids.empty())
+      {
+        annotated_spec.getIntegerDataArrays().push_back(std::move(annotated_trace_ids));
+        annotated_spec.getIntegerDataArrays().push_back(std::move(annotated_window_ids));
+      }
+      if (full_spectra != nullptr && !full_trace_ids.empty())
+      {
+        full_spec.getIntegerDataArrays().push_back(std::move(full_trace_ids));
+        full_spec.getIntegerDataArrays().push_back(std::move(full_window_ids));
+      }
 
       // Attach FloatDataArrays if requested
       auto attachScores = [&](MSSpectrum& spec, std::vector<std::vector<float>>& scores)

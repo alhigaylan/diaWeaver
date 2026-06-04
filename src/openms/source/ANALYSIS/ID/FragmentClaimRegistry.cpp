@@ -12,29 +12,29 @@
 namespace OpenMS
 {
 
-  Size FragmentClaimRegistry::tryClaim(const std::vector<Int>& trace_ids,
+  Size FragmentClaimRegistry::tryClaim(const std::vector<TraceKey>& keys,
                                         const String& peptide_seq,
                                         double score,
                                         Size spectrum_idx)
   {
     Size claimed = 0;
-    for (Int tid : trace_ids)
+    for (TraceKey key : keys)
     {
-      if (claims_.emplace(tid, ClaimRecord{peptide_seq, score, spectrum_idx}).second)
+      if (claims_.emplace(key, ClaimRecord{peptide_seq, score, spectrum_idx}).second)
         ++claimed;
     }
     return claimed;
   }
 
-  bool FragmentClaimRegistry::isClaimed(Int trace_id) const
+  bool FragmentClaimRegistry::isClaimed(TraceKey key) const
   {
-    return claims_.find(trace_id) != claims_.end();
+    return claims_.find(key) != claims_.end();
   }
 
   const FragmentClaimRegistry::ClaimRecord*
-  FragmentClaimRegistry::getClaimRecord(Int trace_id) const
+  FragmentClaimRegistry::getClaimRecord(TraceKey key) const
   {
-    auto it = claims_.find(trace_id);
+    auto it = claims_.find(key);
     if (it == claims_.end()) return nullptr;
     return &it->second;
   }
@@ -42,23 +42,22 @@ namespace OpenMS
   std::vector<bool> FragmentClaimRegistry::buildExclusionMask(const MSSpectrum& spec,
                                                                const String& query_peptide_seq) const
   {
-    const MSSpectrum::IntegerDataArray* trace_id_array = nullptr;
+    const MSSpectrum::IntegerDataArray* trace_arr  = nullptr;
+    const MSSpectrum::IntegerDataArray* window_arr = nullptr;
     for (const auto& arr : spec.getIntegerDataArrays())
     {
-      if (arr.getName() == "fragment_trace_id")
-      {
-        trace_id_array = &arr;
-        break;
-      }
+      if      (arr.getName() == "fragment_trace_id")  trace_arr  = &arr;
+      else if (arr.getName() == "fragment_window_id") window_arr = &arr;
     }
 
-    if (trace_id_array == nullptr) return {};
+    if (trace_arr == nullptr || window_arr == nullptr) return {};
 
-    std::vector<bool> mask(trace_id_array->size(), false);
-    for (Size i = 0; i < trace_id_array->size(); ++i)
+    const Size n = trace_arr->size();
+    std::vector<bool> mask(n, false);
+    for (Size i = 0; i < n; ++i)
     {
-      Int tid = (*trace_id_array)[i];
-      auto it = claims_.find(tid);
+      TraceKey key = makeKey((*window_arr)[i], (*trace_arr)[i]);
+      auto it = claims_.find(key);
       if (it != claims_.end() && it->second.peptide_seq != query_peptide_seq)
         mask[i] = true;
     }

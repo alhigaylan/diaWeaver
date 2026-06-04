@@ -96,7 +96,8 @@ namespace OpenMS
              const std::vector<MassTrace>& ms2_traces,
              double swath_lower,
              double swath_upper,
-             MSExperiment& pseudo_spectra);
+             MSExperiment& pseudo_spectra,
+             Int window_idx = 0);
 
     /**
      * @brief Generate ion-accounted pseudo spectra split into orphan and annotated outputs.
@@ -108,8 +109,13 @@ namespace OpenMS
      * non-empty string carries the pre-formatted claim annotation for the corresponding peak
      * (e.g. "PEPTIDER/2:y5[M+0];ANOTHERSEQ/3:b7[M+0]").
      *
+     * Every peak in every output spectrum carries two parallel IntegerDataArrays:
+     *   - "fragment_trace_id"  : local trace index within the DIA window
+     *   - "fragment_window_id" : sequential DIA window index (passed as @p window_idx)
+     * Together they form a globally unique (window_id, trace_id) key for ion accounting.
+     *
      * Annotated pseudo spectra carry a StringDataArray named "peptide_ion_claims" with one
-     * entry per peak.  Orphan pseudo spectra have no extra arrays.
+     * entry per peak.
      * Each output is subject to the min_nr_ions threshold independently.
      *
      * @param[in]  ms1_features          MS1 peptide features (FeatureFinderPeptide output)
@@ -118,6 +124,7 @@ namespace OpenMS
      * @param[in]  trace_claim_strings   Per-trace annotation strings (size == ms2_traces.size())
      * @param[in]  swath_lower           Lower m/z bound of the DIA isolation window
      * @param[in]  swath_upper           Upper m/z bound of the DIA isolation window
+     * @param[in]  window_idx            Sequential DIA window index for globally unique trace IDs
      * @param[out] orphan_spectra        Pseudo spectra retaining only unexplained fragment peaks
      * @param[out] annotated_spectra     Pseudo spectra retaining only peptide-explained peaks
      * @param[out] full_spectra          If non-null, also populated with all peaks (no split)
@@ -128,6 +135,7 @@ namespace OpenMS
              const std::vector<String>& trace_claim_strings,
              double swath_lower,
              double swath_upper,
+             Int window_idx,
              MSExperiment& orphan_spectra,
              MSExperiment& annotated_spectra,
              MSExperiment* full_spectra = nullptr);
@@ -174,6 +182,7 @@ namespace OpenMS
         double swath_lower,
         double swath_upper,
         bool has_im_data,
+        Int window_idx,
         MSExperiment& pseudo_spectra);
 
     /// Ion-accounting variant: splits output into orphan / annotated / (optionally) full spectra.
@@ -194,6 +203,7 @@ namespace OpenMS
         double swath_lower,
         double swath_upper,
         bool has_im_data,
+        Int window_idx,
         MSExperiment& orphan_spectra,
         MSExperiment& annotated_spectra,
         MSExperiment* full_spectra);

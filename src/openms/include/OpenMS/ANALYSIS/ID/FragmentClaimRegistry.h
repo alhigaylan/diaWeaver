@@ -11,6 +11,7 @@
 #include <OpenMS/DATASTRUCTURES/String.h>
 #include <OpenMS/KERNEL/MSExperiment.h>
 
+#include <cstdint>
 #include <unordered_map>
 #include <vector>
 
@@ -20,18 +21,21 @@ namespace OpenMS
   /**
    * @brief Tracks which peptide has claimed ownership of each MassTrace fragment.
    *
+   * Fragment traces are globally identified by a (window_id, trace_id) pair encoded
+   * as a single int64_t key: `(window_id << 32) | static_cast<uint32_t>(trace_id)`.
+   * This guarantees uniqueness across all DIA windows regardless of the number of
+   * traces per window (supports up to 2^32 traces per window and 2^32 windows).
+   *
    * During iterative re-scoring in diaWeaverPeptide, PSMs are sorted by score
    * (descending). For each PSM the registry attempts to claim the associated
-   * fragment trace IDs. A trace can only be claimed by one peptide — the first
+   * fragment trace keys. A trace can only be claimed by one peptide — the first
    * (highest-scoring) one to attempt it wins.
-   *
-   * Once claiming is complete, buildExclusionMask() produces a per-peak boolean
-   * vector for a given spectrum, indicating which peaks have already been claimed
-   * by a *different* peptide. Those peaks are excluded when re-scoring the spectrum.
    */
   class OPENMS_DLLAPI FragmentClaimRegistry
   {
   public:
+    using TraceKey = int64_t;
+
     struct ClaimRecord
     {
       String   peptide_seq;
@@ -39,32 +43,39 @@ namespace OpenMS
       Size     spectrum_idx;
     };
 
-    /// Attempt to claim all trace IDs listed in @p trace_ids for @p peptide_seq.
-    /// Only unclaimed trace IDs are claimed; already-claimed ones are silently skipped.
-    /// Returns the number of IDs that were successfully claimed (not previously taken).
-    Size tryClaim(const std::vector<Int>& trace_ids,
+    /// Encode a (window_id, local trace_id) pair into a globally unique 64-bit key.
+    static TraceKey makeKey(Int window_id, Int trace_id) noexcept
+    {
+      return (static_cast<int64_t>(window_id) << 32) |
+             static_cast<int64_t>(static_cast<uint32_t>(trace_id));
+    }
+
+    /// Attempt to claim all keys in @p keys for @p peptide_seq.
+    /// Only unclaimed keys are claimed; already-claimed ones are silently skipped.
+    /// Returns the number of keys that were successfully claimed.
+    Size tryClaim(const std::vector<TraceKey>& keys,
                   const String& peptide_seq,
                   double score,
                   Size spectrum_idx);
 
-    /// True if @p trace_id has been claimed by any peptide.
-    bool isClaimed(Int trace_id) const;
+    /// True if @p key has been claimed by any peptide.
+    bool isClaimed(TraceKey key) const;
 
-    /// Return the ClaimRecord for a trace, or nullptr if unclaimed.
-    const ClaimRecord* getClaimRecord(Int trace_id) const;
+    /// Return the ClaimRecord for a key, or nullptr if unclaimed.
+    const ClaimRecord* getClaimRecord(TraceKey key) const;
 
     /**
      * @brief Build a boolean exclusion mask for a spectrum.
      *
      * For each peak in @p spec, the mask entry is `true` if the corresponding
-     * trace_id has been claimed by a peptide OTHER than @p query_peptide_seq.
-     * Peaks whose trace_id is unclaimed, or claimed by the query peptide itself,
-     * are NOT excluded (mask entry = `false`).
+     * (window_id, trace_id) key has been claimed by a peptide OTHER than
+     * @p query_peptide_seq.  Peaks whose key is unclaimed, or claimed by the
+     * query peptide itself, are NOT excluded (mask entry = `false`).
      *
-     * The returned vector has the same length as the number of peaks in @p spec.
-     * Returns an empty vector if the spectrum has no "fragment_trace_id" array.
+     * Requires both "fragment_trace_id" and "fragment_window_id" IntegerDataArrays.
+     * Returns an empty vector if either array is absent.
      *
-     * @param spec            Pseudo spectrum (must carry "fragment_trace_id" IntegerDataArray)
+     * @param spec               Pseudo spectrum carrying both IntegerDataArrays
      * @param query_peptide_seq  Sequence of the peptide being re-scored
      */
     std::vector<bool> buildExclusionMask(const MSSpectrum& spec,
@@ -75,7 +86,7 @@ namespace OpenMS
     void clear() noexcept { claims_.clear(); }
 
   private:
-    std::unordered_map<Int, ClaimRecord> claims_;
+    std::unordered_map<TraceKey, ClaimRecord> claims_;
   };
 
 }  // namespace OpenMS

@@ -1646,38 +1646,38 @@ namespace OpenMS
     // Built lazily on first access for each spectrum.
     std::unordered_map<Size, std::vector<double>> spec_mz_cache;
 
-    // Per-spectrum cache: the fragment_trace_id IntegerDataArray pointer (into pseudo_spectra).
-    // nullptr if the spectrum has no such array.
-    std::unordered_map<Size, const MSSpectrum::IntegerDataArray*> spec_trace_array_cache;
+    // Per-spectrum cache: pointers to the two parallel IntegerDataArrays.
+    struct TraceArrayPair
+    {
+      const MSSpectrum::IntegerDataArray* trace_id = nullptr;   // "fragment_trace_id"
+      const MSSpectrum::IntegerDataArray* window_id = nullptr;  // "fragment_window_id"
+    };
+    std::unordered_map<Size, TraceArrayPair> spec_trace_array_cache;
 
-    auto getSpecTraceArray = [&](Size spec_idx) -> const MSSpectrum::IntegerDataArray*
+    auto getSpecTraceArrays = [&](Size spec_idx) -> TraceArrayPair
     {
       auto it = spec_trace_array_cache.find(spec_idx);
       if (it != spec_trace_array_cache.end()) return it->second;
+      TraceArrayPair pair;
       const MSSpectrum& spec = pseudo_spectra[spec_idx];
       for (const auto& arr : spec.getIntegerDataArrays())
       {
-        if (arr.getName() == "fragment_trace_id")
-        {
-          spec_trace_array_cache[spec_idx] = &arr;
-          return &arr;
-        }
+        if      (arr.getName() == "fragment_trace_id")  pair.trace_id  = &arr;
+        else if (arr.getName() == "fragment_window_id") pair.window_id = &arr;
       }
-      spec_trace_array_cache[spec_idx] = nullptr;
-      return nullptr;
+      spec_trace_array_cache[spec_idx] = pair;
+      return pair;
     };
 
-    // Returns (trace_id, annotation_index) pairs for peaks that the peptide hit actually
-    // matched.  The annotation_index is the index into hit.getPeakAnnotations() so that
-    // callers can retrieve ion-type and intensity information for the recalculation step.
-    // pa.mz is an exact copy of spec[exp_idx].getMZ() (no arithmetic), so binary search
-    // on the sorted spectrum is safe with exact double comparison.
-    using TraceAnnotPair = std::pair<Int, Size>;
+    // Returns (global_trace_key, annotation_index) pairs for peaks the hit matched.
+    // global_trace_key = FragmentClaimRegistry::makeKey(window_id, trace_id).
+    // pa.mz is an exact copy of spec[exp_idx].getMZ(), so binary search is safe.
+    using TraceAnnotPair = std::pair<FragmentClaimRegistry::TraceKey, Size>;
     auto getMatchedTraceIdsIndexed = [&](Size spec_idx, const PeptideHit& hit)
         -> std::vector<TraceAnnotPair>
     {
-      const MSSpectrum::IntegerDataArray* trace_arr = getSpecTraceArray(spec_idx);
-      if (trace_arr == nullptr) return {};
+      const TraceArrayPair arrs = getSpecTraceArrays(spec_idx);
+      if (arrs.trace_id == nullptr || arrs.window_id == nullptr) return {};
 
       const MSSpectrum& spec = pseudo_spectra[spec_idx];
 
@@ -1687,7 +1687,6 @@ namespace OpenMS
       {
         mz_vec.reserve(spec.size());
         for (const auto& pk : spec) mz_vec.push_back(pk.getMZ());
-        // Spectrum is already sorted by mz in OpenMS — no re-sort needed.
       }
 
       const auto& annotations = hit.getPeakAnnotations();
@@ -1696,13 +1695,17 @@ namespace OpenMS
 
       for (Size ai = 0; ai < annotations.size(); ++ai)
       {
-        // Binary search for the exact mz value (safe: pa.mz = spec[exp_idx].getMZ()).
         auto lb = std::lower_bound(mz_vec.begin(), mz_vec.end(), annotations[ai].mz);
         if (lb != mz_vec.end() && *lb == annotations[ai].mz)
         {
           const Size pk_idx = static_cast<Size>(lb - mz_vec.begin());
-          if (pk_idx < trace_arr->size())
-            result.emplace_back((*trace_arr)[pk_idx], ai);
+          if (pk_idx < arrs.trace_id->size())
+          {
+            const FragmentClaimRegistry::TraceKey key =
+                FragmentClaimRegistry::makeKey((*arrs.window_id)[pk_idx],
+                                              (*arrs.trace_id)[pk_idx]);
+            result.emplace_back(key, ai);
+          }
         }
       }
       return result;
@@ -1734,18 +1737,21 @@ namespace OpenMS
                                        : nullptr;
         const String native_id = spec_ptr ? spec_ptr->getNativeID() : String("unknown");
         const Size   n_annots  = hit.getPeakAnnotations().size();
-        const bool   has_arr   = (getSpecTraceArray(psm.spectrum_idx) != nullptr);
+        const TraceArrayPair arrs = getSpecTraceArrays(psm.spectrum_idx);
+        const bool   has_trace_arr  = (arrs.trace_id  != nullptr);
+        const bool   has_window_arr = (arrs.window_id != nullptr);
 
         OPENMS_LOG_ERROR << "[ProSE/searchWithClaiming] matched_indexed is empty for PSM:\n"
-                         << "  spectrum native_id  : " << native_id << "\n"
-                         << "  spectrum_idx        : " << psm.spectrum_idx << "\n"
-                         << "  sequence            : " << psm.sequence << "\n"
-                         << "  score               : " << psm.score << "\n"
-                         << "  PeakAnnotations     : " << n_annots << "\n"
-                         << "  fragment_trace_id array present: " << (has_arr ? "YES" : "NO") << "\n"
+                         << "  spectrum native_id       : " << native_id << "\n"
+                         << "  spectrum_idx             : " << psm.spectrum_idx << "\n"
+                         << "  sequence                 : " << psm.sequence << "\n"
+                         << "  score                    : " << psm.score << "\n"
+                         << "  PeakAnnotations          : " << n_annots << "\n"
+                         << "  fragment_trace_id present : " << (has_trace_arr  ? "YES" : "NO") << "\n"
+                         << "  fragment_window_id present: " << (has_window_arr ? "YES" : "NO") << "\n"
                          << "  Cause: "
-                         << (!has_arr
-                               ? "spectrum has no 'fragment_trace_id' IntegerDataArray"
+                         << (!has_trace_arr || !has_window_arr
+                               ? "spectrum is missing 'fragment_trace_id' and/or 'fragment_window_id' array"
                                : (n_annots == 0
                                     ? "PeptideHit has zero PeakAnnotations"
                                     : "no annotation mz matched any spectrum peak mz (tolerance or sorting issue)"))
@@ -1760,7 +1766,7 @@ namespace OpenMS
       //   owned_annot_idxs — annotation indices for all uniquely owned traces
       //                      (unclaimed OR already claimed by the same sequence)
       Size unique_count = 0;
-      std::vector<Int>  claimable;
+      std::vector<FragmentClaimRegistry::TraceKey> claimable;
       std::vector<Size> owned_annot_idxs;
 
       for (const auto& [tid, ai] : matched_indexed)
