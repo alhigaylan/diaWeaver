@@ -1540,6 +1540,7 @@ protected:
             clusterer.run(ms1_features, ms1_traces, ms2_traces,
                           trace_claim_strings,
                           w.lower_mz, w.upper_mz,
+                          static_cast<Int>(idx),
                           win_orphan, win_ann, p_full);
 
             // Write MS1 if requested (same raw spectra go to both outputs)
