@@ -1131,7 +1131,7 @@ protected:
                         << out_debug_tsv << std::endl;
         return;
       }
-      tsv << "spectrum_native_id\tRT\tIM\tprecursor_mz\tsequence\thyperscore\tq_value\n";
+      tsv << "spectrum_native_id\tRT\tIM\tprecursor_mz\tsequence\ttarget_decoy\thyperscore\tq_value\n";
       const String orig_score_key = "ln(hyperscore)_score";
       for (const auto& pi : merged_peptides)
       {
@@ -1159,6 +1159,7 @@ protected:
               << im_str    << "\t"
               << prec_mz   << "\t"
               << hit.getSequence().toString() << "\t"
+              << (hit.isDecoy() ? "decoy" : "target") << "\t"
               << hyperscore << "\t";
           if (qval >= 0.0) tsv << qval;
           else             tsv << "NA";
