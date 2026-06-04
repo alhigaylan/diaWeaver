@@ -1188,6 +1188,7 @@ protected:
         FalseDiscoveryRate fdr_tool;
         Param fdr_params = fdr_tool.getParameters();
         fdr_params.setValue("use_all_hits", "true");
+        fdr_params.setValue("add_decoy_peptides", "true");
         fdr_tool.setParameters(fdr_params);
         fdr_tool.apply(merged_peptides);
         write_debug_tsv(true);
