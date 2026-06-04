@@ -1304,8 +1304,6 @@ protected:
         // Build mz → annotation label map from all FDR-passing hits for this spectrum.
         std::map<double, String> mz_to_label;
         double spectrum_rt = orig.getRT();
-        double precursor_mz = orig.getPrecursors().empty() ? 0.0 : orig.getPrecursors()[0].getMZ();
-        int    precursor_charge = orig.getPrecursors().empty() ? 0 : orig.getPrecursors()[0].getCharge();
 
         for (Size pid : pid_indices)
         {
@@ -1337,8 +1335,8 @@ protected:
         out_spec.setNativeID(native_id);
         out_spec.setRT(spectrum_rt);
         out_spec.setMSLevel(2);
-        Precursor prec; prec.setMZ(precursor_mz); prec.setCharge(precursor_charge);
-        out_spec.getPrecursors().push_back(prec);
+        if (!orig.getPrecursors().empty())
+          out_spec.getPrecursors().push_back(orig.getPrecursors()[0]);
 
         MSSpectrum::StringDataArray annot_arr;  annot_arr.setName("fragment_annotation");
         MSSpectrum::IntegerDataArray out_tid;   out_tid.setName("fragment_trace_id");
