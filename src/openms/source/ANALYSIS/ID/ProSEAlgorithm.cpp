@@ -1853,7 +1853,15 @@ namespace OpenMS
             for (Size ai : owned_annot_idxs)
             {
               const auto& pa = annotations[ai];
-              const int frag_z = pa.charge; // always >= 1 (set by TheoreticalSpectrumGenerator)
+
+              // Infer fragment charge from trailing '+' in the annotation label
+              // (e.g. "b5+" -> 1, "y3++" -> 2). This is robust against any m/z
+              // conversion that may have altered pa.mz (e.g. make_single_charged).
+              int frag_z = 0;
+              for (int k = static_cast<int>(pa.annotation.size()) - 1;
+                   k >= 0 && pa.annotation[k] == '+'; --k)
+                ++frag_z;
+              if (frag_z == 0) frag_z = pa.charge; // fallback for unusual annotations
 
               // Sequential isotope search: M+2 is only searched if M+1 was found,
               // M+3 if M+2 was found, etc. Chain stops as soon as an isotope is absent.
