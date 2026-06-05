@@ -1047,13 +1047,18 @@ protected:
         prose.searchWithClaiming(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
                                  window_registry, &window_debug_pep_ids, min_unique_fragments_);
 
-      // Always collect preprocessed pseudo spectra for post-FDR orphan/annotated output.
-      // Merge this window's claim registry into the global one for orphan building.
+      // Always collect preprocessed pseudo spectra, the claim registry, and the
+      // pre-Phase-5 debug snapshot — unconditionally, before the early-continue
+      // check. This ensures that windows where Phase 5 drops all PSMs still
+      // contribute their scored hits to the debug TSV.
 #pragma omp critical (collect_pseudo_spectra)
       {
         for (auto& spec : pseudo_spectra)
           all_pseudo_spectra[spec.getNativeID()] = spec;
         all_claimed.merge(window_registry);
+        debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
+                                        std::make_move_iterator(window_debug_pep_ids.begin()),
+                                        std::make_move_iterator(window_debug_pep_ids.end()));
       }
 
       if (ec != ProSEAlgorithm::ExitCodes::EXECUTION_OK || window_prot_ids.empty() || window_pep_ids.empty())
@@ -1081,9 +1086,6 @@ protected:
                         << window_prot_ids[0].getHits().size() << " protein hits." << std::endl;
         all_prot_ids.push_back(std::move(window_prot_ids));
         all_pep_ids.push_back(std::move(window_pep_ids));
-        debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
-                                        std::make_move_iterator(window_debug_pep_ids.begin()),
-                                        std::make_move_iterator(window_debug_pep_ids.end()));
         ++processed;
       }
     } // end normal window loop
@@ -1175,6 +1177,9 @@ protected:
           for (auto& spec : pseudo_spectra)
             all_pseudo_spectra[spec.getNativeID()] = spec;
           all_claimed.merge(window_registry);
+          debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
+                                          std::make_move_iterator(window_debug_pep_ids.begin()),
+                                          std::make_move_iterator(window_debug_pep_ids.end()));
         }
 
         if (ec != ProSEAlgorithm::ExitCodes::EXECUTION_OK || window_prot_ids.empty() || window_pep_ids.empty())
@@ -1202,9 +1207,6 @@ protected:
                           << window_prot_ids[0].getHits().size() << " protein hits." << std::endl;
           all_prot_ids.push_back(std::move(window_prot_ids));
           all_pep_ids.push_back(std::move(window_pep_ids));
-          debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
-                                          std::make_move_iterator(window_debug_pep_ids.begin()),
-                                          std::make_move_iterator(window_debug_pep_ids.end()));
           ++processed;
         }
       } // end bypass loop
@@ -1269,9 +1271,11 @@ protected:
     // Helper: write debug TSV of all scored PSM hits before the claiming filter.
     // Iterates debug_pre_filter_pep_ids (captured before Phase 5 in searchWithClaiming)
     // so all top-N ranked hits per spectrum appear, including those that lost the
-    // trace-claim contest to a higher-scoring PSM. Scores are raw hyperscores;
-    // q_value is always "NA" since FDR is not applied to the pre-filter snapshot.
-    auto write_debug_tsv = [&]()
+    // trace-claim contest to a higher-scoring PSM.
+    // has_qvalues=true when FDR has been applied to debug_pre_filter_pep_ids: the
+    // original hyperscore is then in meta "ln(hyperscore)_score" and hit.getScore()
+    // is the q-value.
+    auto write_debug_tsv = [&](bool has_qvalues)
     {
       if (out_debug_tsv.empty()) return;
       std::ofstream tsv(out_debug_tsv);
@@ -1282,6 +1286,7 @@ protected:
         return;
       }
       tsv << "spectrum_native_id\tRT\tIM\tprecursor_mz\tsequence\ttarget_decoy\thyperscore\tq_value\n";
+      const String orig_score_key = "ln(hyperscore)_score";
       for (const auto& pi : debug_pre_filter_pep_ids)
       {
         const String& native_id = pi.getSpectrumReference();
@@ -1292,23 +1297,49 @@ protected:
                                     : "NA";
         for (const auto& hit : pi.getHits())
         {
+          double hyperscore, qval;
+          if (has_qvalues && hit.metaValueExists(orig_score_key))
+          {
+            hyperscore = static_cast<double>(hit.getMetaValue(orig_score_key));
+            qval       = hit.getScore();
+          }
+          else
+          {
+            hyperscore = hit.getScore();
+            qval       = -1.0;
+          }
           tsv << native_id << "\t"
               << rt        << "\t"
               << im_str    << "\t"
               << prec_mz   << "\t"
               << hit.getSequence().toString() << "\t"
               << (hit.isDecoy() ? "decoy" : "target") << "\t"
-              << hit.getScore() << "\t"
-              << "NA\n";
+              << hyperscore << "\t";
+          if (qval >= 0.0) tsv << qval;
+          else             tsv << "NA";
+          tsv << "\n";
         }
       }
       OPENMS_LOG_INFO << "[diaWeaverPeptide] Debug PSM TSV written to " << out_debug_tsv
                       << std::endl;
     };
 
-    // Write the debug TSV before FDR filtering so it always contains all scored
-    // hits (both target and decoy, all ranks) regardless of FDR outcome.
-    write_debug_tsv();
+    // Assign q-values to the pre-filter debug snapshot for the debug TSV.
+    // FDR is applied to debug_pre_filter_pep_ids for annotation only — no hits
+    // are filtered out. This gives the debug TSV q-values across all ranked hits
+    // (including those dropped by the Phase 5 claiming filter).
+    bool debug_has_qvalues = false;
+    if (has_decoys && !debug_pre_filter_pep_ids.empty())
+    {
+      FalseDiscoveryRate debug_fdr;
+      Param debug_fdr_params = debug_fdr.getParameters();
+      debug_fdr_params.setValue("use_all_hits", "true");
+      debug_fdr_params.setValue("add_decoy_peptides", "true");
+      debug_fdr.setParameters(debug_fdr_params);
+      debug_fdr.apply(debug_pre_filter_pep_ids);
+      debug_has_qvalues = true;
+    }
+    write_debug_tsv(debug_has_qvalues);
 
     // PSM-level FDR — applied before protein inference so BPIA sees only
     // confident PSMs (mirrors ProSE's per-file FDR-before-merge approach).
