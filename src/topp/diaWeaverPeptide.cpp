@@ -377,7 +377,15 @@ protected:
   void registerOptionsAndFlags_() override
   {
     // Input
-    registerInputFile_("in", "<file>", "", "Input DIA file (mzML or Bruker .d)", true);
+    registerInputFile_("in", "<file>", "", "Input DIA file (mzML or Bruker .d). "
+      "Mutually exclusive with -in_pseudo.", false);
+    registerInputFile_("in_pseudo", "<file>", "",
+      "Pre-built pseudo spectra mzML (e.g. orphan.mzML from a prior diaWeaverPeptide run). "
+      "When provided, bypasses all raw DIA preprocessing (peak picking, trace extraction, "
+      "clustering) and feeds the spectra directly into ProSE search. "
+      "Each spectrum must carry 'fragment_trace_id' and 'fragment_window_id' IntegerDataArrays. "
+      "Mutually exclusive with -in.", false);
+    setValidFormats_("in_pseudo", ListUtils::create<String>("mzML"));
     setValidFormats_("in", {"mzML"
 #ifdef WITH_OPENTIMS
       , "d"
@@ -648,6 +656,7 @@ protected:
   ExitCodes main_(int, const char**) override
   {
     const String in         = getStringOption_("in");
+    const String in_pseudo  = getStringOption_("in_pseudo");
     const String database   = getStringOption_("database");
     const String out_idxml          = getStringOption_("out_idxml");
     const String out_mzml           = getStringOption_("out_mzml");
@@ -658,6 +667,12 @@ protected:
     if (out_idxml.empty())
     {
       OPENMS_LOG_ERROR << "No output specified. Provide -out_idxml." << std::endl;
+      return ILLEGAL_PARAMETERS;
+    }
+
+    if (in.empty() == in_pseudo.empty())
+    {
+      OPENMS_LOG_ERROR << "Provide exactly one of -in (raw DIA) or -in_pseudo (pre-built pseudo spectra)." << std::endl;
       return ILLEGAL_PARAMETERS;
     }
 
@@ -721,154 +736,156 @@ protected:
                     << " peptide entries indexed." << std::endl;
 
     // ------------------------------------------------------------------
-    // Step 2: Determine DIA windows.
-    // ------------------------------------------------------------------
-    FileTypes::Type in_type = FileHandler::getTypeByFileName(in);
-
-    bool is_bruker = false;
-    bool bruker_im_centroiding = false;
-    DiaWeaver::WindowedExperiments bruker_ms2_windows, bruker_ms1_windows, bruker_precursor_windows;
-
-#ifdef WITH_OPENTIMS
-    if (in_type == FileTypes::BRUKER_TDF)
-    {
-      is_bruker = true;
-      OPENMS_LOG_INFO << "Bruker .d file detected. Loading via BrukerTimsFile..." << std::endl;
-
-      BrukerTimsFile tims_file;
-      tims_file.setLogType(log_type_);
-      auto bruker_config = getBrukerConfig_();
-      bruker_im_centroiding = (bruker_config.ms1_centroid_mz_ppm > 0.0f && bruker_config.ms1_centroid_im_pct > 0.0f);
-
-      PeakMap bruker_exp;
-      tims_file.load(in, bruker_exp, bruker_config);
-
-      DiaWeaver::WindowMap windows_tmp;
-      DiaWeaver::determineWindows(bruker_exp, windows_tmp);
-      DiaWeaver::extractMS2Windows(bruker_exp, windows_tmp, bruker_ms2_windows,
-                                    save_precursors ? &bruker_precursor_windows : nullptr);
-      DiaWeaver::extractMS1Windows(bruker_exp, windows_tmp, bruker_ms1_windows);
-      OPENMS_LOG_INFO << "Loaded " << windows_tmp.size() << " DIA windows from Bruker .d file." << std::endl;
-    }
-#endif
-
-    DiaWeaver::WindowMap windows;
-    DiaWeaver::IMInfo im_info;
-    OnDiscMSExperiment on_disc;
-
-    if (!is_bruker)
-    {
-      OPENMS_LOG_INFO << "Opening mzML for metadata access..." << std::endl;
-      if (!on_disc.openFile(in))
-      {
-        OPENMS_LOG_ERROR << "Failed to open file as indexed mzML." << std::endl;
-        return INPUT_FILE_NOT_FOUND;
-      }
-      DiaWeaver::determineWindows(on_disc, windows);
-      im_info = DiaWeaver::determineIMInfo(on_disc, windows);
-    }
-#ifdef WITH_OPENTIMS
-    else
-    {
-      // Re-determine windows from the Bruker experiment for indexed access
-      // (bruker_ms2_windows already contains the per-window experiments;
-      // build the window map from its keys so the loop below can iterate it).
-      for (const auto& kv : bruker_ms2_windows)
-      {
-        windows[kv.first] = {};  // indices unused for Bruker path
-      }
-      // im_info is derived from the pre-extracted windows
-      im_info.available = !bruker_ms2_windows.empty() &&
-                          bruker_ms2_windows.begin()->first.hasIonMobility();
-    }
-#endif
-
-    std::vector<std::pair<DiaWeaver::DIAWindow, std::vector<Size>>> window_vec(
-      windows.begin(), windows.end());
-    const Size total_windows = window_vec.size();
-
-    OPENMS_LOG_INFO << "[diaWeaverPeptide] Processing " << total_windows << " DIA windows sequentially "
-                    << "(ProSE parallelises internally)." << std::endl;
-
-    if (im_info.available)
-    {
-      OPENMS_LOG_INFO << (bruker_im_centroiding
-        ? "Bruker IM centroiding applied during loading; skipping PeakPickerIM mobilogram."
-        : "Ion mobility data detected. Using PeakPickerIM.") << std::endl;
-    }
-    else
-    {
-      OPENMS_LOG_INFO << "No ion mobility data. Using PeakPickerHiRes." << std::endl;
-    }
-
-    // ------------------------------------------------------------------
-    // Step 3: Per-window preprocessing + pseudo-spectrum generation + search.
-    //
-    // The outer loop is sequential: ProSE's scoreSpectraAgainstIndex_ already
-    // uses #pragma omp parallel for internally, consuming all available threads.
+    // Step 2 onwards: per-window preprocessing + search.
+    // Two modes:
+    //   Normal mode (-in):        raw DIA → peak picking → trace extraction
+    //                             → clustering → pseudo spectra → ProSE search
+    //   Bypass mode (-in_pseudo): pre-built pseudo spectra → group by window_id
+    //                             → ProSE search (all preprocessing skipped)
+    // Shared accumulators below are filled by whichever mode runs, then
+    // consumed identically by Step 4 (merge / FDR / output).
     // ------------------------------------------------------------------
 
-    // Accumulate per-window identification results for cross-window merging.
+    // Shared accumulators (both modes write here).
     std::vector<std::vector<ProteinIdentification>> all_prot_ids;
     std::vector<PeptideIdentificationList> all_pep_ids;
-    // Keyed by native_id: preprocessed pseudo spectra (post-searchWithClaiming) held for
-    // post-FDR orphan and annotated mzML writing.
+    // Keyed by native_id: pseudo spectra held for post-FDR orphan/annotated output.
     std::unordered_map<String, MSSpectrum> all_pseudo_spectra;
     // Accumulated claimed trace keys from all per-window FragmentClaimRegistries.
-    // Used in orphan mzML building to exclude exactly those traces that were claimed.
     FragmentClaimRegistry all_claimed;
-
-    // Pickers passed as const-ref to peakPickInPlace_(), which creates per-inner-thread
-    // copies internally — safe to share across outer threads.
-    PeakPickerIM    picker_im;  picker_im.setParameters(ppim_params);
-    PeakPickerHiRes picker_hr;  picker_hr.setParameters(pphr_params);
-
-#ifdef _OPENMP
-    const int total_threads = num_threads;
-    int outer_threads = total_threads;
-    int inner_threads = 1;
-
-    if (threads_outer_loop > 0)
-    {
-      outer_threads = std::min(threads_outer_loop, total_threads);
-      inner_threads = std::max(1, total_threads / outer_threads);
-      omp_set_nested(1);
-      omp_set_dynamic(0);
-      OPENMS_LOG_INFO << "[diaWeaverPeptide] Nested parallelism: "
-                      << outer_threads << " outer x " << inner_threads << " inner threads." << std::endl;
-    }
-    else
-    {
-      OPENMS_LOG_INFO << "[diaWeaverPeptide] " << outer_threads
-                      << " threads for window processing (no nested parallelism)." << std::endl;
-    }
-    omp_set_num_threads(outer_threads);
-#else
-    const int inner_threads = 1;
-#endif
 
     Size processed = 0;
     Size total_pseudo_spectra = 0;
+    Size total_windows = 0;
 
-    // Set up streaming consumer for plain pseudo spectra (optional).
-    // PlainMSDataWritingConsumer finalizes the mzML file when it goes out of scope,
-    // so it must enclose the entire window loop.
+    // Streaming consumer for plain pseudo spectra (optional, used by both modes).
+    // PlainMSDataWritingConsumer finalizes the mzML when it goes out of scope,
+    // so it must outlive the processing loop.
+    const String input_source = in.empty() ? in_pseudo : in;
     std::unique_ptr<PlainMSDataWritingConsumer> plain_consumer;
     if (!out_mzml.empty())
     {
       plain_consumer = std::make_unique<PlainMSDataWritingConsumer>(out_mzml);
       plain_consumer->setExpectedSize(0, 0);
       SourceFile sf;
-      sf.setNameOfFile(File::basename(in));
-      sf.setPathToFile(File::path(in));
+      sf.setNameOfFile(File::basename(input_source));
+      sf.setPathToFile(File::path(input_source));
       ExperimentalSettings es;
       es.setSourceFiles({sf});
       plain_consumer->setExperimentalSettings(es);
     }
 
-    // prose is copied per-thread via firstprivate: each outer thread operates on its
-    // own ProSEAlgorithm instance (identical parameters, independent mutable state).
-    // ctx (SearchContext / FragmentIndex) is shared read-only — concurrent reads safe.
+    if (in_pseudo.empty())
+    {
+      // ----------------------------------------------------------------
+      // Normal mode: raw DIA processing pipeline.
+      // ----------------------------------------------------------------
+
+      // Step 2: Determine DIA windows.
+      FileTypes::Type in_type = FileHandler::getTypeByFileName(in);
+
+      bool is_bruker = false;
+      bool bruker_im_centroiding = false;
+      DiaWeaver::WindowedExperiments bruker_ms2_windows, bruker_ms1_windows, bruker_precursor_windows;
+
+#ifdef WITH_OPENTIMS
+      if (in_type == FileTypes::BRUKER_TDF)
+      {
+        is_bruker = true;
+        OPENMS_LOG_INFO << "Bruker .d file detected. Loading via BrukerTimsFile..." << std::endl;
+
+        BrukerTimsFile tims_file;
+        tims_file.setLogType(log_type_);
+        auto bruker_config = getBrukerConfig_();
+        bruker_im_centroiding = (bruker_config.ms1_centroid_mz_ppm > 0.0f && bruker_config.ms1_centroid_im_pct > 0.0f);
+
+        PeakMap bruker_exp;
+        tims_file.load(in, bruker_exp, bruker_config);
+
+        DiaWeaver::WindowMap windows_tmp;
+        DiaWeaver::determineWindows(bruker_exp, windows_tmp);
+        DiaWeaver::extractMS2Windows(bruker_exp, windows_tmp, bruker_ms2_windows,
+                                      save_precursors ? &bruker_precursor_windows : nullptr);
+        DiaWeaver::extractMS1Windows(bruker_exp, windows_tmp, bruker_ms1_windows);
+        OPENMS_LOG_INFO << "Loaded " << windows_tmp.size() << " DIA windows from Bruker .d file." << std::endl;
+      }
+#endif
+
+      DiaWeaver::WindowMap windows;
+      DiaWeaver::IMInfo im_info;
+      OnDiscMSExperiment on_disc;
+
+      if (!is_bruker)
+      {
+        OPENMS_LOG_INFO << "Opening mzML for metadata access..." << std::endl;
+        if (!on_disc.openFile(in))
+        {
+          OPENMS_LOG_ERROR << "Failed to open file as indexed mzML." << std::endl;
+          return INPUT_FILE_NOT_FOUND;
+        }
+        DiaWeaver::determineWindows(on_disc, windows);
+        im_info = DiaWeaver::determineIMInfo(on_disc, windows);
+      }
+#ifdef WITH_OPENTIMS
+      else
+      {
+        // Re-determine windows from the Bruker experiment for indexed access.
+        for (const auto& kv : bruker_ms2_windows)
+          windows[kv.first] = {};
+        im_info.available = !bruker_ms2_windows.empty() &&
+                            bruker_ms2_windows.begin()->first.hasIonMobility();
+      }
+#endif
+
+      std::vector<std::pair<DiaWeaver::DIAWindow, std::vector<Size>>> window_vec(
+        windows.begin(), windows.end());
+      total_windows = window_vec.size();
+
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] Processing " << total_windows << " DIA windows "
+                      << "(ProSE parallelises internally)." << std::endl;
+
+      if (im_info.available)
+      {
+        OPENMS_LOG_INFO << (bruker_im_centroiding
+          ? "Bruker IM centroiding applied during loading; skipping PeakPickerIM mobilogram."
+          : "Ion mobility data detected. Using PeakPickerIM.") << std::endl;
+      }
+      else
+      {
+        OPENMS_LOG_INFO << "No ion mobility data. Using PeakPickerHiRes." << std::endl;
+      }
+
+      // Step 3: Per-window preprocessing + pseudo-spectrum generation + search.
+      PeakPickerIM    picker_im;  picker_im.setParameters(ppim_params);
+      PeakPickerHiRes picker_hr;  picker_hr.setParameters(pphr_params);
+
+#ifdef _OPENMP
+      const int total_threads = num_threads;
+      int outer_threads = total_threads;
+      int inner_threads = 1;
+
+      if (threads_outer_loop > 0)
+      {
+        outer_threads = std::min(threads_outer_loop, total_threads);
+        inner_threads = std::max(1, total_threads / outer_threads);
+        omp_set_nested(1);
+        omp_set_dynamic(0);
+        OPENMS_LOG_INFO << "[diaWeaverPeptide] Nested parallelism: "
+                        << outer_threads << " outer x " << inner_threads << " inner threads." << std::endl;
+      }
+      else
+      {
+        OPENMS_LOG_INFO << "[diaWeaverPeptide] " << outer_threads
+                        << " threads for window processing (no nested parallelism)." << std::endl;
+      }
+      omp_set_num_threads(outer_threads);
+#else
+      const int inner_threads = 1;
+#endif
+
+      // prose is copied per-thread via firstprivate: each outer thread operates on its
+      // own ProSEAlgorithm instance (identical parameters, independent mutable state).
+      // ctx (SearchContext / FragmentIndex) is shared read-only — concurrent reads safe.
 #ifdef _OPENMP
 #pragma omp parallel for schedule(dynamic, 1) firstprivate(on_disc, prose)
 #endif
@@ -1062,14 +1079,127 @@ protected:
         all_pep_ids.push_back(std::move(window_pep_ids));
         ++processed;
       }
-    } // end window loop
+    } // end normal window loop
 
 #ifdef _OPENMP
-    if (threads_outer_loop > 0)
-      omp_set_num_threads(total_threads);
+      if (threads_outer_loop > 0)
+        omp_set_num_threads(total_threads);
 #endif
+    } // end if (in_pseudo.empty()) — normal mode
+    else
+    {
+      // ----------------------------------------------------------------
+      // Bypass mode: search pre-built pseudo spectra directly.
+      // ----------------------------------------------------------------
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] Bypass mode: loading pre-built pseudo spectra from "
+                      << in_pseudo << std::endl;
 
-    OPENMS_LOG_INFO << "[diaWeaverPeptide] All " << total_windows << " windows processed. "
+      PeakMap orphan_exp;
+      MzMLFile().load(in_pseudo, orphan_exp);
+      if (orphan_exp.empty())
+      {
+        OPENMS_LOG_ERROR << "[diaWeaverPeptide] No spectra in pseudo spectra input: "
+                         << in_pseudo << std::endl;
+        return INPUT_FILE_EMPTY;
+      }
+
+      // Group spectra by fragment_window_id to reconstruct the original window partition.
+      // Using fragment_window_id (not precursor isolation window) preserves the exact
+      // grouping from the original run so claiming semantics are identical to round 1.
+      std::map<Int, PeakMap> window_groups;
+      for (const MSSpectrum& spec : orphan_exp)
+      {
+        Int window_id = -1;
+        for (const auto& arr : spec.getIntegerDataArrays())
+        {
+          if (arr.getName() == "fragment_window_id" && !arr.empty())
+          {
+            window_id = arr[0];
+            break;
+          }
+        }
+        if (window_id < 0)
+          throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+              "Spectrum '" + spec.getNativeID() + "' in '" + in_pseudo +
+              "' is missing 'fragment_window_id' IntegerDataArray.");
+        window_groups[window_id].addSpectrum(spec);
+      }
+
+      // Convert to a vector so OMP can index by position.
+      std::vector<std::pair<Int, PeakMap>> bypass_windows;
+      bypass_windows.reserve(window_groups.size());
+      for (auto& [wid, group] : window_groups)
+        bypass_windows.emplace_back(wid, std::move(group));
+
+      total_windows = bypass_windows.size();
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] Bypass mode: " << total_windows
+                      << " window groups, " << orphan_exp.size() << " spectra total." << std::endl;
+
+#ifdef _OPENMP
+      omp_set_num_threads(num_threads);
+#pragma omp parallel for schedule(dynamic, 1) firstprivate(prose)
+#endif
+      for (SignedSize idx = 0; idx < static_cast<SignedSize>(total_windows); ++idx)
+      {
+        const Int bypass_window_id = bypass_windows[idx].first;
+        PeakMap& pseudo_spectra = bypass_windows[idx].second;
+        const String window_label = "bypass_window_" + String(bypass_window_id);
+
+        if (plain_consumer)
+        {
+#pragma omp critical (write_spectra)
+          {
+            for (auto& spec : pseudo_spectra)
+              plain_consumer->consumeSpectrum(spec);
+          }
+        }
+
+        std::vector<ProteinIdentification> window_prot_ids;
+        PeptideIdentificationList window_pep_ids;
+        FragmentClaimRegistry window_registry;
+
+        const ProSEAlgorithm::ExitCodes ec =
+          prose.searchWithClaiming(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
+                                   window_registry, min_unique_fragments_);
+
+#pragma omp critical (collect_pseudo_spectra)
+        {
+          for (auto& spec : pseudo_spectra)
+            all_pseudo_spectra[spec.getNativeID()] = spec;
+          all_claimed.merge(window_registry);
+        }
+
+        if (ec != ProSEAlgorithm::ExitCodes::EXECUTION_OK || window_prot_ids.empty() || window_pep_ids.empty())
+        {
+#pragma omp critical (progress_log)
+          {
+            if (ec != ProSEAlgorithm::ExitCodes::EXECUTION_OK)
+              OPENMS_LOG_WARN << "[diaWeaverPeptide] ProSE non-OK exit code ("
+                              << static_cast<int>(ec) << ") for " << window_label << std::endl;
+            else
+              OPENMS_LOG_INFO << "[diaWeaverPeptide] No PSMs for " << window_label << std::endl;
+            ++processed;
+          }
+          continue;
+        }
+
+        window_prot_ids[0].setPrimaryMSRunPath({window_label});
+        window_prot_ids[0].getSearchParameters().db = database;
+
+#pragma omp critical (results_collect)
+        {
+          total_pseudo_spectra += pseudo_spectra.size();
+          OPENMS_LOG_INFO << "[diaWeaverPeptide] " << window_label << ": "
+                          << window_pep_ids.size() << " PSMs, "
+                          << window_prot_ids[0].getHits().size() << " protein hits." << std::endl;
+          all_prot_ids.push_back(std::move(window_prot_ids));
+          all_pep_ids.push_back(std::move(window_pep_ids));
+          ++processed;
+        }
+      } // end bypass loop
+    } // end else — bypass mode
+
+    OPENMS_LOG_INFO << "[diaWeaverPeptide] All " << processed << " windows processed. "
                     << total_pseudo_spectra << " pseudo spectra searched across all windows." << std::endl;
 
     if (all_pep_ids.empty())
