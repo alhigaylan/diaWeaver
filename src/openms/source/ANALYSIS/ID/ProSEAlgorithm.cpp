@@ -1827,6 +1827,79 @@ namespace OpenMS
         // Claim unclaimed traces using the original score so the registry
         // ordering stays consistent with the globally sorted psm_list.
         registry.tryClaim(claimable, psm.sequence, psm.score, psm.spectrum_idx);
+
+        // Claim isotope traces (M+1, M+2) of each owned fragment.
+        // These peaks are explained by the matched peptide but must not
+        // contribute to the hyperscore (already computed above).
+        {
+          const MSSpectrum& iso_spec = pseudo_spectra[psm.spectrum_idx];
+          const TraceArrayPair iso_arrs = getSpecTraceArrays(psm.spectrum_idx);
+          auto& mz_vec = spec_mz_cache[psm.spectrum_idx]; // already populated
+
+          if (iso_arrs.trace_id != nullptr && iso_arrs.window_id != nullptr
+              && !mz_vec.empty())
+          {
+            const bool frag_tol_ppm = (fragment_mass_tolerance_unit_ == "ppm");
+            std::vector<FragmentClaimRegistry::TraceKey> iso_claimable;
+            std::vector<PeptideHit::PeakAnnotation> iso_annots;
+
+            for (Size ai : owned_annot_idxs)
+            {
+              const auto& pa = annotations[ai];
+              const int frag_z = pa.charge; // always >= 1 (set by TheoreticalSpectrumGenerator)
+
+              // Sequential isotope search: M+2 is only searched if M+1 was found,
+              // M+3 if M+2 was found, etc. Chain stops as soon as an isotope is absent.
+              double prev_mz = pa.mz; // start from the matched monoisotopic peak
+              for (int iso = 1; iso <= 2; ++iso)
+              {
+                const double iso_mz = prev_mz
+                    + Constants::C13C12_MASSDIFF_U / frag_z;
+
+                const double tol_da = frag_tol_ppm
+                    ? Math::ppmToMass(fragment_mass_tolerance_, iso_mz)
+                    : fragment_mass_tolerance_;
+
+                bool found = false;
+                auto lb = std::lower_bound(mz_vec.begin(), mz_vec.end(), iso_mz - tol_da);
+                for (auto it = lb; it != mz_vec.end() && *it <= iso_mz + tol_da; ++it)
+                {
+                  const Size pk_idx = static_cast<Size>(it - mz_vec.begin());
+                  if (pk_idx >= iso_arrs.trace_id->size()) break;
+
+                  const FragmentClaimRegistry::TraceKey key =
+                      FragmentClaimRegistry::makeKey((*iso_arrs.window_id)[pk_idx],
+                                                     (*iso_arrs.trace_id)[pk_idx]);
+                  const auto* rec = registry.getClaimRecord(key);
+                  if (rec == nullptr || rec->peptide_seq == psm.sequence)
+                  {
+                    iso_claimable.push_back(key);
+
+                    PeptideHit::PeakAnnotation iso_pa;
+                    iso_pa.mz        = *it;
+                    iso_pa.intensity = iso_spec[pk_idx].getIntensity();
+                    iso_pa.charge    = frag_z;
+                    iso_pa.annotation = pa.annotation + "[M+" + String(iso) + "]";
+                    iso_annots.push_back(std::move(iso_pa));
+                    prev_mz = *it; // step forward from the actual matched m/z
+                    found = true;
+                  }
+                  break; // take the closest match only
+                }
+                if (!found) break; // lighter isotope absent — stop the chain
+              }
+            }
+
+            if (!iso_claimable.empty())
+            {
+              registry.tryClaim(iso_claimable, psm.sequence, psm.score, psm.spectrum_idx);
+              PeptideHit& mhit = peptide_ids[psm.pep_id_idx].getHits()[psm.hit_idx];
+              auto peak_annots = mhit.getPeakAnnotations();
+              peak_annots.insert(peak_annots.end(), iso_annots.begin(), iso_annots.end());
+              mhit.setPeakAnnotations(std::move(peak_annots));
+            }
+          }
+        }
       }
     }
 

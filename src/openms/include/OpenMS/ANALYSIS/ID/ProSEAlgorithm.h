@@ -515,6 +515,8 @@ class OPENMS_DLLAPI ProSEAlgorithm :
 
     String fragment_mass_tolerance_unit_;
 
+    int fragment_isotope_peaks_to_claim_;
+
     StringList modifications_fixed_;
 
     StringList modifications_variable_;
