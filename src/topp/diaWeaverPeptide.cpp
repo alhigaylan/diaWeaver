@@ -26,6 +26,7 @@
 #include <OpenMS/FEATUREFINDER/FeatureFindingPeptide.h>
 #include <OpenMS/ANALYSIS/OPENSWATH/ClusterMassTracesByPrecursor.h>
 #include <OpenMS/ANALYSIS/ID/ProSEAlgorithm.h>
+#include <OpenMS/ANALYSIS/ID/FragmentClaimRegistry.h>
 #include <OpenMS/ANALYSIS/ID/BasicProteinInferenceAlgorithm.h>
 #include <OpenMS/ANALYSIS/ID/FalseDiscoveryRate.h>
 #include <OpenMS/ANALYSIS/ID/IDMergerAlgorithm.h>
@@ -813,6 +814,9 @@ protected:
     // Keyed by native_id: preprocessed pseudo spectra (post-searchWithClaiming) held for
     // post-FDR orphan and annotated mzML writing.
     std::unordered_map<String, MSSpectrum> all_pseudo_spectra;
+    // Accumulated claimed trace keys from all per-window FragmentClaimRegistries.
+    // Used in orphan mzML building to exclude exactly those traces that were claimed.
+    FragmentClaimRegistry all_claimed;
 
     // Pickers passed as const-ref to peakPickInPlace_(), which creates per-inner-thread
     // copies internally — safe to share across outer threads.
@@ -1016,16 +1020,19 @@ protected:
       // prose is a per-thread firstprivate copy; ctx (FragmentIndex) is shared read-only.
       std::vector<ProteinIdentification> window_prot_ids;
       PeptideIdentificationList window_pep_ids;
+      FragmentClaimRegistry window_registry;
 
       const ProSEAlgorithm::ExitCodes ec =
         prose.searchWithClaiming(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
-                                 min_unique_fragments_);
+                                 window_registry, min_unique_fragments_);
 
       // Always collect preprocessed pseudo spectra for post-FDR orphan/annotated output.
+      // Merge this window's claim registry into the global one for orphan building.
 #pragma omp critical (collect_pseudo_spectra)
       {
         for (auto& spec : pseudo_spectra)
           all_pseudo_spectra[spec.getNativeID()] = spec;
+        all_claimed.merge(window_registry);
       }
 
       if (ec != ProSEAlgorithm::ExitCodes::EXECUTION_OK || window_prot_ids.empty() || window_pep_ids.empty())
@@ -1261,37 +1268,41 @@ protected:
     // Group surviving PeptideIdentifications by spectrum native ID (getSpectrumReference()).
     // All peptide hits sharing the same native ID originated from the same pseudo spectrum
     // and are written as one output spectrum containing only b/y-matched peaks.
-    // Build claimed-mz lookup from FDR-surviving PSMs: native_id → set of claimed peak mz values.
-    // Used for both annotated and orphan mzML writing.
-    const bool need_ion_accounting = !out_annotated_mzml.empty() || !out_orphan_mzml.empty();
-    std::unordered_map<String, std::unordered_set<double>> claimed_mzs_by_id;
-    std::map<String, std::vector<Size>> native_id_to_pids;  // for annotation labels
 
-    if (need_ion_accounting)
+    // Helper: return the fragment_trace_id and fragment_window_id IntegerDataArrays.
+    // Throws if either is absent — both are unconditionally written by
+    // ClusterMassTracesByPrecursor and must always be present on every pseudo spectrum.
+    struct TraceArrayPair
+    {
+      const MSSpectrum::IntegerDataArray* trace_id_arr;
+      const MSSpectrum::IntegerDataArray* window_id_arr;
+    };
+    auto getTraceArrays = [](const MSSpectrum& s) -> TraceArrayPair
+    {
+      TraceArrayPair result{nullptr, nullptr};
+      for (const auto& arr : s.getIntegerDataArrays())
+      {
+        if      (arr.getName() == "fragment_trace_id")  result.trace_id_arr = &arr;
+        else if (arr.getName() == "fragment_window_id") result.window_id_arr = &arr;
+      }
+      if (result.trace_id_arr == nullptr || result.window_id_arr == nullptr)
+        throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+            "Pseudo spectrum '" + s.getNativeID() +
+            "' is missing 'fragment_trace_id' or 'fragment_window_id' IntegerDataArray. "
+            "These arrays must be present on all pseudo spectra produced by ClusterMassTracesByPrecursor.");
+      return result;
+    };
+
+    // Build native_id → PSM index map needed for annotated mzML label construction.
+    std::map<String, std::vector<Size>> native_id_to_pids;
+    if (!out_annotated_mzml.empty())
     {
       for (Size pid = 0; pid < merged_peptides.size(); ++pid)
       {
         const String& ref = merged_peptides[pid].getSpectrumReference();
-        if (ref.empty()) continue;
-        native_id_to_pids[ref].push_back(pid);
-        for (const PeptideHit& hit : merged_peptides[pid].getHits())
-          for (const PeptideHit::PeakAnnotation& pa : hit.getPeakAnnotations())
-            claimed_mzs_by_id[ref].insert(pa.mz);
+        if (!ref.empty()) native_id_to_pids[ref].push_back(pid);
       }
     }
-
-    // Helper: get fragment_trace_id and fragment_window_id arrays from a spectrum.
-    auto getTraceArrays = [](const MSSpectrum& s,
-                             const MSSpectrum::IntegerDataArray*& tid_arr,
-                             const MSSpectrum::IntegerDataArray*& wid_arr)
-    {
-      tid_arr = nullptr; wid_arr = nullptr;
-      for (const auto& arr : s.getIntegerDataArrays())
-      {
-        if      (arr.getName() == "fragment_trace_id")  tid_arr = &arr;
-        else if (arr.getName() == "fragment_window_id") wid_arr = &arr;
-      }
-    };
 
     if (!out_annotated_mzml.empty())
     {
@@ -1329,9 +1340,7 @@ protected:
         orig_mzs.reserve(orig.size());
         for (const auto& pk : orig) orig_mzs.push_back(pk.getMZ());
 
-        const MSSpectrum::IntegerDataArray* tid_arr = nullptr;
-        const MSSpectrum::IntegerDataArray* wid_arr = nullptr;
-        getTraceArrays(orig, tid_arr, wid_arr);
+        const auto [trace_id_arr, window_id_arr] = getTraceArrays(orig);
 
         MSSpectrum out_spec;
         out_spec.setNativeID(native_id);
@@ -1354,8 +1363,8 @@ protected:
           Peak1D pk; pk.setMZ(mz); pk.setIntensity(orig[pk_idx].getIntensity());
           out_spec.push_back(pk);
           annot_arr.push_back(label);
-          if (tid_arr && pk_idx < tid_arr->size()) out_tid.push_back((*tid_arr)[pk_idx]);
-          if (wid_arr && pk_idx < wid_arr->size()) out_wid.push_back((*wid_arr)[pk_idx]);
+          out_tid.push_back((*trace_id_arr)[pk_idx]);
+          out_wid.push_back((*window_id_arr)[pk_idx]);
         }
 
         if (out_spec.empty()) continue;
@@ -1377,11 +1386,7 @@ protected:
 
       for (const auto& [native_id, orig] : all_pseudo_spectra)
       {
-        const auto& claimed = claimed_mzs_by_id[native_id];  // empty set if no PSMs
-
-        const MSSpectrum::IntegerDataArray* tid_arr = nullptr;
-        const MSSpectrum::IntegerDataArray* wid_arr = nullptr;
-        getTraceArrays(orig, tid_arr, wid_arr);
+        const auto [trace_id_arr, window_id_arr] = getTraceArrays(orig);
 
         MSSpectrum orphan_spec;
         orphan_spec.setNativeID(native_id);
@@ -1395,10 +1400,11 @@ protected:
 
         for (Size i = 0; i < orig.size(); ++i)
         {
-          if (claimed.find(orig[i].getMZ()) != claimed.end()) continue;  // skip claimed
+          const auto key = FragmentClaimRegistry::makeKey((*window_id_arr)[i], (*trace_id_arr)[i]);
+          if (all_claimed.isClaimed(key)) continue;
           orphan_spec.push_back(orig[i]);
-          if (tid_arr && i < tid_arr->size()) out_tid.push_back((*tid_arr)[i]);
-          if (wid_arr && i < wid_arr->size()) out_wid.push_back((*wid_arr)[i]);
+          out_tid.push_back((*trace_id_arr)[i]);
+          out_wid.push_back((*window_id_arr)[i]);
         }
 
         if (orphan_spec.empty()) continue;

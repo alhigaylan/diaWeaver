@@ -81,6 +81,14 @@ namespace OpenMS
     std::vector<bool> buildExclusionMask(const MSSpectrum& spec,
                                          const String& query_peptide_seq) const;
 
+    /// Merge all claims from @p other into this registry.
+    /// If a key is already claimed in this registry, the existing record is kept (first claimer wins).
+    void merge(const FragmentClaimRegistry& other)
+    {
+      for (const auto& [key, record] : other.claims_)
+        claims_.try_emplace(key, record);
+    }
+
     Size claimedCount() const noexcept { return claims_.size(); }
 
     void clear() noexcept { claims_.clear(); }

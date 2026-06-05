@@ -1594,6 +1594,7 @@ namespace OpenMS
       SearchContext& ctx,
       vector<ProteinIdentification>& protein_ids,
       PeptideIdentificationList& peptide_ids,
+      FragmentClaimRegistry& out_registry,
       Size min_unique_fragments) const
   {
     // Phase 1: initial search — produces scored PSMs for all pseudo spectra.
@@ -1936,6 +1937,7 @@ namespace OpenMS
                     << " fragment trace IDs claimed across " << peptide_ids.size()
                     << " surviving PSM spectra." << std::endl;
 
+    out_registry = std::move(registry);
     return ExitCodes::EXECUTION_OK;
   }
 

@@ -11,6 +11,7 @@
 #include <OpenMS/CONCEPT/ProgressLogger.h>
 #include <OpenMS/DATASTRUCTURES/DefaultParamHandler.h>
 
+#include <OpenMS/ANALYSIS/ID/FragmentClaimRegistry.h>
 #include <OpenMS/ANALYSIS/ID/FragmentIndex.h>
 #include <OpenMS/ANALYSIS/ID/OpenSearchModificationAnalysis.h>
 #include <OpenMS/CHEMISTRY/EnzymaticDigestion.h>
@@ -299,6 +300,7 @@ class OPENMS_DLLAPI ProSEAlgorithm :
                                  SearchContext& ctx,
                                  std::vector<ProteinIdentification>& prot_ids,
                                  PeptideIdentificationList& pep_ids,
+                                 FragmentClaimRegistry& out_registry,
                                  Size min_unique_fragments = 3) const;
 
     /**
