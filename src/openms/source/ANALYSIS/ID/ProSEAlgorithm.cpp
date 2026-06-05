@@ -1595,6 +1595,7 @@ namespace OpenMS
       vector<ProteinIdentification>& protein_ids,
       PeptideIdentificationList& peptide_ids,
       FragmentClaimRegistry& out_registry,
+      PeptideIdentificationList* out_pre_filter_pep_ids,
       Size min_unique_fragments) const
   {
     // Phase 1: initial search — produces scored PSMs for all pseudo spectra.
@@ -1917,6 +1918,12 @@ namespace OpenMS
         }
       }
     }
+
+    // Snapshot all scored PSM hits before Phase 5 claiming filter. Used by callers
+    // (e.g. diaWeaverPeptide debug TSV) that need to see all ranked hits per spectrum
+    // regardless of whether lower-ranked ones lost the trace-claim contest.
+    if (out_pre_filter_pep_ids != nullptr)
+      *out_pre_filter_pep_ids = peptide_ids;
 
     // Phase 5: remove PSMs that do not meet the min_unique_fragments threshold.
     for (Size pid = 0; pid < peptide_ids.size(); ++pid)

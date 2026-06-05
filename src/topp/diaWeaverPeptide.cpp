@@ -753,6 +753,9 @@ protected:
     std::unordered_map<String, MSSpectrum> all_pseudo_spectra;
     // Accumulated claimed trace keys from all per-window FragmentClaimRegistries.
     FragmentClaimRegistry all_claimed;
+    // Pre-Phase-5 PSM hits for all windows: used by debug TSV to show all ranked
+    // hits before the claiming filter drops lower-ranked PSMs.
+    PeptideIdentificationList debug_pre_filter_pep_ids;
 
     Size processed = 0;
     Size total_pseudo_spectra = 0;
@@ -1038,10 +1041,11 @@ protected:
       std::vector<ProteinIdentification> window_prot_ids;
       PeptideIdentificationList window_pep_ids;
       FragmentClaimRegistry window_registry;
+      PeptideIdentificationList window_debug_pep_ids;
 
       const ProSEAlgorithm::ExitCodes ec =
         prose.searchWithClaiming(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
-                                 window_registry, min_unique_fragments_);
+                                 window_registry, &window_debug_pep_ids, min_unique_fragments_);
 
       // Always collect preprocessed pseudo spectra for post-FDR orphan/annotated output.
       // Merge this window's claim registry into the global one for orphan building.
@@ -1077,6 +1081,9 @@ protected:
                         << window_prot_ids[0].getHits().size() << " protein hits." << std::endl;
         all_prot_ids.push_back(std::move(window_prot_ids));
         all_pep_ids.push_back(std::move(window_pep_ids));
+        debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
+                                        std::make_move_iterator(window_debug_pep_ids.begin()),
+                                        std::make_move_iterator(window_debug_pep_ids.end()));
         ++processed;
       }
     } // end normal window loop
@@ -1157,10 +1164,11 @@ protected:
         std::vector<ProteinIdentification> window_prot_ids;
         PeptideIdentificationList window_pep_ids;
         FragmentClaimRegistry window_registry;
+        PeptideIdentificationList window_debug_pep_ids;
 
         const ProSEAlgorithm::ExitCodes ec =
           prose.searchWithClaiming(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
-                                   window_registry, min_unique_fragments_);
+                                   window_registry, &window_debug_pep_ids, min_unique_fragments_);
 
 #pragma omp critical (collect_pseudo_spectra)
         {
@@ -1194,6 +1202,9 @@ protected:
                           << window_prot_ids[0].getHits().size() << " protein hits." << std::endl;
           all_prot_ids.push_back(std::move(window_prot_ids));
           all_pep_ids.push_back(std::move(window_pep_ids));
+          debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
+                                          std::make_move_iterator(window_debug_pep_ids.begin()),
+                                          std::make_move_iterator(window_debug_pep_ids.end()));
           ++processed;
         }
       } // end bypass loop
@@ -1255,10 +1266,12 @@ protected:
       }
     }
 
-    // Helper: write debug TSV of all scored PSM hits.
-    // Written after FDR assigns q-values (before score-threshold filtering) so
-    // the full ranked list is visible. If FDR was not applied, q_value is "NA".
-    auto write_debug_tsv = [&](bool has_qvalues)
+    // Helper: write debug TSV of all scored PSM hits before the claiming filter.
+    // Iterates debug_pre_filter_pep_ids (captured before Phase 5 in searchWithClaiming)
+    // so all top-N ranked hits per spectrum appear, including those that lost the
+    // trace-claim contest to a higher-scoring PSM. Scores are raw hyperscores;
+    // q_value is always "NA" since FDR is not applied to the pre-filter snapshot.
+    auto write_debug_tsv = [&]()
     {
       if (out_debug_tsv.empty()) return;
       std::ofstream tsv(out_debug_tsv);
@@ -1269,8 +1282,7 @@ protected:
         return;
       }
       tsv << "spectrum_native_id\tRT\tIM\tprecursor_mz\tsequence\ttarget_decoy\thyperscore\tq_value\n";
-      const String orig_score_key = "ln(hyperscore)_score";
-      for (const auto& pi : merged_peptides)
+      for (const auto& pi : debug_pre_filter_pep_ids)
       {
         const String& native_id = pi.getSpectrumReference();
         const double  rt        = pi.getRT();
@@ -1280,32 +1292,23 @@ protected:
                                     : "NA";
         for (const auto& hit : pi.getHits())
         {
-          double hyperscore, qval;
-          if (has_qvalues && hit.metaValueExists(orig_score_key))
-          {
-            hyperscore = static_cast<double>(hit.getMetaValue(orig_score_key));
-            qval       = hit.getScore();
-          }
-          else
-          {
-            hyperscore = hit.getScore();
-            qval       = -1.0;
-          }
           tsv << native_id << "\t"
               << rt        << "\t"
               << im_str    << "\t"
               << prec_mz   << "\t"
               << hit.getSequence().toString() << "\t"
               << (hit.isDecoy() ? "decoy" : "target") << "\t"
-              << hyperscore << "\t";
-          if (qval >= 0.0) tsv << qval;
-          else             tsv << "NA";
-          tsv << "\n";
+              << hit.getScore() << "\t"
+              << "NA\n";
         }
       }
       OPENMS_LOG_INFO << "[diaWeaverPeptide] Debug PSM TSV written to " << out_debug_tsv
                       << std::endl;
     };
+
+    // Write the debug TSV before FDR filtering so it always contains all scored
+    // hits (both target and decoy, all ranks) regardless of FDR outcome.
+    write_debug_tsv();
 
     // PSM-level FDR — applied before protein inference so BPIA sees only
     // confident PSMs (mirrors ProSE's per-file FDR-before-merge approach).
@@ -1316,7 +1319,6 @@ protected:
         OPENMS_LOG_WARN << "[diaWeaverPeptide] FDR:PSM requested but no decoy PSMs found. "
                         << "Enable Search:decoys or provide a FASTA with decoy proteins. "
                         << "Skipping PSM FDR filtering." << std::endl;
-        write_debug_tsv(false);
       }
       else
       {
@@ -1328,16 +1330,11 @@ protected:
         fdr_params.setValue("add_decoy_peptides", "true");
         fdr_tool.setParameters(fdr_params);
         fdr_tool.apply(merged_peptides);
-        write_debug_tsv(true);
         IDFilter::filterHitsByScore(merged_peptides, user_psm_fdr);
         IDFilter::removeEmptyIdentifications(merged_peptides);
         OPENMS_LOG_INFO << "[diaWeaverPeptide] " << merged_peptides.size()
                         << " PSMs retained after PSM FDR." << std::endl;
       }
-    }
-    else
-    {
-      write_debug_tsv(false);
     }
 
     // If protein FDR is not requested, strip decoys before BPIA so protein

@@ -301,6 +301,7 @@ class OPENMS_DLLAPI ProSEAlgorithm :
                                  std::vector<ProteinIdentification>& prot_ids,
                                  PeptideIdentificationList& pep_ids,
                                  FragmentClaimRegistry& out_registry,
+                                 PeptideIdentificationList* out_pre_filter_pep_ids = nullptr,
                                  Size min_unique_fragments = 3) const;
 
     /**
