@@ -328,49 +328,60 @@ namespace OpenMS
   }
 
   // static
-  void ProSEAlgorithm::preprocessSpectra_(PeakMap& exp, double fragment_mass_tolerance, bool fragment_mass_tolerance_unit_ppm)
+  void ProSEAlgorithm::preprocessSpectra_(PeakMap& exp, double fragment_mass_tolerance,
+                                           bool fragment_mass_tolerance_unit_ppm,
+                                           bool skip_density_filters)
   {
-    // filter MS2 map
-    // remove 0 intensities
+    // Remove 0-intensity peaks and normalise — always safe for any spectrum type.
     ThresholdMower threshold_mower_filter;
     threshold_mower_filter.filterPeakMap(exp);
 
     Normalizer normalizer;
     normalizer.filterPeakMap(exp);
 
-    // sort by rt
+    // Sort by RT (no peaks removed).
     exp.sortSpectra(false);
 
-    // filter settings
-    WindowMower window_mower_filter;
-    Param filter_param = window_mower_filter.getParameters();
-    filter_param.setValue("windowsize", 100.0, "The size of the sliding window along the m/z axis.");
-    filter_param.setValue("peakcount", 20, "The number of peaks that should be kept.");
-    filter_param.setValue("movetype", "jump", "Whether sliding window (one peak steps) or jumping window (window size steps) should be used.");
-    window_mower_filter.setParameters(filter_param);
+    // Density filters: WindowMower, NLargest, and Deisotoper all remove peaks.
+    // For DIA pseudo spectra (mass-trace clusters) every peak represents a real
+    // ion trace that must survive until the fragment-claiming step — none may be
+    // discarded here. skip_density_filters=true suppresses all three.
+    if (!skip_density_filters)
+    {
+      WindowMower window_mower_filter;
+      Param filter_param = window_mower_filter.getParameters();
+      filter_param.setValue("windowsize", 100.0, "The size of the sliding window along the m/z axis.");
+      filter_param.setValue("peakcount", 20, "The number of peaks that should be kept.");
+      filter_param.setValue("movetype", "jump", "Whether sliding window (one peak steps) or jumping window (window size steps) should be used.");
+      window_mower_filter.setParameters(filter_param);
 
-    NLargest nlargest_filter = NLargest(400);
+      NLargest nlargest_filter = NLargest(400);
 
 #pragma omp parallel for default(none) shared(exp, fragment_mass_tolerance, fragment_mass_tolerance_unit_ppm, window_mower_filter, nlargest_filter)
-    for (SignedSize exp_index = 0; exp_index < (SignedSize)exp.size(); ++exp_index)
+      for (SignedSize exp_index = 0; exp_index < (SignedSize)exp.size(); ++exp_index)
+      {
+        exp[exp_index].sortByPosition();
+
+        Deisotoper::deisotopeAndSingleCharge(exp[exp_index],
+          fragment_mass_tolerance, fragment_mass_tolerance_unit_ppm,
+          1, 3,   // min / max charge
+          false,  // keep only deisotoped
+          3, 10,  // min / max isopeaks
+          true);  // convert fragment m/z to mono-charge
+
+        window_mower_filter.filterPeakSpectrum(exp[exp_index]);
+        nlargest_filter.filterPeakSpectrum(exp[exp_index]);
+
+        exp[exp_index].sortByPosition();
+      }
+    }
+    else
     {
-      // sort by mz
-      exp[exp_index].sortByPosition();
-
-      // deisotope
-      Deisotoper::deisotopeAndSingleCharge(exp[exp_index], 
-        fragment_mass_tolerance, fragment_mass_tolerance_unit_ppm, 
-        1, 3,   // min / max charge 
-        false,  // keep only deisotoped
-        3, 10,  // min / max isopeaks 
-        true);  // convert fragment m/z to mono-charge
-
-      // remove noise
-      window_mower_filter.filterPeakSpectrum(exp[exp_index]);
-      nlargest_filter.filterPeakSpectrum(exp[exp_index]);
-
-      // sort (nlargest changes order)
-      exp[exp_index].sortByPosition();
+      // Pseudo-spectra path: only sort by m/z (required for binary-search scoring).
+      // No peaks are removed — all ion traces must reach the claiming step intact.
+#pragma omp parallel for default(none) shared(exp)
+      for (SignedSize exp_index = 0; exp_index < (SignedSize)exp.size(); ++exp_index)
+        exp[exp_index].sortByPosition();
     }
   }
 
@@ -1322,7 +1333,8 @@ namespace OpenMS
       PeakMap& spectra,
       SearchContext& ctx,
       vector<ProteinIdentification>& protein_ids,
-      PeptideIdentificationList& peptide_ids) const
+      PeptideIdentificationList& peptide_ids,
+      bool skip_density_filters) const
   {
     bool fragment_mass_tolerance_unit_ppm = (fragment_mass_tolerance_unit_ == "ppm");
 
@@ -1333,7 +1345,8 @@ namespace OpenMS
                     << precursor_mass_tolerance_unit_ << ")" << std::endl;
 
     startProgress(0, 1, "Filtering spectra...");
-    preprocessSpectra_(spectra, fragment_mass_tolerance_, fragment_mass_tolerance_unit_ppm);
+    preprocessSpectra_(spectra, fragment_mass_tolerance_, fragment_mass_tolerance_unit_ppm,
+                       skip_density_filters);
     endProgress();
 
     // Reference the prepared (decoy-augmented) database and prebuilt fragment index from the context.
@@ -1601,7 +1614,10 @@ namespace OpenMS
     // Phase 1: initial search — produces scored PSMs for all pseudo spectra.
     // FDR is expected to be disabled by the caller (set to 0.0 in params)
     // so all PSMs survive into peptide_ids for claiming.
-    ExitCodes ec = search(pseudo_spectra, ctx, protein_ids, peptide_ids);
+    // skip_density_filters=true: pseudo spectra are DIA mass-trace clusters where
+    // every peak is a real ion trace; WindowMower/NLargest/Deisotoper must not
+    // discard any peak before the fragment-claiming step.
+    ExitCodes ec = search(pseudo_spectra, ctx, protein_ids, peptide_ids, /*skip_density_filters=*/true);
     if (ec != ExitCodes::EXECUTION_OK) return ec;
 
     // Phase 2: build the fragment trace mapping from the spectra's IntegerDataArrays.

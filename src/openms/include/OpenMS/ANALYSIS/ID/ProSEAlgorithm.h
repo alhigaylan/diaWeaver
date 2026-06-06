@@ -272,7 +272,8 @@ class OPENMS_DLLAPI ProSEAlgorithm :
     ExitCodes search(PeakMap& spectra,
                      SearchContext& ctx,
                      std::vector<ProteinIdentification>& prot_ids,
-                     PeptideIdentificationList& pep_ids) const;
+                     PeptideIdentificationList& pep_ids,
+                     bool skip_density_filters = false) const;
 
     /**
      * @brief In-memory search with iterative fragment claiming (diaWeaverPeptide).
@@ -395,8 +396,14 @@ class OPENMS_DLLAPI ProSEAlgorithm :
       }
     };
 
-    /// @brief filter, deisotope, decharge spectra
-    static void preprocessSpectra_(PeakMap& exp, double fragment_mass_tolerance, bool fragment_mass_tolerance_unit_ppm);
+    /// @brief filter, deisotope, decharge spectra.
+    /// When @p skip_density_filters is true the WindowMower, NLargest, and
+    /// Deisotoper steps are skipped. Use this for pseudo spectra (DIA mass
+    /// trace clusters) where every peak represents a real ion trace and must
+    /// not be discarded before the fragment claiming step.
+    static void preprocessSpectra_(PeakMap& exp, double fragment_mass_tolerance,
+                                    bool fragment_mass_tolerance_unit_ppm,
+                                    bool skip_density_filters = false);
 
     /**
      * @brief Build a decoy-augmented copy of the input FASTA.
