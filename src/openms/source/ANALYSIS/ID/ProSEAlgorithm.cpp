@@ -362,17 +362,100 @@ namespace OpenMS
       {
         exp[exp_index].sortByPosition();
 
+        // Save pre-deisotope trace arrays so we can build isotope-companion maps after
+        // spec.select() removes heavier isotope peaks from the spectrum.
+        std::vector<Int> pre_trace_ids, pre_window_ids;
+        for (const auto& arr : exp[exp_index].getIntegerDataArrays())
+        {
+          if      (arr.getName() == "fragment_trace_id")  pre_trace_ids  = arr;
+          else if (arr.getName() == "fragment_window_id") pre_window_ids = arr;
+        }
+
+        std::vector<int> deiso_features;
         Deisotoper::deisotopeAndSingleCharge(exp[exp_index],
           fragment_mass_tolerance, fragment_mass_tolerance_unit_ppm,
-          1, 3,   // min / max charge
-          false,  // keep only deisotoped
-          3, 10,  // min / max isopeaks
-          true);  // convert fragment m/z to mono-charge
+          1, 3,    // min / max charge
+          false,   // keep only deisotoped
+          3, 10,   // min / max isopeaks
+          true,    // convert fragment m/z to mono-charge
+          false, false, true, 2, false, false,  // default params
+          &deiso_features);
 
         window_mower_filter.filterPeakSpectrum(exp[exp_index]);
         nlargest_filter.filterPeakSpectrum(exp[exp_index]);
 
         exp[exp_index].sortByPosition();
+
+        // Build CSR companion arrays: for each surviving monoisotopic peak, record
+        // the trace_ids/window_ids of its heavier isotope companions that were removed
+        // by the Deisotoper. Used by searchWithClaiming to claim companions alongside
+        // their monoisotopic so they are excluded from orphan mzML.
+        if (!pre_trace_ids.empty() && !pre_window_ids.empty() && !deiso_features.empty())
+        {
+          // Map original trace_id -> original peak index for fast reverse lookup.
+          std::unordered_map<Int, Size> trace_to_orig;
+          trace_to_orig.reserve(pre_trace_ids.size());
+          for (Size k = 0; k < pre_trace_ids.size(); ++k)
+            trace_to_orig[pre_trace_ids[k]] = k;
+
+          // Group original peak indices by feature number (cluster membership).
+          std::unordered_map<int, std::vector<Size>> feature_to_orig_idxs;
+          for (Size k = 0; k < deiso_features.size(); ++k)
+          {
+            if (deiso_features[k] >= 0)
+              feature_to_orig_idxs[deiso_features[k]].push_back(k);
+          }
+
+          // Get the surviving spectrum's trace arrays (post-select, correctly subsetted).
+          const MSSpectrum::IntegerDataArray* surv_trace_arr  = nullptr;
+          const MSSpectrum::IntegerDataArray* surv_window_arr = nullptr;
+          for (const auto& arr : exp[exp_index].getIntegerDataArrays())
+          {
+            if      (arr.getName() == "fragment_trace_id")  surv_trace_arr  = &arr;
+            else if (arr.getName() == "fragment_window_id") surv_window_arr = &arr;
+          }
+
+          if (surv_trace_arr && surv_window_arr)
+          {
+            const Size M = exp[exp_index].size();
+            MSSpectrum::IntegerDataArray comp_offsets, comp_trace_ids, comp_window_ids;
+            comp_offsets.setName("companion_offsets");
+            comp_trace_ids.setName("companion_trace_ids");
+            comp_window_ids.setName("companion_window_ids");
+            comp_offsets.resize(M + 1, 0);
+
+            Int flat_idx = 0;
+            for (Size j = 0; j < M; ++j)
+            {
+              comp_offsets[j] = flat_idx;
+              const Int tid = (*surv_trace_arr)[j];
+              auto orig_it = trace_to_orig.find(tid);
+              if (orig_it == trace_to_orig.end()) continue;
+              const Size orig_idx = orig_it->second;
+              const int fn = deiso_features[orig_idx];
+              if (fn < 0) continue; // isolated peak — no companions
+
+              auto feat_it = feature_to_orig_idxs.find(fn);
+              if (feat_it == feature_to_orig_idxs.end()) continue;
+
+              for (Size comp_k : feat_it->second)
+              {
+                if (comp_k == orig_idx) continue; // skip self
+                comp_trace_ids.push_back(pre_trace_ids[comp_k]);
+                comp_window_ids.push_back(pre_window_ids[comp_k]);
+                ++flat_idx;
+              }
+            }
+            comp_offsets[M] = flat_idx;
+
+            if (flat_idx > 0)
+            {
+              exp[exp_index].getIntegerDataArrays().push_back(std::move(comp_offsets));
+              exp[exp_index].getIntegerDataArrays().push_back(std::move(comp_trace_ids));
+              exp[exp_index].getIntegerDataArrays().push_back(std::move(comp_window_ids));
+            }
+          }
+        }
       }
     }
     else
@@ -1849,84 +1932,54 @@ namespace OpenMS
         // ordering stays consistent with the globally sorted psm_list.
         registry.tryClaim(claimable, psm.sequence, psm.score, psm.spectrum_idx);
 
-        // Claim isotope traces (M+1, M+2) of each owned fragment.
-        // These peaks are explained by the matched peptide but must not
-        // contribute to the hyperscore (already computed above).
+        // Claim heavier isotope companions of each owned fragment via the CSR
+        // companion arrays built by preprocessSpectra_. The Deisotoper removes M+1/M+2
+        // peaks from the preprocessed spectrum before search; without this step those
+        // trace keys would remain unclaimed and appear in the orphan mzML incorrectly.
+        // Companions are claimed with the same PSM identity/score as their monoisotopic
+        // so conflict resolution in the registry is consistent: whoever wins the
+        // monoisotopic also wins its companions.
         {
-          const MSSpectrum& iso_spec = pseudo_spectra[psm.spectrum_idx];
-          const TraceArrayPair iso_arrs = getSpecTraceArrays(psm.spectrum_idx);
-          auto& mz_vec = spec_mz_cache[psm.spectrum_idx]; // already populated
-
-          if (iso_arrs.trace_id != nullptr && iso_arrs.window_id != nullptr
-              && !mz_vec.empty())
+          const MSSpectrum& proc_spec = pseudo_spectra[psm.spectrum_idx];
+          const MSSpectrum::IntegerDataArray* comp_offsets_arr   = nullptr;
+          const MSSpectrum::IntegerDataArray* comp_trace_ids_arr = nullptr;
+          const MSSpectrum::IntegerDataArray* comp_window_ids_arr = nullptr;
+          for (const auto& arr : proc_spec.getIntegerDataArrays())
           {
-            const bool frag_tol_ppm = (fragment_mass_tolerance_unit_ == "ppm");
-            std::vector<FragmentClaimRegistry::TraceKey> iso_claimable;
-            std::vector<PeptideHit::PeakAnnotation> iso_annots;
+            if      (arr.getName() == "companion_offsets")    comp_offsets_arr   = &arr;
+            else if (arr.getName() == "companion_trace_ids")  comp_trace_ids_arr = &arr;
+            else if (arr.getName() == "companion_window_ids") comp_window_ids_arr = &arr;
+          }
+
+          if (comp_offsets_arr && comp_trace_ids_arr && comp_window_ids_arr)
+          {
+            const auto& mz_vec = spec_mz_cache[psm.spectrum_idx];
+            const auto& annotations = hit.getPeakAnnotations();
+            std::vector<FragmentClaimRegistry::TraceKey> companion_claimable;
 
             for (Size ai : owned_annot_idxs)
             {
               const auto& pa = annotations[ai];
+              auto lb = std::lower_bound(mz_vec.begin(), mz_vec.end(), pa.mz);
+              if (lb == mz_vec.end() || *lb != pa.mz) continue;
+              const Size pk_idx = static_cast<Size>(lb - mz_vec.begin());
+              if (pk_idx + 1 >= comp_offsets_arr->size()) continue;
 
-              // Infer fragment charge from trailing '+' in the annotation label
-              // (e.g. "b5+" -> 1, "y3++" -> 2). This is robust against any m/z
-              // conversion that may have altered pa.mz (e.g. make_single_charged).
-              int frag_z = 0;
-              for (int k = static_cast<int>(pa.annotation.size()) - 1;
-                   k >= 0 && pa.annotation[k] == '+'; --k)
-                ++frag_z;
-              if (frag_z == 0) frag_z = pa.charge; // fallback for unusual annotations
-
-              // Sequential isotope search: M+2 is only searched if M+1 was found,
-              // M+3 if M+2 was found, etc. Chain stops as soon as an isotope is absent.
-              double prev_mz = pa.mz; // start from the matched monoisotopic peak
-              for (int iso = 1; iso <= fragment_isotope_peaks_to_claim_; ++iso)
+              const Int start = (*comp_offsets_arr)[pk_idx];
+              const Int end   = (*comp_offsets_arr)[pk_idx + 1];
+              for (Int ci = start; ci < end; ++ci)
               {
-                const double iso_mz = prev_mz
-                    + Constants::C13C12_MASSDIFF_U / frag_z;
-
-                const double tol_da = frag_tol_ppm
-                    ? Math::ppmToMass(fragment_mass_tolerance_, iso_mz)
-                    : fragment_mass_tolerance_;
-
-                bool found = false;
-                auto lb = std::lower_bound(mz_vec.begin(), mz_vec.end(), iso_mz - tol_da);
-                for (auto it = lb; it != mz_vec.end() && *it <= iso_mz + tol_da; ++it)
-                {
-                  const Size pk_idx = static_cast<Size>(it - mz_vec.begin());
-                  if (pk_idx >= iso_arrs.trace_id->size()) break;
-
-                  const FragmentClaimRegistry::TraceKey key =
-                      FragmentClaimRegistry::makeKey((*iso_arrs.window_id)[pk_idx],
-                                                     (*iso_arrs.trace_id)[pk_idx]);
-                  const auto* rec = registry.getClaimRecord(key);
-                  if (rec == nullptr || rec->peptide_seq == psm.sequence)
-                  {
-                    iso_claimable.push_back(key);
-
-                    PeptideHit::PeakAnnotation iso_pa;
-                    iso_pa.mz        = *it;
-                    iso_pa.intensity = iso_spec[pk_idx].getIntensity();
-                    iso_pa.charge    = frag_z;
-                    iso_pa.annotation = pa.annotation + "[M+" + String(iso) + "]";
-                    iso_annots.push_back(std::move(iso_pa));
-                    prev_mz = *it; // step forward from the actual matched m/z
-                    found = true;
-                  }
-                  break; // take the closest match only
-                }
-                if (!found) break; // lighter isotope absent — stop the chain
+                const FragmentClaimRegistry::TraceKey comp_key =
+                    FragmentClaimRegistry::makeKey((*comp_window_ids_arr)[ci],
+                                                   (*comp_trace_ids_arr)[ci]);
+                const auto* rec = registry.getClaimRecord(comp_key);
+                if (rec == nullptr || rec->peptide_seq == psm.sequence)
+                  companion_claimable.push_back(comp_key);
               }
             }
 
-            if (!iso_claimable.empty())
-            {
-              registry.tryClaim(iso_claimable, psm.sequence, psm.score, psm.spectrum_idx);
-              PeptideHit& mhit = peptide_ids[psm.pep_id_idx].getHits()[psm.hit_idx];
-              auto peak_annots = mhit.getPeakAnnotations();
-              peak_annots.insert(peak_annots.end(), iso_annots.begin(), iso_annots.end());
-              mhit.setPeakAnnotations(std::move(peak_annots));
-            }
+            if (!companion_claimable.empty())
+              registry.tryClaim(companion_claimable, psm.sequence, psm.score, psm.spectrum_idx);
           }
         }
       }

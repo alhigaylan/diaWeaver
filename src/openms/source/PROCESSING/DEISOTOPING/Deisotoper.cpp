@@ -340,7 +340,8 @@ void Deisotoper::deisotopeAndSingleCharge(MSSpectrum& spec,
                       bool use_decreasing_model,
                       unsigned int start_intensity_check,
                       bool add_up_intensity,
-                      bool annotate_features)
+                      bool annotate_features,
+                      std::vector<int>* out_pre_select_features)
 {
   OPENMS_PRECONDITION(spec.isSorted(), "Spectrum must be sorted.");
 
@@ -492,11 +493,16 @@ void Deisotoper::deisotopeAndSingleCharge(MSSpectrum& spec,
     }
   }
 
+  // Capture full per-peak feature assignment before spec.select() subsets it.
+  // Callers use this together with pre-saved trace_id arrays to identify isotope companions.
+  if (out_pre_select_features != nullptr)
+    *out_pre_select_features = features;
+
   if (annotate_features)
   { // assign feature indices without copy
     spec.getIntegerDataArrays()[feature_number_dataarray_index].std::vector<Int>::swap(features);
   }
-  
+
   // apply changes, i.e. select the indices which should survive
   std::vector<Size> select_idx;
 

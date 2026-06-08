@@ -757,6 +757,19 @@ protected:
     std::vector<PeptideIdentificationList> all_pep_ids;
     // Keyed by native_id: pseudo spectra held for post-FDR orphan/annotated output.
     std::unordered_map<String, MSSpectrum> all_pseudo_spectra;
+    // Keyed by native_id: companion CSR arrays from preprocessed spectra, collected after
+    // searchWithClaiming attaches them. Used for annotated mzML companion peak writing.
+    // Each value: (companion_offsets, companion_trace_ids, companion_window_ids,
+    //              proc_trace_ids, proc_window_ids) — all from the preprocessed spectrum.
+    struct CompanionInfo
+    {
+      MSSpectrum::IntegerDataArray offsets;      // size = num_peaks + 1
+      MSSpectrum::IntegerDataArray trace_ids;    // flat companion trace IDs
+      MSSpectrum::IntegerDataArray window_ids;   // flat companion window IDs
+      MSSpectrum::IntegerDataArray proc_trace_ids;  // trace_ids of surviving peaks (for pa.mz lookup)
+      MSSpectrum::IntegerDataArray proc_window_ids; // window_ids of surviving peaks
+    };
+    std::unordered_map<String, CompanionInfo> all_companion_info;
     // Accumulated claimed trace keys from all per-window FragmentClaimRegistries.
     FragmentClaimRegistry all_claimed;
     // Pre-Phase-5 PSM hits for all windows: used by debug TSV to show all ranked
@@ -1066,12 +1079,30 @@ protected:
 
       // Always collect the claim registry and the pre-Phase-5 debug snapshot —
       // unconditionally, before the early-continue check.
+      // Also collect companion CSR arrays from preprocessed spectra (attached by
+      // preprocessSpectra_ inside searchWithClaiming). These are needed later for
+      // annotated mzML companion peak writing.
 #pragma omp critical (collect_pseudo_spectra)
       {
         all_claimed.merge(window_registry);
         debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
                                         std::make_move_iterator(window_debug_pep_ids.begin()),
                                         std::make_move_iterator(window_debug_pep_ids.end()));
+        for (const auto& spec : pseudo_spectra)
+        {
+          CompanionInfo ci;
+          bool has_companions = false;
+          for (const auto& arr : spec.getIntegerDataArrays())
+          {
+            if      (arr.getName() == "companion_offsets")    { ci.offsets   = arr; has_companions = true; }
+            else if (arr.getName() == "companion_trace_ids")  { ci.trace_ids  = arr; }
+            else if (arr.getName() == "companion_window_ids") { ci.window_ids  = arr; }
+            else if (arr.getName() == "fragment_trace_id")    { ci.proc_trace_ids  = arr; }
+            else if (arr.getName() == "fragment_window_id")   { ci.proc_window_ids = arr; }
+          }
+          if (has_companions)
+            all_companion_info[spec.getNativeID()] = std::move(ci);
+        }
       }
 
       if (ec != ProSEAlgorithm::ExitCodes::EXECUTION_OK || window_prot_ids.empty() || window_pep_ids.empty())
@@ -1199,6 +1230,21 @@ protected:
           debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
                                           std::make_move_iterator(window_debug_pep_ids.begin()),
                                           std::make_move_iterator(window_debug_pep_ids.end()));
+          for (const auto& spec : pseudo_spectra)
+          {
+            CompanionInfo ci;
+            bool has_companions = false;
+            for (const auto& arr : spec.getIntegerDataArrays())
+            {
+              if      (arr.getName() == "companion_offsets")    { ci.offsets   = arr; has_companions = true; }
+              else if (arr.getName() == "companion_trace_ids")  { ci.trace_ids  = arr; }
+              else if (arr.getName() == "companion_window_ids") { ci.window_ids  = arr; }
+              else if (arr.getName() == "fragment_trace_id")    { ci.proc_trace_ids  = arr; }
+              else if (arr.getName() == "fragment_window_id")   { ci.proc_window_ids = arr; }
+            }
+            if (has_companions)
+              all_companion_info[spec.getNativeID()] = std::move(ci);
+          }
         }
 
         if (ec != ProSEAlgorithm::ExitCodes::EXECUTION_OK || window_prot_ids.empty() || window_pep_ids.empty())
@@ -1530,6 +1576,22 @@ protected:
         MSSpectrum::IntegerDataArray out_tid;   out_tid.setName("fragment_trace_id");
         MSSpectrum::IntegerDataArray out_wid;   out_wid.setName("fragment_window_id");
 
+        // Look up companion info for this spectrum (if the Deisotoper built CSR arrays).
+        // Used to also write heavier isotope companion peaks alongside each matched monoisotopic.
+        const CompanionInfo* ci_ptr = nullptr;
+        {
+          auto ci_it = all_companion_info.find(native_id);
+          if (ci_it != all_companion_info.end()) ci_ptr = &ci_it->second;
+        }
+
+        // Build orig_trace_id -> orig_peak_index map for companion peak lookup.
+        std::unordered_map<Int, Size> orig_trace_to_idx;
+        if (ci_ptr)
+        {
+          for (Size k = 0; k < orig.size(); ++k)
+            orig_trace_to_idx[(*trace_id_arr)[k]] = k;
+        }
+
         for (const auto& [mz, label] : mz_to_label)
         {
           // Find the peak in the original spectrum by exact mz.
@@ -1542,6 +1604,41 @@ protected:
           annot_arr.push_back(label);
           out_tid.push_back((*trace_id_arr)[pk_idx]);
           out_wid.push_back((*window_id_arr)[pk_idx]);
+
+          // Write companion (heavier isotope) peaks if CSR companion info is available.
+          // Find this peak's index in the preprocessed spectrum via its trace_id,
+          // then look up companions in the CSR arrays, and retrieve them from orig.
+          if (ci_ptr && !ci_ptr->proc_trace_ids.empty()
+              && !ci_ptr->offsets.empty() && !ci_ptr->trace_ids.empty())
+          {
+            const Int orig_tid = (*trace_id_arr)[pk_idx];
+            // Find position of this trace_id in the preprocessed trace array.
+            Size proc_pk_idx = ci_ptr->proc_trace_ids.size(); // sentinel = not found
+            for (Size ki = 0; ki < ci_ptr->proc_trace_ids.size(); ++ki)
+            {
+              if (ci_ptr->proc_trace_ids[ki] == orig_tid) { proc_pk_idx = ki; break; }
+            }
+            if (proc_pk_idx + 1 < ci_ptr->offsets.size())
+            {
+              const Int comp_start = ci_ptr->offsets[proc_pk_idx];
+              const Int comp_end   = ci_ptr->offsets[proc_pk_idx + 1];
+              for (Int ci = comp_start; ci < comp_end; ++ci)
+              {
+                const Int comp_tid = ci_ptr->trace_ids[ci];
+                const Int comp_wid = ci_ptr->window_ids[ci];
+                auto orig_it = orig_trace_to_idx.find(comp_tid);
+                if (orig_it == orig_trace_to_idx.end()) continue;
+                const Size comp_orig_idx = orig_it->second;
+                Peak1D comp_pk;
+                comp_pk.setMZ(orig[comp_orig_idx].getMZ());
+                comp_pk.setIntensity(orig[comp_orig_idx].getIntensity());
+                out_spec.push_back(comp_pk);
+                annot_arr.push_back(label + "[iso]");
+                out_tid.push_back(comp_tid);
+                out_wid.push_back(comp_wid);
+              }
+            }
+          }
         }
 
         if (out_spec.empty()) continue;

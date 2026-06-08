@@ -11,6 +11,7 @@
 #include <OpenMS/CONCEPT/Constants.h>
 #include <OpenMS/CONCEPT/Types.h>
 #include <OpenMS/KERNEL/StandardTypes.h>
+#include <vector>
 
 namespace OpenMS
 {
@@ -165,6 +166,10 @@ class OPENMS_DLLAPI Deisotoper
                                     A number higher than max_isopeaks will effectively disable use_decreasing_model completely.
    * @param [add_up_intensity] Sum up the total intensity of each isotopic pattern into the intensity of the reported monoisotopic peak
    * @param [annotate_features] Annotates the feature index in the IntegerDataArray: "feature_number".
+   * @param [out_pre_select_features] If non-null, receives the full per-peak feature assignment vector
+   *        (size = original spectrum size, one entry per peak before spec.select() subsets it).
+   *        Entry >= 0 means the peak belongs to that cluster; -1 means isolated/unassigned.
+   *        Callers can use this alongside pre-saved trace_id arrays to build isotope-companion maps.
    *
    * Note: If @p make_single_charged is selected, the original charge (>=1) gets annotated.
    */
@@ -182,7 +187,8 @@ class OPENMS_DLLAPI Deisotoper
                                          bool use_decreasing_model = true,
                                          unsigned int start_intensity_check = 2,
                                          bool add_up_intensity = false,
-                                         bool annotate_features = false);
+                                         bool annotate_features = false,
+                                         std::vector<int>* out_pre_select_features = nullptr);
 };
 
 }
