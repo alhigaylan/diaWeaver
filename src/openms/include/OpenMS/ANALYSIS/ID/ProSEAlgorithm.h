@@ -303,7 +303,8 @@ class OPENMS_DLLAPI ProSEAlgorithm :
                                  PeptideIdentificationList& pep_ids,
                                  FragmentClaimRegistry& out_registry,
                                  PeptideIdentificationList* out_pre_filter_pep_ids = nullptr,
-                                 Size min_unique_fragments = 3) const;
+                                 Size min_unique_fragments = 3,
+                                 bool skip_density_filters = true) const;
 
     /**
      * @brief In-memory search with modification analysis: no file I/O required.

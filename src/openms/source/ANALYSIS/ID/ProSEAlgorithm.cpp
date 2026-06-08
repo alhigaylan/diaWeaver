@@ -1609,15 +1609,13 @@ namespace OpenMS
       PeptideIdentificationList& peptide_ids,
       FragmentClaimRegistry& out_registry,
       PeptideIdentificationList* out_pre_filter_pep_ids,
-      Size min_unique_fragments) const
+      Size min_unique_fragments,
+      bool skip_density_filters) const
   {
     // Phase 1: initial search — produces scored PSMs for all pseudo spectra.
     // FDR is expected to be disabled by the caller (set to 0.0 in params)
     // so all PSMs survive into peptide_ids for claiming.
-    // skip_density_filters=true: pseudo spectra are DIA mass-trace clusters where
-    // every peak is a real ion trace; WindowMower/NLargest/Deisotoper must not
-    // discard any peak before the fragment-claiming step.
-    ExitCodes ec = search(pseudo_spectra, ctx, protein_ids, peptide_ids, /*skip_density_filters=*/true);
+    ExitCodes ec = search(pseudo_spectra, ctx, protein_ids, peptide_ids, skip_density_filters);
     if (ec != ExitCodes::EXECUTION_OK) return ec;
 
     // Phase 2: build the fragment trace mapping from the spectra's IntegerDataArrays.

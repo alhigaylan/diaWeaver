@@ -459,6 +459,11 @@ protected:
       "the iterative fragment claiming pass.", false);
     setMinInt_("min_unique_fragments", 1);
 
+    registerFlag_("skip_density_filters",
+      "Skip WindowMower, NLargest, and Deisotoper during spectrum preprocessing. "
+      "Use when spectra are pre-built pseudo spectra (e.g., from a previous diaWeaverPeptide run) "
+      "where every peak is a real ion trace that must not be removed before the claiming step.");
+
 #ifdef WITH_OPENTIMS
     registerTOPPSubsection_("bruker", "Options for reading Bruker TimsTOF .d files (requires WITH_OPENTIMS)");
     registerStringOption_("bruker:export_mode", "<mode>", "auto",
@@ -703,6 +708,7 @@ protected:
     search_params.setValue("FDR:protein", 0.0);
 
     const Size min_unique_fragments_ = static_cast<Size>(getIntOption_("min_unique_fragments"));
+    const bool skip_density_filters_ = getFlag_("skip_density_filters");
 
 #ifdef _OPENMP
     const int num_threads = getIntOption_("threads");
@@ -1045,7 +1051,8 @@ protected:
 
       const ProSEAlgorithm::ExitCodes ec =
         prose.searchWithClaiming(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
-                                 window_registry, &window_debug_pep_ids, min_unique_fragments_);
+                                 window_registry, &window_debug_pep_ids, min_unique_fragments_,
+                                 skip_density_filters_);
 
       // Always collect preprocessed pseudo spectra, the claim registry, and the
       // pre-Phase-5 debug snapshot — unconditionally, before the early-continue
@@ -1170,7 +1177,8 @@ protected:
 
         const ProSEAlgorithm::ExitCodes ec =
           prose.searchWithClaiming(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
-                                   window_registry, &window_debug_pep_ids, min_unique_fragments_);
+                                   window_registry, &window_debug_pep_ids, min_unique_fragments_,
+                                   skip_density_filters_);
 
 #pragma omp critical (collect_pseudo_spectra)
         {
