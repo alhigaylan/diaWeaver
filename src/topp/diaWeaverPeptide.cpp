@@ -1043,6 +1043,16 @@ protected:
       }
 
       // --- 3h. ProSE search with iterative fragment claiming ---
+      // Snapshot raw (pre-normalization) pseudo spectra before searchWithClaiming()
+      // normalizes them in-place. orphan.mzML must carry absolute mass trace
+      // intensities so that a second-round search normalizes from the same baseline
+      // as the first round, avoiding re-normalization score inflation artifacts.
+#pragma omp critical (collect_pseudo_spectra)
+      {
+        for (const auto& spec : pseudo_spectra)
+          all_pseudo_spectra[spec.getNativeID()] = spec;
+      }
+
       // prose is a per-thread firstprivate copy; ctx (FragmentIndex) is shared read-only.
       std::vector<ProteinIdentification> window_prot_ids;
       PeptideIdentificationList window_pep_ids;
@@ -1054,14 +1064,10 @@ protected:
                                  window_registry, &window_debug_pep_ids, min_unique_fragments_,
                                  skip_density_filters_);
 
-      // Always collect preprocessed pseudo spectra, the claim registry, and the
-      // pre-Phase-5 debug snapshot — unconditionally, before the early-continue
-      // check. This ensures that windows where Phase 5 drops all PSMs still
-      // contribute their scored hits to the debug TSV.
+      // Always collect the claim registry and the pre-Phase-5 debug snapshot —
+      // unconditionally, before the early-continue check.
 #pragma omp critical (collect_pseudo_spectra)
       {
-        for (auto& spec : pseudo_spectra)
-          all_pseudo_spectra[spec.getNativeID()] = spec;
         all_claimed.merge(window_registry);
         debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
                                         std::make_move_iterator(window_debug_pep_ids.begin()),
@@ -1170,6 +1176,13 @@ protected:
           }
         }
 
+        // Snapshot raw spectra before normalization, same reasoning as normal mode.
+#pragma omp critical (collect_pseudo_spectra)
+        {
+          for (const auto& spec : pseudo_spectra)
+            all_pseudo_spectra[spec.getNativeID()] = spec;
+        }
+
         std::vector<ProteinIdentification> window_prot_ids;
         PeptideIdentificationList window_pep_ids;
         FragmentClaimRegistry window_registry;
@@ -1182,8 +1195,6 @@ protected:
 
 #pragma omp critical (collect_pseudo_spectra)
         {
-          for (auto& spec : pseudo_spectra)
-            all_pseudo_spectra[spec.getNativeID()] = spec;
           all_claimed.merge(window_registry);
           debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
                                           std::make_move_iterator(window_debug_pep_ids.begin()),
