@@ -103,10 +103,6 @@ namespace OpenMS
     fragment_mass_tolerance_unit_valid_strings.emplace_back("Da");
 
     defaults_.setValue("fragment:mass_tolerance_unit", "ppm", "Unit of fragment m");
-    defaults_.setValue("fragment:isotope_peaks_to_claim", 2,
-      "Maximum number of isotope peaks (M+1, M+2, ...) to claim per matched fragment ion. "
-      "Search is sequential: M+2 is only attempted if M+1 was found. Set to 0 to disable.");
-    defaults_.setMinInt("fragment:isotope_peaks_to_claim", 0);
     defaults_.setValidStrings("fragment:mass_tolerance_unit", fragment_mass_tolerance_unit_valid_strings);
 
 
@@ -273,8 +269,6 @@ namespace OpenMS
     fragment_mass_tolerance_ = param_.getValue("fragment:mass_tolerance");
 
     fragment_mass_tolerance_unit_ = param_.getValue("fragment:mass_tolerance_unit").toString();
-
-    fragment_isotope_peaks_to_claim_ = param_.getValue("fragment:isotope_peaks_to_claim");
 
     modifications_fixed_ = ListUtils::toStringList<std::string>(param_.getValue("modifications:fixed"));
     set<String> fixed_unique(modifications_fixed_.begin(), modifications_fixed_.end());
