@@ -1069,25 +1069,14 @@ protected:
       // prose is a per-thread firstprivate copy; ctx (FragmentIndex) is shared read-only.
       std::vector<ProteinIdentification> window_prot_ids;
       PeptideIdentificationList window_pep_ids;
-      FragmentClaimRegistry window_registry;
-      PeptideIdentificationList window_debug_pep_ids;
 
       const ProSEAlgorithm::ExitCodes ec =
-        prose.searchWithClaiming(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
-                                 window_registry, &window_debug_pep_ids, min_unique_fragments_,
-                                 skip_density_filters_);
+        prose.search(pseudo_spectra, ctx, window_prot_ids, window_pep_ids, skip_density_filters_);
 
-      // Always collect the claim registry and the pre-Phase-5 debug snapshot —
-      // unconditionally, before the early-continue check.
-      // Also collect companion CSR arrays from preprocessed spectra (attached by
-      // preprocessSpectra_ inside searchWithClaiming). These are needed later for
-      // annotated mzML companion peak writing.
+      // Collect companion info from pass-1 preprocessed spectra.
+      // Used by the cross-window claiming step to map PeakAnnotation mz → trace_id.
 #pragma omp critical (collect_pseudo_spectra)
       {
-        all_claimed.merge(window_registry);
-        debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
-                                        std::make_move_iterator(window_debug_pep_ids.begin()),
-                                        std::make_move_iterator(window_debug_pep_ids.end()));
         for (const auto& spec : pseudo_spectra)
         {
           CompanionInfo ci;
@@ -1138,6 +1127,316 @@ protected:
       if (threads_outer_loop > 0)
         omp_set_num_threads(total_threads);
 #endif
+
+    // ------------------------------------------------------------------
+    // Cross-window claiming pass.
+    //
+    // Pass-1 produced raw hyperscores for all pseudo spectra across all
+    // windows.  We now:
+    //   A) Apply a 5% FDR gate to select high-confidence pass-1 PSMs.
+    //   B) Build a global claim map: (trace_id, window_id) → native_id of
+    //      the best-scoring spectrum that matched that fragment ion trace.
+    //   C) Rewrite each pseudo spectrum, removing fragment ion traces that
+    //      were claimed by a different spectrum.
+    // ------------------------------------------------------------------
+    {
+      const double cross_claiming_fdr = 0.05;
+
+      // A: flatten pass-1 PSMs and apply FDR gate.
+      PeptideIdentificationList pass1_flat;
+      for (const auto& pil : all_pep_ids)
+        pass1_flat.insert(pass1_flat.end(), pil.begin(), pil.end());
+
+      const bool pass1_has_decoys = [&]() {
+        for (const auto& pi : pass1_flat)
+          for (const auto& hit : pi.getHits())
+            if (hit.isDecoy()) return true;
+        return false;
+      }();
+
+      if (pass1_has_decoys && !pass1_flat.empty())
+      {
+        FalseDiscoveryRate gate_fdr;
+        Param gate_fdr_params = gate_fdr.getParameters();
+        gate_fdr_params.setValue("use_all_hits", "true");
+        gate_fdr_params.setValue("add_decoy_peptides", "true");
+        gate_fdr.setParameters(gate_fdr_params);
+        gate_fdr.apply(pass1_flat);
+        IDFilter::filterHitsByScore(pass1_flat, cross_claiming_fdr);
+        IDFilter::removeEmptyIdentifications(pass1_flat);
+      }
+
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] Cross-window claiming: "
+                      << pass1_flat.size() << " PSM spectra passed "
+                      << (cross_claiming_fdr * 100.0) << "% FDR gate." << std::endl;
+
+      // B: collect qualifying PSMs with their trace keys, sort by score.
+      struct CrossPSMEntry
+      {
+        double score;
+        String native_id;
+        std::vector<FragmentClaimRegistry::TraceKey> trace_keys;
+      };
+
+      const String orig_score_key = "ln(hyperscore)_score";
+      std::vector<CrossPSMEntry> cross_psms;
+      cross_psms.reserve(pass1_flat.size() * 3);
+
+      for (const auto& pi : pass1_flat)
+      {
+        const String& native_id = pi.getSpectrumReference();
+        const auto ci_it = all_companion_info.find(native_id);
+        if (ci_it == all_companion_info.end()) continue;
+        const CompanionInfo& ci = ci_it->second;
+        if (ci.proc_mzs.empty() || ci.proc_trace_ids.empty()) continue;
+
+        for (const auto& hit : pi.getHits())
+        {
+          // Use original hyperscore for sort priority; fall back to current score
+          // (q-value) negated so that lower q-value sorts first.
+          const double sort_score = hit.metaValueExists(orig_score_key)
+              ? static_cast<double>(hit.getMetaValue(orig_score_key))
+              : -hit.getScore();
+
+          CrossPSMEntry entry;
+          entry.score     = sort_score;
+          entry.native_id = native_id;
+
+          for (const auto& pa : hit.getPeakAnnotations())
+          {
+            auto lb = std::lower_bound(ci.proc_mzs.begin(), ci.proc_mzs.end(), pa.mz);
+            if (lb == ci.proc_mzs.end() || *lb != pa.mz) continue;
+            const Size proc_idx = static_cast<Size>(lb - ci.proc_mzs.begin());
+            if (proc_idx >= ci.proc_trace_ids.size()) continue;
+
+            const Int tid = ci.proc_trace_ids[proc_idx];
+            const Int wid = proc_idx < static_cast<Size>(ci.proc_window_ids.size())
+                              ? ci.proc_window_ids[proc_idx] : 0;
+            entry.trace_keys.push_back(FragmentClaimRegistry::makeKey(wid, tid));
+
+            // Also claim heavier-isotope companions alongside the monoisotopic.
+            if (!ci.offsets.empty() && !ci.trace_ids.empty()
+                && proc_idx + 1 < static_cast<Size>(ci.offsets.size()))
+            {
+              const Int comp_start = ci.offsets[static_cast<Size>(proc_idx)];
+              const Int comp_end   = ci.offsets[static_cast<Size>(proc_idx) + 1];
+              for (Int ci_i = comp_start; ci_i < comp_end; ++ci_i)
+              {
+                entry.trace_keys.push_back(
+                    FragmentClaimRegistry::makeKey(ci.window_ids[ci_i], ci.trace_ids[ci_i]));
+              }
+            }
+          }
+
+          if (!entry.trace_keys.empty())
+            cross_psms.push_back(std::move(entry));
+        }
+      }
+
+      std::sort(cross_psms.begin(), cross_psms.end(),
+                [](const CrossPSMEntry& a, const CrossPSMEntry& b) { return a.score > b.score; });
+
+      // Build global_claim_map: TraceKey → native_id of claiming spectrum.
+      // Processing order is score-descending so the first writer wins.
+      std::unordered_map<FragmentClaimRegistry::TraceKey, String> global_claim_map;
+      global_claim_map.reserve(cross_psms.size() * 8);
+
+      for (const CrossPSMEntry& entry : cross_psms)
+        for (const auto& key : entry.trace_keys)
+          global_claim_map.emplace(key, entry.native_id);
+
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] Cross-window claiming: "
+                      << global_claim_map.size() << " trace keys claimed globally across "
+                      << cross_psms.size() << " qualifying PSMs." << std::endl;
+
+      // C: rewrite each pseudo spectrum — remove peaks claimed by other spectra.
+      Size total_peaks_removed = 0;
+      for (auto& [native_id, spec] : all_pseudo_spectra)
+      {
+        const MSSpectrum::IntegerDataArray* trace_id_arr  = nullptr;
+        const MSSpectrum::IntegerDataArray* window_id_arr = nullptr;
+        for (const auto& arr : spec.getIntegerDataArrays())
+        {
+          if      (arr.getName() == "fragment_trace_id")  trace_id_arr  = &arr;
+          else if (arr.getName() == "fragment_window_id") window_id_arr = &arr;
+        }
+        if (!trace_id_arr || !window_id_arr) continue;
+
+        // Build keep mask: true = peak stays in this spectrum.
+        std::vector<bool> keep(spec.size(), true);
+        for (Size i = 0; i < spec.size(); ++i)
+        {
+          const auto key = FragmentClaimRegistry::makeKey((*window_id_arr)[i], (*trace_id_arr)[i]);
+          const auto it  = global_claim_map.find(key);
+          if (it != global_claim_map.end() && it->second != native_id)
+          {
+            keep[i] = false;
+            ++total_peaks_removed;
+          }
+        }
+
+        // Rebuild spectrum retaining only kept peaks and all parallel data arrays.
+        MSSpectrum new_spec;
+        new_spec.setNativeID(spec.getNativeID());
+        new_spec.setRT(spec.getRT());
+        new_spec.setMSLevel(spec.getMSLevel());
+        if (!spec.getPrecursors().empty())
+          new_spec.getPrecursors() = spec.getPrecursors();
+
+        const Size n_int = spec.getIntegerDataArrays().size();
+        const Size n_flt = spec.getFloatDataArrays().size();
+        const Size n_str = spec.getStringDataArrays().size();
+        std::vector<MSSpectrum::IntegerDataArray> new_int_arrs(n_int);
+        std::vector<MSSpectrum::FloatDataArray>   new_flt_arrs(n_flt);
+        std::vector<MSSpectrum::StringDataArray>  new_str_arrs(n_str);
+        for (Size j = 0; j < n_int; ++j) new_int_arrs[j].setName(spec.getIntegerDataArrays()[j].getName());
+        for (Size j = 0; j < n_flt; ++j) new_flt_arrs[j].setName(spec.getFloatDataArrays()[j].getName());
+        for (Size j = 0; j < n_str; ++j) new_str_arrs[j].setName(spec.getStringDataArrays()[j].getName());
+
+        for (Size i = 0; i < spec.size(); ++i)
+        {
+          if (!keep[i]) continue;
+          new_spec.push_back(spec[i]);
+          for (Size j = 0; j < n_int; ++j)
+            if (i < spec.getIntegerDataArrays()[j].size())
+              new_int_arrs[j].push_back(spec.getIntegerDataArrays()[j][i]);
+          for (Size j = 0; j < n_flt; ++j)
+            if (i < spec.getFloatDataArrays()[j].size())
+              new_flt_arrs[j].push_back(spec.getFloatDataArrays()[j][i]);
+          for (Size j = 0; j < n_str; ++j)
+            if (i < spec.getStringDataArrays()[j].size())
+              new_str_arrs[j].push_back(spec.getStringDataArrays()[j][i]);
+        }
+
+        new_spec.getIntegerDataArrays() = std::move(new_int_arrs);
+        new_spec.getFloatDataArrays()   = std::move(new_flt_arrs);
+        new_spec.getStringDataArrays()  = std::move(new_str_arrs);
+        spec = std::move(new_spec);
+      }
+
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] Cross-window claiming: "
+                      << total_peaks_removed << " cross-claimed peaks removed." << std::endl;
+    }
+
+    // ------------------------------------------------------------------
+    // Pass-2: re-search rewritten pseudo spectra with within-window claiming.
+    // ------------------------------------------------------------------
+    {
+      // Group rewritten spectra by window_id for the pass-2 parallel loop.
+      std::map<Int, PeakMap> pass2_window_groups;
+      for (const auto& [native_id, spec] : all_pseudo_spectra)
+      {
+        Int window_id = -1;
+        for (const auto& arr : spec.getIntegerDataArrays())
+        {
+          if (arr.getName() == "fragment_window_id" && !arr.empty())
+          {
+            window_id = arr[0];
+            break;
+          }
+        }
+        if (window_id < 0)
+        {
+          OPENMS_LOG_WARN << "[diaWeaverPeptide] Pass-2: spectrum '" << native_id
+                          << "' missing fragment_window_id; skipping." << std::endl;
+          continue;
+        }
+        pass2_window_groups[window_id].addSpectrum(spec);
+      }
+
+      std::vector<std::pair<Int, PeakMap>> pass2_windows;
+      pass2_windows.reserve(pass2_window_groups.size());
+      for (auto& [wid, group] : pass2_window_groups)
+        pass2_windows.emplace_back(wid, std::move(group));
+
+      const Size pass2_total_windows = pass2_windows.size();
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] Pass-2 search: "
+                      << pass2_total_windows << " window groups." << std::endl;
+
+      // Replace pass-1 accumulators with pass-2 results.
+      all_pep_ids.clear();
+      all_prot_ids.clear();
+      all_companion_info.clear();
+      all_claimed.clear();
+      debug_pre_filter_pep_ids.clear();
+      total_pseudo_spectra = 0;
+
+#ifdef _OPENMP
+      omp_set_num_threads(num_threads);
+#pragma omp parallel for schedule(dynamic, 1) firstprivate(prose)
+#endif
+      for (SignedSize idx = 0; idx < static_cast<SignedSize>(pass2_total_windows); ++idx)
+      {
+        PeakMap& pass2_spectra    = pass2_windows[idx].second;
+        const String window_label = "pass2_window_" + String(pass2_windows[idx].first);
+
+        std::vector<ProteinIdentification> window_prot_ids;
+        PeptideIdentificationList          window_pep_ids;
+        FragmentClaimRegistry              window_registry;
+        PeptideIdentificationList          window_debug_pep_ids;
+
+        const ProSEAlgorithm::ExitCodes ec =
+          prose.searchWithClaiming(pass2_spectra, ctx, window_prot_ids, window_pep_ids,
+                                   window_registry, &window_debug_pep_ids, min_unique_fragments_,
+                                   skip_density_filters_);
+
+#pragma omp critical (collect_pseudo_spectra)
+        {
+          all_claimed.merge(window_registry);
+          debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
+                                          std::make_move_iterator(window_debug_pep_ids.begin()),
+                                          std::make_move_iterator(window_debug_pep_ids.end()));
+          for (const auto& spec : pass2_spectra)
+          {
+            CompanionInfo ci;
+            for (const auto& pk : spec) ci.proc_mzs.push_back(pk.getMZ());
+            for (const auto& arr : spec.getIntegerDataArrays())
+            {
+              if      (arr.getName() == "fragment_trace_id")    ci.proc_trace_ids = arr;
+              else if (arr.getName() == "fragment_window_id")   ci.proc_window_ids = arr;
+              else if (arr.getName() == "companion_offsets")    ci.offsets         = arr;
+              else if (arr.getName() == "companion_trace_ids")  ci.trace_ids       = arr;
+              else if (arr.getName() == "companion_window_ids") ci.window_ids      = arr;
+            }
+            if (!ci.proc_trace_ids.empty())
+              all_companion_info[spec.getNativeID()] = std::move(ci);
+          }
+        }
+
+        if (ec != ProSEAlgorithm::ExitCodes::EXECUTION_OK || window_prot_ids.empty() || window_pep_ids.empty())
+        {
+#pragma omp critical (progress_log)
+          {
+            if (ec != ProSEAlgorithm::ExitCodes::EXECUTION_OK)
+              OPENMS_LOG_WARN << "[diaWeaverPeptide] Pass-2: ProSE non-OK exit code ("
+                              << static_cast<int>(ec) << ") for " << window_label << std::endl;
+            else
+              OPENMS_LOG_INFO << "[diaWeaverPeptide] Pass-2: no PSMs for "
+                              << window_label << std::endl;
+          }
+          continue;
+        }
+
+        window_prot_ids[0].setPrimaryMSRunPath({window_label});
+        window_prot_ids[0].getSearchParameters().db = database;
+
+#pragma omp critical (results_collect)
+        {
+          total_pseudo_spectra += pass2_spectra.size();
+          OPENMS_LOG_INFO << "[diaWeaverPeptide] Pass-2: " << window_label << ": "
+                          << window_pep_ids.size() << " PSMs, "
+                          << window_prot_ids[0].getHits().size() << " protein hits." << std::endl;
+          all_prot_ids.push_back(std::move(window_prot_ids));
+          all_pep_ids.push_back(std::move(window_pep_ids));
+        }
+      } // end pass-2 loop
+
+#ifdef _OPENMP
+      if (threads_outer_loop > 0)
+        omp_set_num_threads(total_threads);
+#endif
+    }
+
     } // end if (in_pseudo.empty()) — normal mode
     else
     {
