@@ -468,9 +468,14 @@ protected:
 
     registerFlag_("skip_density_filters",
       "Skip WindowMower and NLargest during spectrum preprocessing. "
-      "Deisotoping is unaffected by this flag and is always applied in pass 1. "
+      "Deisotoping is unaffected by this flag and is always applied in pass 1 unless "
+      "-skip_deisotoping is also set. "
       "Use when spectra are pre-built pseudo spectra (e.g., from a previous diaWeaverPeptide run) "
       "where every peak is a real ion trace that must not be removed before the claiming step.");
+    registerFlag_("skip_deisotoping",
+      "Skip the Deisotoper during pass-1 (and bypass-mode) spectrum preprocessing. "
+      "Pass 2 always skips deisotoping regardless of this flag. "
+      "Use for evaluation or when isotope patterns are unreliable.");
 
 #ifdef WITH_OPENTIMS
     registerTOPPSubsection_("bruker", "Options for reading Bruker TimsTOF .d files (requires WITH_OPENTIMS)");
@@ -718,6 +723,7 @@ protected:
 
     const Size min_unique_fragments_ = static_cast<Size>(getIntOption_("min_unique_fragments"));
     const bool skip_density_filters_ = getFlag_("skip_density_filters");
+    const bool skip_deisotoping_     = getFlag_("skip_deisotoping");
 
 #ifdef _OPENMP
     const int num_threads = getIntOption_("threads");
@@ -1080,7 +1086,7 @@ protected:
       PeptideIdentificationList window_pep_ids;
 
       const ProSEAlgorithm::ExitCodes ec =
-        prose.search(pseudo_spectra, ctx, window_prot_ids, window_pep_ids, skip_density_filters_, false);
+        prose.search(pseudo_spectra, ctx, window_prot_ids, window_pep_ids, skip_density_filters_, skip_deisotoping_);
 
       // Collect companion info from pass-1 preprocessed spectra.
       // Used by the cross-window claiming step to map PeakAnnotation mz → trace_id.
@@ -1541,7 +1547,7 @@ protected:
         const ProSEAlgorithm::ExitCodes ec =
           prose.searchWithClaiming(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
                                    window_registry, &window_debug_pep_ids, min_unique_fragments_,
-                                   skip_density_filters_, false);
+                                   skip_density_filters_, skip_deisotoping_);
 
 #pragma omp critical (collect_pseudo_spectra)
         {
