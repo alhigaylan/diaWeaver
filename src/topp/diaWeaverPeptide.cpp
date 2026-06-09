@@ -476,6 +476,11 @@ protected:
       "Skip the Deisotoper during pass-1 (and bypass-mode) spectrum preprocessing. "
       "Pass 2 always skips deisotoping regardless of this flag. "
       "Use for evaluation or when isotope patterns are unreliable.");
+    registerFlag_("skip_decoy_claiming",
+      "Prevent decoy PSMs from claiming fragment traces during the cross-window claiming step "
+      "(between pass 1 and pass 2). Only target PSMs participate in the global claim map. "
+      "Decoys still compete normally during pass-2 within-window claiming. "
+      "Use this to ensure that high-scoring decoys cannot block real target evidence in other windows.");
 
 #ifdef WITH_OPENTIMS
     registerTOPPSubsection_("bruker", "Options for reading Bruker TimsTOF .d files (requires WITH_OPENTIMS)");
@@ -722,8 +727,9 @@ protected:
     search_params.setValue("FDR:protein", 0.0);
 
     const Size min_unique_fragments_ = static_cast<Size>(getIntOption_("min_unique_fragments"));
-    const bool skip_density_filters_ = getFlag_("skip_density_filters");
-    const bool skip_deisotoping_     = getFlag_("skip_deisotoping");
+    const bool skip_density_filters_  = getFlag_("skip_density_filters");
+    const bool skip_deisotoping_      = getFlag_("skip_deisotoping");
+    const bool skip_decoy_claiming_   = getFlag_("skip_decoy_claiming");
 
 #ifdef _OPENMP
     const int num_threads = getIntOption_("threads");
@@ -1207,6 +1213,8 @@ protected:
 
         for (const auto& hit : pi.getHits())
         {
+          if (skip_decoy_claiming_ && hit.isDecoy()) continue;
+
           // Use original hyperscore for sort priority; fall back to current score
           // (q-value) negated so that lower q-value sorts first.
           const double sort_score = hit.metaValueExists(orig_score_key)
