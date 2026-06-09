@@ -1858,9 +1858,8 @@ protected:
 
         const double spectrum_rt = orig.getRT();
 
-        // Look up preprocessed spectrum metadata (proc_mzs, proc_trace_ids, companion CSR).
-        // This is used to bridge pa.mz → trace_id (proc_mzs binary search → proc_trace_ids)
-        // and to find companion heavier-isotope peaks from the CSR arrays.
+        // Look up preprocessed spectrum metadata (proc_mzs, proc_trace_ids).
+        // Used to bridge pa.mz → trace_id via binary search on proc_mzs.
         const CompanionInfo* ci_ptr = nullptr;
         {
           auto ci_it = all_companion_info.find(native_id);
@@ -1868,10 +1867,10 @@ protected:
         }
         if (ci_ptr == nullptr) continue;
 
-        // Build trace_id → (proc_idx, label) map.
+        // Build trace_id → label map.
         // pa.mz is from the PREPROCESSED spectrum (make_single_charged may differ from orig).
         // Binary-search proc_mzs → proc_idx → proc_trace_ids[proc_idx] gives the exact trace_id.
-        std::unordered_map<Int, std::pair<Size, String>> tid_to_proc_label;
+        std::unordered_map<Int, String> tid_to_label;
 
         for (Size pid : pid_indices)
         {
@@ -1887,15 +1886,15 @@ protected:
               const Int tid = ci_ptr->proc_trace_ids[proc_idx];
               String label = seq + "-" + pa.annotation;
               if (pa.charge > 1) label += "+" + String(pa.charge);
-              auto it = tid_to_proc_label.find(tid);
-              if (it == tid_to_proc_label.end())
-                tid_to_proc_label.emplace(tid, std::make_pair(proc_idx, label));
+              auto it = tid_to_label.find(tid);
+              if (it == tid_to_label.end())
+                tid_to_label.emplace(tid, label);
               else
-                it->second.second += ";" + label;
+                it->second += ";" + label;
             }
           }
         }
-        if (tid_to_proc_label.empty()) continue;
+        if (tid_to_label.empty()) continue;
 
         // Build trace_id → orig_peak_index lookup from the original (pre-preprocessing) spectrum.
         const auto [trace_id_arr, window_id_arr] = getTraceArrays(orig);
@@ -1915,10 +1914,8 @@ protected:
         MSSpectrum::IntegerDataArray out_tid;   out_tid.setName("fragment_trace_id");
         MSSpectrum::IntegerDataArray out_wid;   out_wid.setName("fragment_window_id");
 
-        for (const auto& [tid, proc_label] : tid_to_proc_label)
+        for (const auto& [tid, label] : tid_to_label)
         {
-          const Size proc_idx = proc_label.first;
-          const String& label = proc_label.second;
 
           // Locate the monoisotopic peak in the original spectrum by trace_id.
           auto orig_it = orig_trace_to_idx.find(tid);
@@ -1930,29 +1927,6 @@ protected:
           annot_arr.push_back(label);
           out_tid.push_back((*trace_id_arr)[pk_idx]);
           out_wid.push_back((*window_id_arr)[pk_idx]);
-
-          // Write heavier-isotope companion peaks from the CSR companion arrays.
-          if (!ci_ptr->offsets.empty() && !ci_ptr->trace_ids.empty()
-              && proc_idx + 1 < ci_ptr->offsets.size())
-          {
-            const Int comp_start = ci_ptr->offsets[proc_idx];
-            const Int comp_end   = ci_ptr->offsets[proc_idx + 1];
-            for (Int ci_i = comp_start; ci_i < comp_end; ++ci_i)
-            {
-              const Int comp_tid = ci_ptr->trace_ids[ci_i];
-              const Int comp_wid = ci_ptr->window_ids[ci_i];
-              auto comp_orig_it = orig_trace_to_idx.find(comp_tid);
-              if (comp_orig_it == orig_trace_to_idx.end()) continue;
-              const Size comp_orig_idx = comp_orig_it->second;
-              Peak1D comp_pk;
-              comp_pk.setMZ(orig[comp_orig_idx].getMZ());
-              comp_pk.setIntensity(orig[comp_orig_idx].getIntensity());
-              out_spec.push_back(comp_pk);
-              annot_arr.push_back(label + "[iso]");
-              out_tid.push_back(comp_tid);
-              out_wid.push_back(comp_wid);
-            }
-          }
         }
 
         if (out_spec.empty()) continue;
