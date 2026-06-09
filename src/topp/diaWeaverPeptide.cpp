@@ -429,6 +429,13 @@ protected:
       "ln(hyperscore). Useful for inspecting the full ranked hit list.", false);
     setValidFormats_("out_debug_tsv", ListUtils::create<String>("tsv"));
 
+    registerOutputFile_("out_cleaned_spectra", "<file>", "",
+      "Cleaned pseudo spectra mzML: pseudo spectra after cross-window claiming has removed "
+      "fragment ion traces owned by higher-scoring PSMs in other spectra. Written after the "
+      "5% FDR claiming gate and before the pass-2 Prose search. Useful for evaluating the "
+      "coverage and selectivity of cross-window trace claiming.", false);
+    setValidFormats_("out_cleaned_spectra", ListUtils::create<String>("mzML"));
+
     // Preprocessing flags (identical to diaWeaver)
     registerFlag_("save_unfragmented_precursors",
       "Also run FeatureFinderPeptide on peaks within the precursor isolation window.");
@@ -667,7 +674,8 @@ protected:
     const String out_mzml           = getStringOption_("out_mzml");
     const String out_annotated_mzml = getStringOption_("out_annotated_mzml");
     const String out_orphan_mzml    = getStringOption_("out_orphan_mzml");
-    const String out_debug_tsv      = getStringOption_("out_debug_tsv");
+    const String out_debug_tsv           = getStringOption_("out_debug_tsv");
+    const String out_cleaned_spectra     = getStringOption_("out_cleaned_spectra");
 
     if (out_idxml.empty())
     {
@@ -1316,6 +1324,17 @@ protected:
 
       OPENMS_LOG_INFO << "[diaWeaverPeptide] Cross-window claiming: "
                       << total_peaks_removed << " cross-claimed peaks removed." << std::endl;
+
+      if (!out_cleaned_spectra.empty())
+      {
+        MSExperiment cleaned_exp;
+        for (const auto& [native_id, spec] : all_pseudo_spectra)
+          cleaned_exp.addSpectrum(spec);
+        cleaned_exp.sortSpectra(true);
+        OPENMS_LOG_INFO << "[diaWeaverPeptide] Writing " << cleaned_exp.size()
+                        << " cleaned pseudo spectra to: " << out_cleaned_spectra << std::endl;
+        MzMLFile().store(out_cleaned_spectra, cleaned_exp);
+      }
     }
 
     // ------------------------------------------------------------------
