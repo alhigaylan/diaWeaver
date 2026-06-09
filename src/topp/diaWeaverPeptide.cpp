@@ -481,6 +481,14 @@ protected:
       "(between pass 1 and pass 2). Only target PSMs participate in the global claim map. "
       "Decoys still compete normally during pass-2 within-window claiming. "
       "Use this to ensure that high-scoring decoys cannot block real target evidence in other windows.");
+    registerDoubleOption_("cross_claiming_fdr", "<float>", 0.05,
+      "FDR threshold applied to pass-1 PSMs before building the cross-window claim map. "
+      "Only PSMs at or below this q-value participate in claiming. "
+      "Higher values (e.g. 0.20) allow more PSMs to claim traces but increase the risk of "
+      "false claims from poor-quality PSMs. Requires a decoy database; if no decoys are present "
+      "the gate is skipped and all pass-1 PSMs are used regardless of this setting.", false);
+    setMinFloat_("cross_claiming_fdr", 0.0);
+    setMaxFloat_("cross_claiming_fdr", 1.0);
 
 #ifdef WITH_OPENTIMS
     registerTOPPSubsection_("bruker", "Options for reading Bruker TimsTOF .d files (requires WITH_OPENTIMS)");
@@ -729,7 +737,8 @@ protected:
     const Size min_unique_fragments_ = static_cast<Size>(getIntOption_("min_unique_fragments"));
     const bool skip_density_filters_  = getFlag_("skip_density_filters");
     const bool skip_deisotoping_      = getFlag_("skip_deisotoping");
-    const bool skip_decoy_claiming_   = getFlag_("skip_decoy_claiming");
+    const bool   skip_decoy_claiming_   = getFlag_("skip_decoy_claiming");
+    const double cross_claiming_fdr_    = getDoubleOption_("cross_claiming_fdr");
 
 #ifdef _OPENMP
     const int num_threads = getIntOption_("threads");
@@ -1154,14 +1163,15 @@ protected:
     //
     // Pass-1 produced raw hyperscores for all pseudo spectra across all
     // windows.  We now:
-    //   A) Apply a 5% FDR gate to select high-confidence pass-1 PSMs.
+    //   A) Apply an FDR gate (default 5%, configurable via -cross_claiming_fdr) to
+    //      select high-confidence pass-1 PSMs.
     //   B) Build a global claim map: (trace_id, window_id) → native_id of
     //      the best-scoring spectrum that matched that fragment ion trace.
     //   C) Rewrite each pseudo spectrum, removing fragment ion traces that
     //      were claimed by a different spectrum.
     // ------------------------------------------------------------------
     {
-      const double cross_claiming_fdr = 0.05;
+      const double cross_claiming_fdr = cross_claiming_fdr_;
 
       // A: flatten pass-1 PSMs and apply FDR gate.
       PeptideIdentificationList pass1_flat;
@@ -1203,17 +1213,24 @@ protected:
       std::vector<CrossPSMEntry> cross_psms;
       cross_psms.reserve(pass1_flat.size() * 3);
 
+      Size diag_no_ci        = 0;  // PSMs whose native_id had no companion info
+      Size diag_no_annot     = 0;  // hits with zero PeakAnnotations
+      Size diag_annot_miss   = 0;  // PeakAnnotation mz values not found in proc_mzs
+      Size diag_empty_entry  = 0;  // CrossPSMEntry built but trace_keys was empty
+
       for (const auto& pi : pass1_flat)
       {
         const String& native_id = pi.getSpectrumReference();
         const auto ci_it = all_companion_info.find(native_id);
-        if (ci_it == all_companion_info.end()) continue;
+        if (ci_it == all_companion_info.end()) { ++diag_no_ci; continue; }
         const CompanionInfo& ci = ci_it->second;
-        if (ci.proc_mzs.empty() || ci.proc_trace_ids.empty()) continue;
+        if (ci.proc_mzs.empty() || ci.proc_trace_ids.empty()) { ++diag_no_ci; continue; }
 
         for (const auto& hit : pi.getHits())
         {
           if (skip_decoy_claiming_ && hit.isDecoy()) continue;
+
+          if (hit.getPeakAnnotations().empty()) { ++diag_no_annot; continue; }
 
           // Use original hyperscore for sort priority; fall back to current score
           // (q-value) negated so that lower q-value sorts first.
@@ -1228,7 +1245,7 @@ protected:
           for (const auto& pa : hit.getPeakAnnotations())
           {
             auto lb = std::lower_bound(ci.proc_mzs.begin(), ci.proc_mzs.end(), pa.mz);
-            if (lb == ci.proc_mzs.end() || *lb != pa.mz) continue;
+            if (lb == ci.proc_mzs.end() || *lb != pa.mz) { ++diag_annot_miss; continue; }
             const Size proc_idx = static_cast<Size>(lb - ci.proc_mzs.begin());
             if (proc_idx >= ci.proc_trace_ids.size()) continue;
 
@@ -1253,8 +1270,17 @@ protected:
 
           if (!entry.trace_keys.empty())
             cross_psms.push_back(std::move(entry));
+          else
+            ++diag_empty_entry;
         }
       }
+
+      OPENMS_LOG_DEBUG << "[diaWeaverPeptide] Cross-window claiming diagnostics:"
+                       << " PSMs missing companion info=" << diag_no_ci
+                       << " hits with no PeakAnnotations=" << diag_no_annot
+                       << " annotation mz lookup misses=" << diag_annot_miss
+                       << " entries with no trace keys=" << diag_empty_entry
+                       << std::endl;
 
       std::sort(cross_psms.begin(), cross_psms.end(),
                 [](const CrossPSMEntry& a, const CrossPSMEntry& b) { return a.score > b.score; });
@@ -1264,16 +1290,32 @@ protected:
       std::unordered_map<FragmentClaimRegistry::TraceKey, String> global_claim_map;
       global_claim_map.reserve(cross_psms.size() * 8);
 
+      // Also track how many times each key is claimed (to detect cross-spectrum sharing).
+      std::unordered_map<FragmentClaimRegistry::TraceKey, Size> key_claim_count;
+      key_claim_count.reserve(cross_psms.size() * 8);
+
       for (const CrossPSMEntry& entry : cross_psms)
+      {
         for (const auto& key : entry.trace_keys)
+        {
           global_claim_map.emplace(key, entry.native_id);
+          ++key_claim_count[key];
+        }
+      }
+
+      // Count keys that are contested (appear in >1 cross_psms entry).
+      Size contested_keys = 0;
+      for (const auto& [k, cnt] : key_claim_count)
+        if (cnt > 1) ++contested_keys;
 
       OPENMS_LOG_INFO << "[diaWeaverPeptide] Cross-window claiming: "
                       << global_claim_map.size() << " trace keys claimed globally across "
-                      << cross_psms.size() << " qualifying PSMs." << std::endl;
+                      << cross_psms.size() << " qualifying PSMs"
+                      << " (" << contested_keys << " keys contested by multiple PSMs)." << std::endl;
 
       // C: rewrite each pseudo spectrum — remove peaks claimed by other spectra.
       Size total_peaks_removed = 0;
+      Size diag_no_trace_arr  = 0;
       for (auto& [native_id, spec] : all_pseudo_spectra)
       {
         const MSSpectrum::IntegerDataArray* trace_id_arr  = nullptr;
@@ -1283,7 +1325,7 @@ protected:
           if      (arr.getName() == "fragment_trace_id")  trace_id_arr  = &arr;
           else if (arr.getName() == "fragment_window_id") window_id_arr = &arr;
         }
-        if (!trace_id_arr || !window_id_arr) continue;
+        if (!trace_id_arr || !window_id_arr) { ++diag_no_trace_arr; continue; }
 
         // Build keep mask: true = peak stays in this spectrum.
         std::vector<bool> keep(spec.size(), true);
@@ -1338,7 +1380,8 @@ protected:
       }
 
       OPENMS_LOG_INFO << "[diaWeaverPeptide] Cross-window claiming: "
-                      << total_peaks_removed << " cross-claimed peaks removed." << std::endl;
+                      << total_peaks_removed << " cross-claimed peaks removed"
+                      << " (raw spectra missing trace arrays: " << diag_no_trace_arr << ")." << std::endl;
 
       if (!out_cleaned_spectra.empty())
       {
