@@ -467,7 +467,8 @@ protected:
     setMinInt_("min_unique_fragments", 1);
 
     registerFlag_("skip_density_filters",
-      "Skip WindowMower, NLargest, and Deisotoper during spectrum preprocessing. "
+      "Skip WindowMower and NLargest during spectrum preprocessing. "
+      "Deisotoping is unaffected by this flag and is always applied in pass 1. "
       "Use when spectra are pre-built pseudo spectra (e.g., from a previous diaWeaverPeptide run) "
       "where every peak is a real ion trace that must not be removed before the claiming step.");
 
@@ -1079,7 +1080,7 @@ protected:
       PeptideIdentificationList window_pep_ids;
 
       const ProSEAlgorithm::ExitCodes ec =
-        prose.search(pseudo_spectra, ctx, window_prot_ids, window_pep_ids, skip_density_filters_);
+        prose.search(pseudo_spectra, ctx, window_prot_ids, window_pep_ids, skip_density_filters_, false);
 
       // Collect companion info from pass-1 preprocessed spectra.
       // Used by the cross-window claiming step to map PeakAnnotation mz → trace_id.
@@ -1397,7 +1398,7 @@ protected:
         const ProSEAlgorithm::ExitCodes ec =
           prose.searchWithClaiming(pass2_spectra, ctx, window_prot_ids, window_pep_ids,
                                    window_registry, &window_debug_pep_ids, min_unique_fragments_,
-                                   skip_density_filters_);
+                                   skip_density_filters_, true);
 
 #pragma omp critical (collect_pseudo_spectra)
         {
@@ -1540,7 +1541,7 @@ protected:
         const ProSEAlgorithm::ExitCodes ec =
           prose.searchWithClaiming(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
                                    window_registry, &window_debug_pep_ids, min_unique_fragments_,
-                                   skip_density_filters_);
+                                   skip_density_filters_, false);
 
 #pragma omp critical (collect_pseudo_spectra)
         {

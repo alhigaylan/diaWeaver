@@ -324,7 +324,8 @@ namespace OpenMS
   // static
   void ProSEAlgorithm::preprocessSpectra_(PeakMap& exp, double fragment_mass_tolerance,
                                            bool fragment_mass_tolerance_unit_ppm,
-                                           bool skip_density_filters)
+                                           bool skip_window_filters,
+                                           bool skip_deisotoping)
   {
     // Remove 0-intensity peaks and normalise — always safe for any spectrum type.
     ThresholdMower threshold_mower_filter;
@@ -336,36 +337,35 @@ namespace OpenMS
     // Sort by RT (no peaks removed).
     exp.sortSpectra(false);
 
-    // Density filters: WindowMower, NLargest, and Deisotoper all remove peaks.
-    // For DIA pseudo spectra (mass-trace clusters) every peak represents a real
-    // ion trace that must survive until the fragment-claiming step — none may be
-    // discarded here. skip_density_filters=true suppresses all three.
-    if (!skip_density_filters)
+    // WindowMower and NLargest are constructed unconditionally; only applied when
+    // skip_window_filters=false. Construction is cheap and avoids branching outside OMP.
+    WindowMower window_mower_filter;
+    Param filter_param = window_mower_filter.getParameters();
+    filter_param.setValue("windowsize", 100.0, "The size of the sliding window along the m/z axis.");
+    filter_param.setValue("peakcount", 20, "The number of peaks that should be kept.");
+    filter_param.setValue("movetype", "jump", "Whether sliding window (one peak steps) or jumping window (window size steps) should be used.");
+    window_mower_filter.setParameters(filter_param);
+    NLargest nlargest_filter(400);
+
+#pragma omp parallel for default(none) shared(exp, fragment_mass_tolerance, fragment_mass_tolerance_unit_ppm, window_mower_filter, nlargest_filter, skip_window_filters, skip_deisotoping)
+    for (SignedSize exp_index = 0; exp_index < (SignedSize)exp.size(); ++exp_index)
     {
-      WindowMower window_mower_filter;
-      Param filter_param = window_mower_filter.getParameters();
-      filter_param.setValue("windowsize", 100.0, "The size of the sliding window along the m/z axis.");
-      filter_param.setValue("peakcount", 20, "The number of peaks that should be kept.");
-      filter_param.setValue("movetype", "jump", "Whether sliding window (one peak steps) or jumping window (window size steps) should be used.");
-      window_mower_filter.setParameters(filter_param);
+      exp[exp_index].sortByPosition();
 
-      NLargest nlargest_filter = NLargest(400);
+      // ---- Deisotoper + CSR companion array construction ----
+      // Save pre-deisotope trace arrays so we can build isotope-companion maps after
+      // the Deisotoper removes heavier isotope peaks from the spectrum.
+      std::vector<Int> pre_trace_ids, pre_window_ids;
+      std::vector<int> deiso_features;
 
-#pragma omp parallel for default(none) shared(exp, fragment_mass_tolerance, fragment_mass_tolerance_unit_ppm, window_mower_filter, nlargest_filter)
-      for (SignedSize exp_index = 0; exp_index < (SignedSize)exp.size(); ++exp_index)
+      if (!skip_deisotoping)
       {
-        exp[exp_index].sortByPosition();
-
-        // Save pre-deisotope trace arrays so we can build isotope-companion maps after
-        // spec.select() removes heavier isotope peaks from the spectrum.
-        std::vector<Int> pre_trace_ids, pre_window_ids;
         for (const auto& arr : exp[exp_index].getIntegerDataArrays())
         {
           if      (arr.getName() == "fragment_trace_id")  pre_trace_ids  = arr;
           else if (arr.getName() == "fragment_window_id") pre_window_ids = arr;
         }
 
-        std::vector<int> deiso_features;
         Deisotoper::deisotopeAndSingleCharge(exp[exp_index],
           fragment_mass_tolerance, fragment_mass_tolerance_unit_ppm,
           1, 3,    // min / max charge
@@ -374,91 +374,90 @@ namespace OpenMS
           true,    // convert fragment m/z to mono-charge
           false, false, true, 2, false, false,  // default params
           &deiso_features);
+      }
 
+      // ---- WindowMower + NLargest ----
+      if (!skip_window_filters)
+      {
         window_mower_filter.filterPeakSpectrum(exp[exp_index]);
         nlargest_filter.filterPeakSpectrum(exp[exp_index]);
+      }
 
+      // Re-sort if any filter may have changed the peak order or count.
+      if (!skip_deisotoping || !skip_window_filters)
         exp[exp_index].sortByPosition();
 
-        // Build CSR companion arrays: for each surviving monoisotopic peak, record
-        // the trace_ids/window_ids of its heavier isotope companions that were removed
-        // by the Deisotoper. Used by searchWithClaiming to claim companions alongside
-        // their monoisotopic so they are excluded from orphan mzML.
-        if (!pre_trace_ids.empty() && !pre_window_ids.empty() && !deiso_features.empty())
+      // ---- Build CSR companion arrays ----
+      // For each surviving monoisotopic peak, record the trace_ids/window_ids of its
+      // heavier isotope companions removed by the Deisotoper. Used by searchWithClaiming
+      // to claim companions alongside their monoisotopic so they appear in annotated mzML
+      // and are excluded from orphan mzML.
+      if (!skip_deisotoping && !pre_trace_ids.empty() && !pre_window_ids.empty() && !deiso_features.empty())
+      {
+        // Map original trace_id -> original peak index for fast reverse lookup.
+        std::unordered_map<Int, Size> trace_to_orig;
+        trace_to_orig.reserve(pre_trace_ids.size());
+        for (Size k = 0; k < pre_trace_ids.size(); ++k)
+          trace_to_orig[pre_trace_ids[k]] = k;
+
+        // Group original peak indices by feature number (cluster membership).
+        std::unordered_map<int, std::vector<Size>> feature_to_orig_idxs;
+        for (Size k = 0; k < deiso_features.size(); ++k)
         {
-          // Map original trace_id -> original peak index for fast reverse lookup.
-          std::unordered_map<Int, Size> trace_to_orig;
-          trace_to_orig.reserve(pre_trace_ids.size());
-          for (Size k = 0; k < pre_trace_ids.size(); ++k)
-            trace_to_orig[pre_trace_ids[k]] = k;
+          if (deiso_features[k] >= 0)
+            feature_to_orig_idxs[deiso_features[k]].push_back(k);
+        }
 
-          // Group original peak indices by feature number (cluster membership).
-          std::unordered_map<int, std::vector<Size>> feature_to_orig_idxs;
-          for (Size k = 0; k < deiso_features.size(); ++k)
+        // Get the surviving spectrum's trace arrays (post-filters, correctly subsetted).
+        const MSSpectrum::IntegerDataArray* surv_trace_arr  = nullptr;
+        const MSSpectrum::IntegerDataArray* surv_window_arr = nullptr;
+        for (const auto& arr : exp[exp_index].getIntegerDataArrays())
+        {
+          if      (arr.getName() == "fragment_trace_id")  surv_trace_arr  = &arr;
+          else if (arr.getName() == "fragment_window_id") surv_window_arr = &arr;
+        }
+
+        if (surv_trace_arr && surv_window_arr)
+        {
+          const Size M = exp[exp_index].size();
+          MSSpectrum::IntegerDataArray comp_offsets, comp_trace_ids, comp_window_ids;
+          comp_offsets.setName("companion_offsets");
+          comp_trace_ids.setName("companion_trace_ids");
+          comp_window_ids.setName("companion_window_ids");
+          comp_offsets.resize(M + 1, 0);
+
+          Int flat_idx = 0;
+          for (Size j = 0; j < M; ++j)
           {
-            if (deiso_features[k] >= 0)
-              feature_to_orig_idxs[deiso_features[k]].push_back(k);
-          }
+            comp_offsets[j] = flat_idx;
+            const Int tid = (*surv_trace_arr)[j];
+            auto orig_it = trace_to_orig.find(tid);
+            if (orig_it == trace_to_orig.end()) continue;
+            const Size orig_idx = orig_it->second;
+            const int fn = deiso_features[orig_idx];
+            if (fn < 0) continue; // isolated peak — no companions
 
-          // Get the surviving spectrum's trace arrays (post-select, correctly subsetted).
-          const MSSpectrum::IntegerDataArray* surv_trace_arr  = nullptr;
-          const MSSpectrum::IntegerDataArray* surv_window_arr = nullptr;
-          for (const auto& arr : exp[exp_index].getIntegerDataArrays())
-          {
-            if      (arr.getName() == "fragment_trace_id")  surv_trace_arr  = &arr;
-            else if (arr.getName() == "fragment_window_id") surv_window_arr = &arr;
-          }
+            auto feat_it = feature_to_orig_idxs.find(fn);
+            if (feat_it == feature_to_orig_idxs.end()) continue;
 
-          if (surv_trace_arr && surv_window_arr)
-          {
-            const Size M = exp[exp_index].size();
-            MSSpectrum::IntegerDataArray comp_offsets, comp_trace_ids, comp_window_ids;
-            comp_offsets.setName("companion_offsets");
-            comp_trace_ids.setName("companion_trace_ids");
-            comp_window_ids.setName("companion_window_ids");
-            comp_offsets.resize(M + 1, 0);
-
-            Int flat_idx = 0;
-            for (Size j = 0; j < M; ++j)
+            for (Size comp_k : feat_it->second)
             {
-              comp_offsets[j] = flat_idx;
-              const Int tid = (*surv_trace_arr)[j];
-              auto orig_it = trace_to_orig.find(tid);
-              if (orig_it == trace_to_orig.end()) continue;
-              const Size orig_idx = orig_it->second;
-              const int fn = deiso_features[orig_idx];
-              if (fn < 0) continue; // isolated peak — no companions
-
-              auto feat_it = feature_to_orig_idxs.find(fn);
-              if (feat_it == feature_to_orig_idxs.end()) continue;
-
-              for (Size comp_k : feat_it->second)
-              {
-                if (comp_k == orig_idx) continue; // skip self
-                comp_trace_ids.push_back(pre_trace_ids[comp_k]);
-                comp_window_ids.push_back(pre_window_ids[comp_k]);
-                ++flat_idx;
-              }
+              if (comp_k == orig_idx) continue; // skip self
+              comp_trace_ids.push_back(pre_trace_ids[comp_k]);
+              comp_window_ids.push_back(pre_window_ids[comp_k]);
+              ++flat_idx;
             }
-            comp_offsets[M] = flat_idx;
+          }
+          comp_offsets[M] = flat_idx;
 
-            if (flat_idx > 0)
-            {
-              exp[exp_index].getIntegerDataArrays().push_back(std::move(comp_offsets));
-              exp[exp_index].getIntegerDataArrays().push_back(std::move(comp_trace_ids));
-              exp[exp_index].getIntegerDataArrays().push_back(std::move(comp_window_ids));
-            }
+          if (flat_idx > 0)
+          {
+            exp[exp_index].getIntegerDataArrays().push_back(std::move(comp_offsets));
+            exp[exp_index].getIntegerDataArrays().push_back(std::move(comp_trace_ids));
+            exp[exp_index].getIntegerDataArrays().push_back(std::move(comp_window_ids));
           }
         }
       }
-    }
-    else
-    {
-      // Pseudo-spectra path: only sort by m/z (required for binary-search scoring).
-      // No peaks are removed — all ion traces must reach the claiming step intact.
-#pragma omp parallel for default(none) shared(exp)
-      for (SignedSize exp_index = 0; exp_index < (SignedSize)exp.size(); ++exp_index)
-        exp[exp_index].sortByPosition();
     }
   }
 
@@ -1411,7 +1410,8 @@ namespace OpenMS
       SearchContext& ctx,
       vector<ProteinIdentification>& protein_ids,
       PeptideIdentificationList& peptide_ids,
-      bool skip_density_filters) const
+      bool skip_window_filters,
+      bool skip_deisotoping) const
   {
     bool fragment_mass_tolerance_unit_ppm = (fragment_mass_tolerance_unit_ == "ppm");
 
@@ -1423,7 +1423,7 @@ namespace OpenMS
 
     startProgress(0, 1, "Filtering spectra...");
     preprocessSpectra_(spectra, fragment_mass_tolerance_, fragment_mass_tolerance_unit_ppm,
-                       skip_density_filters);
+                       skip_window_filters, skip_deisotoping);
     endProgress();
 
     // Reference the prepared (decoy-augmented) database and prebuilt fragment index from the context.
@@ -1687,12 +1687,13 @@ namespace OpenMS
       FragmentClaimRegistry& out_registry,
       PeptideIdentificationList* out_pre_filter_pep_ids,
       Size min_unique_fragments,
-      bool skip_density_filters) const
+      bool skip_window_filters,
+      bool skip_deisotoping) const
   {
     // Phase 1: initial search — produces scored PSMs for all pseudo spectra.
     // FDR is expected to be disabled by the caller (set to 0.0 in params)
     // so all PSMs survive into peptide_ids for claiming.
-    ExitCodes ec = search(pseudo_spectra, ctx, protein_ids, peptide_ids, skip_density_filters);
+    ExitCodes ec = search(pseudo_spectra, ctx, protein_ids, peptide_ids, skip_window_filters, skip_deisotoping);
     if (ec != ExitCodes::EXECUTION_OK) return ec;
 
     // Phase 2: build the fragment trace mapping from the spectra's IntegerDataArrays.
