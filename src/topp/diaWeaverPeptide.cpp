@@ -61,20 +61,21 @@ using namespace OpenMS;
 
 This tool processes DIA (Data Independent Acquisition) data by running the full diaWeaver
 preprocessing pipeline and then performing peptide identification using the ProSE search engine.
-A single protein database index is built once and shared across all DIA windows.
+Multiple FASTA databases can be supplied via -database; each is searched in order against the
+orphan peaks left unmatched by the prior iteration. Every iteration produces its own independent
+FDR-controlled outputs (idXML, annotated mzML, orphan mzML), named by appending '_N' before the
+file extension of each -out_* argument.
 
 The processing pipeline:
-1. Determine DIA isolation windows from the input file
-2. Build a ProSE fragment index from the FASTA database (once, shared across all windows)
-3. For each DIA window:
-   a. Peak picking on MS2 spectra (PeakPickerIM for IM data, PeakPickerHiRes otherwise)
-   b. MassTraceExtractor on MS2 to extract fragment mass traces
-   c. Peak picking + FeatureFinderPeptide on MS1 to detect precursor features
-   d. ClusterMassTracesByPrecursor to assemble pseudo MS/MS spectra
-   e. ProSE database search with iterative within-window fragment claiming
-4. Merge per-window PSMs, apply FDR, run cross-window protein inference
-5. Build post-FDR claim registry from surviving PSMs
-6. Write merged idXML, annotated mzML, and orphan mzML outputs
+1. Determine DIA isolation windows from the input file (done once before the database loop)
+2. For each database in order:
+   a. Build a ProSE fragment index from the FASTA (shared across all DIA windows for this iteration)
+   b. For each DIA window (iteration 0: raw DIA; subsequent iterations: bypass on orphan peaks):
+      - Peak picking, MassTraceExtractor, FeatureFinderPeptide, ClusterMassTracesByPrecursor
+      - ProSE database search with iterative within-window fragment claiming
+   c. Merge per-window PSMs, apply FDR, run cross-window protein inference
+   d. Build post-FDR claim registry; write idXML, annotated mzML, orphan mzML for this iteration
+   e. Pass orphan peaks as input to the next database iteration
 
 @note The outer window loop is parallelised via OpenMP. ProSE also parallelises internally;
 use -threads_outer_loop to control the outer/inner thread split and avoid contention.
@@ -387,9 +388,12 @@ protected:
 #endif
     });
 
-    registerInputFile_("database", "<file>", "",
-      "Input protein sequence database in FASTA format. A single fragment index is built "
-      "from this database and reused across all DIA windows.");
+    registerInputFileList_("database", "<files>", StringList(),
+      "Ordered list of protein sequence databases in FASTA format. Each database is searched "
+      "in order: the first database is searched against all pseudo spectra; each subsequent "
+      "database is searched against the orphan peaks from the prior iteration. Every iteration "
+      "produces its own idXML, annotated mzML, orphan mzML, and debug TSV outputs, named by "
+      "appending '_N' (1-based) before the file extension of each -out_* argument.");
     setValidFormats_("database", ListUtils::create<String>("fasta"));
 
     // Output
@@ -657,16 +661,21 @@ protected:
   {
     const String in         = getStringOption_("in");
     const String in_pseudo  = getStringOption_("in_pseudo");
-    const String database   = getStringOption_("database");
+    const StringList databases      = getStringList_("database");
     const String out_idxml          = getStringOption_("out_idxml");
     const String out_mzml           = getStringOption_("out_mzml");
     const String out_annotated_mzml = getStringOption_("out_annotated_mzml");
     const String out_orphan_mzml    = getStringOption_("out_orphan_mzml");
-    const String out_debug_tsv = getStringOption_("out_debug_tsv");
+    const String out_debug_tsv      = getStringOption_("out_debug_tsv");
 
     if (out_idxml.empty())
     {
       OPENMS_LOG_ERROR << "No output specified. Provide -out_idxml." << std::endl;
+      return ILLEGAL_PARAMETERS;
+    }
+    if (databases.empty())
+    {
+      OPENMS_LOG_ERROR << "No database specified. Provide at least one -database." << std::endl;
       return ILLEGAL_PARAMETERS;
     }
 
@@ -675,6 +684,15 @@ protected:
       OPENMS_LOG_ERROR << "Provide exactly one of -in (raw DIA) or -in_pseudo (pre-built pseudo spectra)." << std::endl;
       return ILLEGAL_PARAMETERS;
     }
+
+    // Derive per-iteration output path by inserting "_N" (1-based) before the extension.
+    auto makeIterName = [](const String& path, Size iter_idx) -> String {
+      if (path.empty()) return path;
+      const String suffix = "_" + String(iter_idx + 1);
+      const size_t dot = path.find_last_of('.');
+      if (dot == String::npos) return path + suffix;
+      return path.substr(0, dot) + suffix + path.substr(dot);
+    };
 
     const bool save_precursors  = getFlag_("save_unfragmented_precursors");
     const bool aggregate_scans  = getFlag_("aggregate_across_scans");
@@ -714,94 +732,37 @@ protected:
     auto start_time = std::chrono::high_resolution_clock::now();
 
     // ------------------------------------------------------------------
-    // Step 1: Load FASTA and build the shared ProSE SearchContext once.
+    // CompanionInfo: bridges pa.mz → trace_id and carries CSR companion
+    // arrays for heavier-isotope peak co-annotation.  Declared before the
+    // iteration loop so both the search block and the output block can use
+    // the same type.
     // ------------------------------------------------------------------
-    OPENMS_LOG_INFO << "[diaWeaverPeptide] Loading FASTA database: " << database << std::endl;
-    std::vector<FASTAFile::FASTAEntry> fasta_db;
-    FASTAFile().load(database, fasta_db);
-
-    if (fasta_db.empty())
-    {
-      OPENMS_LOG_ERROR << "FASTA database is empty: " << database << std::endl;
-      return INPUT_FILE_EMPTY;
-    }
-    OPENMS_LOG_INFO << "[diaWeaverPeptide] Loaded " << fasta_db.size() << " protein sequences." << std::endl;
-
-    ProSEAlgorithm prose;
-    prose.setLogType(log_type_);
-    prose.setParameters(search_params);
-
-    OPENMS_LOG_INFO << "[diaWeaverPeptide] Building fragment index (shared across all windows)..." << std::endl;
-    ProSEAlgorithm::SearchContext ctx = prose.prepareContext(fasta_db);
-    OPENMS_LOG_INFO << "[diaWeaverPeptide] Fragment index built. " << ctx.fragment_index.getPeptides().size()
-                    << " peptide entries indexed." << std::endl;
-
-    // ------------------------------------------------------------------
-    // Step 2 onwards: per-window preprocessing + search.
-    // Two modes:
-    //   Normal mode (-in):        raw DIA → peak picking → trace extraction
-    //                             → clustering → pseudo spectra → ProSE search
-    //   Bypass mode (-in_pseudo): pre-built pseudo spectra → group by window_id
-    //                             → ProSE search (all preprocessing skipped)
-    // Shared accumulators below are filled by whichever mode runs, then
-    // consumed identically by Step 4 (merge / FDR / output).
-    // ------------------------------------------------------------------
-
-    // Shared accumulators (both modes write here).
-    std::vector<std::vector<ProteinIdentification>> all_prot_ids;
-    std::vector<PeptideIdentificationList> all_pep_ids;
-    // Keyed by native_id: pseudo spectra held for post-FDR orphan/annotated output.
-    std::unordered_map<String, MSSpectrum> all_pseudo_spectra;
-    // Keyed by native_id: preprocessed spectrum metadata collected after searchWithClaiming.
-    // Used for annotated mzML writing: bridges pa.mz → trace_id (via proc_mzs) and
-    // carries the CSR companion arrays for heavier-isotope peak co-annotation.
     struct CompanionInfo
     {
-      std::vector<double>          proc_mzs;     // m/z of every surviving preprocessed peak
-      MSSpectrum::IntegerDataArray proc_trace_ids;  // trace_id per surviving preprocessed peak
-      MSSpectrum::IntegerDataArray proc_window_ids; // window_id per surviving preprocessed peak
-      MSSpectrum::IntegerDataArray offsets;      // CSR: size = num_peaks + 1
-      MSSpectrum::IntegerDataArray trace_ids;    // CSR: flat companion trace IDs
-      MSSpectrum::IntegerDataArray window_ids;   // CSR: flat companion window IDs
+      std::vector<double>          proc_mzs;
+      MSSpectrum::IntegerDataArray proc_trace_ids;
+      MSSpectrum::IntegerDataArray proc_window_ids;
+      MSSpectrum::IntegerDataArray offsets;
+      MSSpectrum::IntegerDataArray trace_ids;
+      MSSpectrum::IntegerDataArray window_ids;
     };
-    std::unordered_map<String, CompanionInfo> all_companion_info;
-    // Pre-claiming-filter PSM hits for all windows: used by debug TSV to show all
-    // top-N ranked hits per spectrum before the fragment claiming filter.
-    PeptideIdentificationList debug_pre_filter_pep_ids;
 
-    Size processed = 0;
-    Size total_pseudo_spectra = 0;
-    Size total_windows = 0;
-
-    // Streaming consumer for plain pseudo spectra (optional, used by both modes).
-    // PlainMSDataWritingConsumer finalizes the mzML when it goes out of scope,
-    // so it must outlive the processing loop.
-    const String input_source = in.empty() ? in_pseudo : in;
-    std::unique_ptr<PlainMSDataWritingConsumer> plain_consumer;
-    if (!out_mzml.empty())
-    {
-      plain_consumer = std::make_unique<PlainMSDataWritingConsumer>(out_mzml);
-      plain_consumer->setExpectedSize(0, 0);
-      SourceFile sf;
-      sf.setNameOfFile(File::basename(input_source));
-      sf.setPathToFile(File::path(input_source));
-      ExperimentalSettings es;
-      es.setSourceFiles({sf});
-      plain_consumer->setExperimentalSettings(es);
-    }
+    // ------------------------------------------------------------------
+    // Normal-mode bookkeeping: window map and on-disc experiment are
+    // determined ONCE from the raw DIA file (before the database loop).
+    // Iteration 0 uses them; all subsequent iterations run bypass mode on
+    // the in-memory orphan produced by the prior iteration.
+    // ------------------------------------------------------------------
+    bool is_bruker = false;
+    bool bruker_im_centroiding = false;
+    DiaWeaver::WindowedExperiments bruker_ms2_windows, bruker_ms1_windows, bruker_precursor_windows;
+    DiaWeaver::WindowMap windows;
+    DiaWeaver::IMInfo im_info;
+    OnDiscMSExperiment on_disc;
 
     if (in_pseudo.empty())
     {
-      // ----------------------------------------------------------------
-      // Normal mode: raw DIA processing pipeline.
-      // ----------------------------------------------------------------
-
-      // Step 2: Determine DIA windows.
       FileTypes::Type in_type = FileHandler::getTypeByFileName(in);
-
-      bool is_bruker = false;
-      bool bruker_im_centroiding = false;
-      DiaWeaver::WindowedExperiments bruker_ms2_windows, bruker_ms1_windows, bruker_precursor_windows;
 
 #ifdef WITH_OPENTIMS
       if (in_type == FileTypes::BRUKER_TDF)
@@ -826,10 +787,6 @@ protected:
       }
 #endif
 
-      DiaWeaver::WindowMap windows;
-      DiaWeaver::IMInfo im_info;
-      OnDiscMSExperiment on_disc;
-
       if (!is_bruker)
       {
         OPENMS_LOG_INFO << "Opening mzML for metadata access..." << std::endl;
@@ -844,20 +801,102 @@ protected:
 #ifdef WITH_OPENTIMS
       else
       {
-        // Re-determine windows from the Bruker experiment for indexed access.
         for (const auto& kv : bruker_ms2_windows)
           windows[kv.first] = {};
         im_info.available = !bruker_ms2_windows.empty() &&
                             bruker_ms2_windows.begin()->first.hasIonMobility();
       }
 #endif
+    }
 
-      std::vector<std::pair<DiaWeaver::DIAWindow, std::vector<Size>>> window_vec(
-        windows.begin(), windows.end());
-      total_windows = window_vec.size();
+    // Orphan spectra carried between iterations (empty before iteration 0).
+    MSExperiment iter_orphan;
 
-      OPENMS_LOG_INFO << "[diaWeaverPeptide] Processing " << total_windows << " DIA windows "
-                      << "(ProSE parallelises internally)." << std::endl;
+    // ------------------------------------------------------------------
+    // Outer database iteration loop.
+    // ------------------------------------------------------------------
+    for (Size iter = 0; iter < databases.size(); ++iter)
+    {
+      const String& database = databases[iter];
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] === Iteration " << (iter + 1)
+                      << " / " << databases.size()
+                      << " — database: " << database << " ===" << std::endl;
+
+      const String iter_out_idxml          = makeIterName(out_idxml, iter);
+      const String iter_out_orphan_mzml    = makeIterName(out_orphan_mzml, iter);
+      const String iter_out_annotated_mzml = makeIterName(out_annotated_mzml, iter);
+      const String iter_out_debug_tsv      = makeIterName(out_debug_tsv, iter);
+
+      // ------------------------------------------------------------------
+      // Step 1: Load FASTA and build the ProSE SearchContext for this iteration.
+      // ------------------------------------------------------------------
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] Loading FASTA database: " << database << std::endl;
+      std::vector<FASTAFile::FASTAEntry> fasta_db;
+      FASTAFile().load(database, fasta_db);
+
+      if (fasta_db.empty())
+      {
+        OPENMS_LOG_ERROR << "FASTA database is empty: " << database << std::endl;
+        return INPUT_FILE_EMPTY;
+      }
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] Loaded " << fasta_db.size() << " protein sequences." << std::endl;
+
+      ProSEAlgorithm prose;
+      prose.setLogType(log_type_);
+      prose.setParameters(search_params);
+
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] Building fragment index (shared across all windows)..." << std::endl;
+      ProSEAlgorithm::SearchContext ctx = prose.prepareContext(fasta_db);
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] Fragment index built. " << ctx.fragment_index.getPeptides().size()
+                      << " peptide entries indexed." << std::endl;
+
+      // ------------------------------------------------------------------
+      // Step 2 onwards: per-window preprocessing + search.
+      // Three modes:
+      //   Normal mode  (iter 0, -in):        raw DIA → pseudo spectra → ProSE
+      //   Bypass mode  (iter 0, -in_pseudo): pre-built file → ProSE
+      //   Bypass mode  (iter > 0):           in-memory orphan from prior iter → ProSE
+      // ------------------------------------------------------------------
+
+      // Per-iteration accumulators (reset each iteration).
+      std::vector<std::vector<ProteinIdentification>> all_prot_ids;
+      std::vector<PeptideIdentificationList> all_pep_ids;
+      std::unordered_map<String, MSSpectrum> all_pseudo_spectra;
+      std::unordered_map<String, CompanionInfo> all_companion_info;
+      PeptideIdentificationList debug_pre_filter_pep_ids;
+
+      Size processed = 0;
+      Size total_pseudo_spectra = 0;
+      Size total_windows = 0;
+
+      // Plain consumer for pseudo spectra mzML: only for iteration 0 (raw DIA mode).
+      const String input_source = in.empty() ? in_pseudo : in;
+      std::unique_ptr<PlainMSDataWritingConsumer> plain_consumer;
+      if (iter == 0 && !out_mzml.empty())
+      {
+        plain_consumer = std::make_unique<PlainMSDataWritingConsumer>(out_mzml);
+        plain_consumer->setExpectedSize(0, 0);
+        SourceFile sf;
+        sf.setNameOfFile(File::basename(input_source));
+        sf.setPathToFile(File::path(input_source));
+        ExperimentalSettings es;
+        es.setSourceFiles({sf});
+        plain_consumer->setExperimentalSettings(es);
+      }
+
+      if (iter == 0 && in_pseudo.empty())
+      {
+        // ----------------------------------------------------------------
+        // Normal mode (iteration 0 only): raw DIA processing pipeline.
+        // Window map and on-disc experiment were determined before the loop.
+        // ----------------------------------------------------------------
+
+        std::vector<std::pair<DiaWeaver::DIAWindow, std::vector<Size>>> window_vec(
+          windows.begin(), windows.end());
+        total_windows = window_vec.size();
+
+        OPENMS_LOG_INFO << "[diaWeaverPeptide] Processing " << total_windows << " DIA windows "
+                        << "(ProSE parallelises internally)." << std::endl;
 
       if (im_info.available)
       {
@@ -1119,62 +1158,77 @@ protected:
         all_pep_ids.push_back(std::move(window_pep_ids));
         ++processed;
       }
-    } // end normal window loop
+        } // end normal window loop
 
 #ifdef _OPENMP
-      if (threads_outer_loop > 0)
-        omp_set_num_threads(total_threads);
+        if (threads_outer_loop > 0)
+          omp_set_num_threads(total_threads);
 #endif
 
-    } // end if (in_pseudo.empty()) — normal mode
-    else
-    {
-      // ----------------------------------------------------------------
-      // Bypass mode: search pre-built pseudo spectra directly.
-      // ----------------------------------------------------------------
-      OPENMS_LOG_INFO << "[diaWeaverPeptide] Bypass mode: loading pre-built pseudo spectra from "
-                      << in_pseudo << std::endl;
-
-      PeakMap orphan_exp;
-      MzMLFile().load(in_pseudo, orphan_exp);
-      if (orphan_exp.empty())
+      } // end if (iter == 0 && in_pseudo.empty()) — normal mode
+      else
       {
-        OPENMS_LOG_ERROR << "[diaWeaverPeptide] No spectra in pseudo spectra input: "
-                         << in_pseudo << std::endl;
-        return INPUT_FILE_EMPTY;
-      }
-
-      // Group spectra by fragment_window_id to reconstruct the original window partition.
-      // Using fragment_window_id (not precursor isolation window) preserves the exact
-      // grouping from the original run so claiming semantics are identical to round 1.
-      std::map<Int, PeakMap> window_groups;
-      for (const MSSpectrum& spec : orphan_exp)
-      {
-        Int window_id = -1;
-        for (const auto& arr : spec.getIntegerDataArrays())
+        // ----------------------------------------------------------------
+        // Bypass mode: search pre-built pseudo spectra directly.
+        // Source: -in_pseudo file (iter 0) or in-memory orphan (iter > 0).
+        // ----------------------------------------------------------------
+        PeakMap pseudo_source;
+        if (iter == 0)
         {
-          if (arr.getName() == "fragment_window_id" && !arr.empty())
+          OPENMS_LOG_INFO << "[diaWeaverPeptide] Bypass mode: loading pre-built pseudo spectra from "
+                          << in_pseudo << std::endl;
+          MzMLFile().load(in_pseudo, pseudo_source);
+          if (pseudo_source.empty())
           {
-            window_id = arr[0];
-            break;
+            OPENMS_LOG_ERROR << "[diaWeaverPeptide] No spectra in pseudo spectra input: "
+                             << in_pseudo << std::endl;
+            return INPUT_FILE_EMPTY;
           }
         }
-        if (window_id < 0)
-          throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-              "Spectrum '" + spec.getNativeID() + "' in '" + in_pseudo +
-              "' is missing 'fragment_window_id' IntegerDataArray.");
-        window_groups[window_id].addSpectrum(spec);
-      }
+        else
+        {
+          if (iter_orphan.empty())
+          {
+            OPENMS_LOG_INFO << "[diaWeaverPeptide] No orphan spectra remaining after iteration "
+                            << iter << ". Stopping early." << std::endl;
+            break;
+          }
+          OPENMS_LOG_INFO << "[diaWeaverPeptide] Bypass mode: using " << iter_orphan.size()
+                          << " orphan spectra from iteration " << iter << " as input." << std::endl;
+          for (const auto& spec : iter_orphan)
+            pseudo_source.addSpectrum(spec);
+        }
 
-      // Convert to a vector so OMP can index by position.
-      std::vector<std::pair<Int, PeakMap>> bypass_windows;
-      bypass_windows.reserve(window_groups.size());
-      for (auto& [wid, group] : window_groups)
-        bypass_windows.emplace_back(wid, std::move(group));
+        // Group spectra by fragment_window_id to reconstruct the original window partition.
+        std::map<Int, PeakMap> window_groups;
+        for (const MSSpectrum& spec : pseudo_source)
+        {
+          Int window_id = -1;
+          for (const auto& arr : spec.getIntegerDataArrays())
+          {
+            if (arr.getName() == "fragment_window_id" && !arr.empty())
+            {
+              window_id = arr[0];
+              break;
+            }
+          }
+          if (window_id < 0)
+            throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+                "Spectrum '" + spec.getNativeID() + "' in '" +
+                (iter == 0 ? in_pseudo : String("orphan from iteration ") + String(iter)) +
+                "' is missing 'fragment_window_id' IntegerDataArray.");
+          window_groups[window_id].addSpectrum(spec);
+        }
 
-      total_windows = bypass_windows.size();
-      OPENMS_LOG_INFO << "[diaWeaverPeptide] Bypass mode: " << total_windows
-                      << " window groups, " << orphan_exp.size() << " spectra total." << std::endl;
+        // Convert to a vector so OMP can index by position.
+        std::vector<std::pair<Int, PeakMap>> bypass_windows;
+        bypass_windows.reserve(window_groups.size());
+        for (auto& [wid, group] : window_groups)
+          bypass_windows.emplace_back(wid, std::move(group));
+
+        total_windows = bypass_windows.size();
+        OPENMS_LOG_INFO << "[diaWeaverPeptide] Bypass mode: " << total_windows
+                        << " window groups, " << pseudo_source.size() << " spectra total." << std::endl;
 
 #ifdef _OPENMP
       omp_set_num_threads(num_threads);
@@ -1262,216 +1316,201 @@ protected:
           ++processed;
         }
       } // end bypass loop
-    } // end else — bypass mode
+      } // end else — bypass mode
 
-    OPENMS_LOG_INFO << "[diaWeaverPeptide] All " << processed << " windows processed. "
-                    << total_pseudo_spectra << " pseudo spectra searched across all windows." << std::endl;
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] All " << processed << " windows processed. "
+                      << total_pseudo_spectra << " pseudo spectra searched across all windows." << std::endl;
 
-    if (all_pep_ids.empty())
-    {
-      OPENMS_LOG_WARN << "[diaWeaverPeptide] No PSMs identified across any window. "
-                      << "Writing empty output." << std::endl;
-      std::vector<ProteinIdentification> empty_prot;
-      PeptideIdentificationList empty_pep;
-      FileHandler().storeIdentifications(out_idxml, empty_prot, empty_pep, {FileTypes::IDXML});
-      return EXECUTION_OK;
-    }
-
-    // ------------------------------------------------------------------
-    // Step 4: Cross-window merge, protein inference, FDR.
-    // ------------------------------------------------------------------
-    OPENMS_LOG_INFO << "[diaWeaverPeptide] Merging " << all_pep_ids.size()
-                    << " per-window result sets..." << std::endl;
-
-    IDMergerAlgorithm merger;
-    for (Size i = 0; i < all_prot_ids.size(); ++i)
-    {
-      merger.insertRuns(all_prot_ids[i], all_pep_ids[i]);
-    }
-    ProteinIdentification merged_proteins;
-    PeptideIdentificationList merged_peptides;
-    merger.returnResultsAndClear(merged_proteins, merged_peptides);
-
-    std::vector<ProteinIdentification> merged_prot_ids = {std::move(merged_proteins)};
-
-    // Record all window labels as the merged run's MS run paths.
-    StringList all_window_labels;
-    for (const auto& pv : all_prot_ids)
-    {
-      if (!pv.empty())
+      if (all_pep_ids.empty())
       {
-        StringList run_paths;
-        pv[0].getPrimaryMSRunPath(run_paths);
-        all_window_labels.insert(all_window_labels.end(), run_paths.begin(), run_paths.end());
+        OPENMS_LOG_WARN << "[diaWeaverPeptide] No PSMs identified across any window for iteration "
+                        << (iter + 1) << ". Writing empty output." << std::endl;
+        std::vector<ProteinIdentification> empty_prot;
+        PeptideIdentificationList empty_pep;
+        FileHandler().storeIdentifications(iter_out_idxml, empty_prot, empty_pep, {FileTypes::IDXML});
+        iter_orphan.clear();
+        continue;
       }
-    }
-    merged_prot_ids[0].setPrimaryMSRunPath(all_window_labels);
-    merged_prot_ids[0].getSearchParameters().db = database;
 
-    // Check whether decoys are present (needed for FDR).
-    bool has_decoys = false;
-    for (const auto& ph : merged_prot_ids[0].getHits())
-    {
-      if (ph.metaValueExists("target_decoy") &&
-          ph.getMetaValue("target_decoy").toString() == "decoy")
-      {
-        has_decoys = true;
-        break;
-      }
-    }
+      // ------------------------------------------------------------------
+      // Step 4: Cross-window merge, protein inference, FDR (per iteration).
+      // ------------------------------------------------------------------
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] Merging " << all_pep_ids.size()
+                      << " per-window result sets..." << std::endl;
 
-    // Helper: write debug TSV of all scored PSM hits before FDR threshold filtering.
-    // Iterates debug_pre_filter_pep_ids (captured before the fragment claiming filter
-    // in searchWithClaiming) so all top-N ranked hits per spectrum appear.
-    // has_qvalues=true when FDR has been applied to debug_pre_filter_pep_ids: the
-    // original hyperscore is then in meta "ln(hyperscore)_score" and hit.getScore()
-    // is the q-value.
-    auto write_debug_tsv = [&](bool has_qvalues)
-    {
-      if (out_debug_tsv.empty()) return;
-      std::ofstream tsv(out_debug_tsv);
-      if (!tsv)
+      IDMergerAlgorithm merger;
+      for (Size i = 0; i < all_prot_ids.size(); ++i)
       {
-        OPENMS_LOG_WARN << "[diaWeaverPeptide] Cannot open debug TSV for writing: "
-                        << out_debug_tsv << std::endl;
-        return;
+        merger.insertRuns(all_prot_ids[i], all_pep_ids[i]);
       }
-      tsv << "spectrum_native_id\tRT\tIM\tprecursor_mz\tsequence\ttarget_decoy\thyperscore\tq_value\n";
-      const String orig_score_key = "ln(hyperscore)_score";
-      for (const auto& pi : debug_pre_filter_pep_ids)
+      ProteinIdentification merged_proteins;
+      PeptideIdentificationList merged_peptides;
+      merger.returnResultsAndClear(merged_proteins, merged_peptides);
+
+      std::vector<ProteinIdentification> merged_prot_ids = {std::move(merged_proteins)};
+
+      // Record all window labels as the merged run's MS run paths.
+      StringList all_window_labels;
+      for (const auto& pv : all_prot_ids)
       {
-        const String& native_id = pi.getSpectrumReference();
-        const double  rt        = pi.getRT();
-        const double  prec_mz   = pi.getMZ();
-        const String  im_str    = pi.metaValueExists(Constants::UserParam::IM)
-                                    ? String(static_cast<double>(pi.getMetaValue(Constants::UserParam::IM)))
-                                    : "NA";
-        for (const auto& hit : pi.getHits())
+        if (!pv.empty())
         {
-          double hyperscore, qval;
-          if (has_qvalues && hit.metaValueExists(orig_score_key))
-          {
-            hyperscore = static_cast<double>(hit.getMetaValue(orig_score_key));
-            qval       = hit.getScore();
-          }
-          else
-          {
-            hyperscore = hit.getScore();
-            qval       = -1.0;
-          }
-          tsv << native_id << "\t"
-              << rt        << "\t"
-              << im_str    << "\t"
-              << prec_mz   << "\t"
-              << hit.getSequence().toString() << "\t"
-              << (hit.isDecoy() ? "decoy" : "target") << "\t"
-              << hyperscore << "\t";
-          if (qval >= 0.0) tsv << qval;
-          else             tsv << "NA";
-          tsv << "\n";
+          StringList run_paths;
+          pv[0].getPrimaryMSRunPath(run_paths);
+          all_window_labels.insert(all_window_labels.end(), run_paths.begin(), run_paths.end());
         }
       }
-      OPENMS_LOG_INFO << "[diaWeaverPeptide] Debug PSM TSV written to " << out_debug_tsv
-                      << std::endl;
-    };
+      merged_prot_ids[0].setPrimaryMSRunPath(all_window_labels);
+      merged_prot_ids[0].getSearchParameters().db = database;
 
-    // Assign q-values to the pre-filter debug snapshot for the debug TSV.
-    // FDR is applied to debug_pre_filter_pep_ids for annotation only — no hits
-    // are filtered out. This gives the debug TSV q-values across all ranked hits
-    // before any FDR threshold is applied.
-    bool debug_has_qvalues = false;
-    if (has_decoys && !debug_pre_filter_pep_ids.empty())
-    {
-      FalseDiscoveryRate debug_fdr;
-      Param debug_fdr_params = debug_fdr.getParameters();
-      debug_fdr_params.setValue("use_all_hits", "true");
-      debug_fdr_params.setValue("add_decoy_peptides", "true");
-      debug_fdr.setParameters(debug_fdr_params);
-      debug_fdr.apply(debug_pre_filter_pep_ids);
-      debug_has_qvalues = true;
-    }
-    write_debug_tsv(debug_has_qvalues);
-
-    // PSM-level FDR — applied before protein inference so BPIA sees only
-    // confident PSMs (mirrors ProSE's per-file FDR-before-merge approach).
-    if (user_psm_fdr > 0.0)
-    {
-      if (!has_decoys)
+      // Check whether decoys are present (needed for FDR).
+      bool has_decoys = false;
+      for (const auto& ph : merged_prot_ids[0].getHits())
       {
-        OPENMS_LOG_WARN << "[diaWeaverPeptide] FDR:PSM requested but no decoy PSMs found. "
-                        << "Enable Search:decoys or provide a FASTA with decoy proteins. "
-                        << "Skipping PSM FDR filtering." << std::endl;
+        if (ph.metaValueExists("target_decoy") &&
+            ph.getMetaValue("target_decoy").toString() == "decoy")
+        {
+          has_decoys = true;
+          break;
+        }
       }
-      else
+
+      // Helper: write debug TSV of all scored PSM hits before FDR threshold filtering.
+      auto write_debug_tsv = [&](bool has_qvalues)
       {
-        OPENMS_LOG_INFO << "[diaWeaverPeptide] Applying PSM FDR at " << user_psm_fdr * 100
-                        << "% threshold..." << std::endl;
-        FalseDiscoveryRate fdr_tool;
-        Param fdr_params = fdr_tool.getParameters();
-        fdr_params.setValue("use_all_hits", "true");
-        fdr_params.setValue("add_decoy_peptides", "true");
-        fdr_tool.setParameters(fdr_params);
-        fdr_tool.apply(merged_peptides);
-        IDFilter::filterHitsByScore(merged_peptides, user_psm_fdr);
+        if (iter_out_debug_tsv.empty()) return;
+        std::ofstream tsv(iter_out_debug_tsv);
+        if (!tsv)
+        {
+          OPENMS_LOG_WARN << "[diaWeaverPeptide] Cannot open debug TSV for writing: "
+                          << iter_out_debug_tsv << std::endl;
+          return;
+        }
+        tsv << "spectrum_native_id\tRT\tIM\tprecursor_mz\tsequence\ttarget_decoy\thyperscore\tq_value\n";
+        const String orig_score_key = "ln(hyperscore)_score";
+        for (const auto& pi : debug_pre_filter_pep_ids)
+        {
+          const String& native_id = pi.getSpectrumReference();
+          const double  rt        = pi.getRT();
+          const double  prec_mz   = pi.getMZ();
+          const String  im_str    = pi.metaValueExists(Constants::UserParam::IM)
+                                      ? String(static_cast<double>(pi.getMetaValue(Constants::UserParam::IM)))
+                                      : "NA";
+          for (const auto& hit : pi.getHits())
+          {
+            double hyperscore, qval;
+            if (has_qvalues && hit.metaValueExists(orig_score_key))
+            {
+              hyperscore = static_cast<double>(hit.getMetaValue(orig_score_key));
+              qval       = hit.getScore();
+            }
+            else
+            {
+              hyperscore = hit.getScore();
+              qval       = -1.0;
+            }
+            tsv << native_id << "\t"
+                << rt        << "\t"
+                << im_str    << "\t"
+                << prec_mz   << "\t"
+                << hit.getSequence().toString() << "\t"
+                << (hit.isDecoy() ? "decoy" : "target") << "\t"
+                << hyperscore << "\t";
+            if (qval >= 0.0) tsv << qval;
+            else             tsv << "NA";
+            tsv << "\n";
+          }
+        }
+        OPENMS_LOG_INFO << "[diaWeaverPeptide] Debug PSM TSV written to " << iter_out_debug_tsv
+                        << std::endl;
+      };
+
+      // Assign q-values to the pre-filter debug snapshot for annotation only.
+      bool debug_has_qvalues = false;
+      if (has_decoys && !debug_pre_filter_pep_ids.empty())
+      {
+        FalseDiscoveryRate debug_fdr;
+        Param debug_fdr_params = debug_fdr.getParameters();
+        debug_fdr_params.setValue("use_all_hits", "true");
+        debug_fdr_params.setValue("add_decoy_peptides", "true");
+        debug_fdr.setParameters(debug_fdr_params);
+        debug_fdr.apply(debug_pre_filter_pep_ids);
+        debug_has_qvalues = true;
+      }
+      write_debug_tsv(debug_has_qvalues);
+
+      // PSM-level FDR.
+      if (user_psm_fdr > 0.0)
+      {
+        if (!has_decoys)
+        {
+          OPENMS_LOG_WARN << "[diaWeaverPeptide] FDR:PSM requested but no decoy PSMs found. "
+                          << "Enable Search:decoys or provide a FASTA with decoy proteins. "
+                          << "Skipping PSM FDR filtering." << std::endl;
+        }
+        else
+        {
+          OPENMS_LOG_INFO << "[diaWeaverPeptide] Applying PSM FDR at " << user_psm_fdr * 100
+                          << "% threshold..." << std::endl;
+          FalseDiscoveryRate fdr_tool;
+          Param fdr_params = fdr_tool.getParameters();
+          fdr_params.setValue("use_all_hits", "true");
+          fdr_params.setValue("add_decoy_peptides", "true");
+          fdr_tool.setParameters(fdr_params);
+          fdr_tool.apply(merged_peptides);
+          IDFilter::filterHitsByScore(merged_peptides, user_psm_fdr);
+          IDFilter::removeEmptyIdentifications(merged_peptides);
+          OPENMS_LOG_INFO << "[diaWeaverPeptide] " << merged_peptides.size()
+                          << " PSMs retained after PSM FDR." << std::endl;
+        }
+      }
+
+      if (user_protein_fdr == 0.0)
+      {
+        IDFilter::removeDecoyHits(merged_prot_ids);
+        IDFilter::removeDecoyHits(merged_peptides);
         IDFilter::removeEmptyIdentifications(merged_peptides);
-        OPENMS_LOG_INFO << "[diaWeaverPeptide] " << merged_peptides.size()
-                        << " PSMs retained after PSM FDR." << std::endl;
+        IDFilter::removeUnreferencedProteins(merged_prot_ids, merged_peptides);
       }
-    }
 
-    // If protein FDR is not requested, strip decoys before BPIA so protein
-    // inference runs on target-only PSMs (same as ProSE merged flow).
-    // If protein FDR is requested, decoys must survive so picked-protein FDR
-    // has target/decoy protein pairs to work with.
-    if (user_protein_fdr == 0.0)
-    {
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] Running cross-window protein inference on "
+                      << merged_peptides.size() << " PSMs..." << std::endl;
+      BasicProteinInferenceAlgorithm bpia;
+      bpia.run(merged_peptides, merged_prot_ids);
+
+      if (user_protein_fdr > 0.0)
+      {
+        if (!has_decoys)
+        {
+          OPENMS_LOG_WARN << "[diaWeaverPeptide] FDR:protein requested but no decoy proteins found. "
+                          << "Skipping protein FDR filtering." << std::endl;
+        }
+        else
+        {
+          OPENMS_LOG_INFO << "[diaWeaverPeptide] Applying picked-protein FDR at "
+                          << user_protein_fdr * 100 << "% threshold..." << std::endl;
+          FalseDiscoveryRate fdr_tool;
+          fdr_tool.applyPickedProteinFDR(merged_prot_ids[0], decoy_prefix, true);
+          IDFilter::filterHitsByScore(merged_prot_ids, user_protein_fdr);
+          OPENMS_LOG_INFO << "[diaWeaverPeptide] " << merged_prot_ids[0].getHits().size()
+                          << " proteins retained after protein FDR." << std::endl;
+        }
+      }
+
       IDFilter::removeDecoyHits(merged_prot_ids);
       IDFilter::removeDecoyHits(merged_peptides);
       IDFilter::removeEmptyIdentifications(merged_peptides);
       IDFilter::removeUnreferencedProteins(merged_prot_ids, merged_peptides);
-    }
+      IDFilter::removeDanglingProteinReferences(merged_peptides, merged_prot_ids);
+      IDFilter::updateProteinGroups(merged_prot_ids[0].getProteinGroups(), merged_prot_ids[0].getHits());
+      IDFilter::updateProteinGroups(merged_prot_ids[0].getIndistinguishableProteins(), merged_prot_ids[0].getHits());
 
-    // Cross-window protein inference via BasicProteinInferenceAlgorithm.
-    OPENMS_LOG_INFO << "[diaWeaverPeptide] Running cross-window protein inference on "
-                    << merged_peptides.size() << " PSMs..." << std::endl;
-    BasicProteinInferenceAlgorithm bpia;
-    bpia.run(merged_peptides, merged_prot_ids);
-
-    // Protein-level picked-protein FDR
-    if (user_protein_fdr > 0.0)
-    {
-      if (!has_decoys)
-      {
-        OPENMS_LOG_WARN << "[diaWeaverPeptide] FDR:protein requested but no decoy proteins found. "
-                        << "Skipping protein FDR filtering." << std::endl;
-      }
-      else
-      {
-        OPENMS_LOG_INFO << "[diaWeaverPeptide] Applying picked-protein FDR at "
-                        << user_protein_fdr * 100 << "% threshold..." << std::endl;
-        FalseDiscoveryRate fdr_tool;
-        fdr_tool.applyPickedProteinFDR(merged_prot_ids[0], decoy_prefix, true);
-        IDFilter::filterHitsByScore(merged_prot_ids, user_protein_fdr);
-        OPENMS_LOG_INFO << "[diaWeaverPeptide] " << merged_prot_ids[0].getHits().size()
-                        << " proteins retained after protein FDR." << std::endl;
-      }
-    }
-
-    // Remove decoys and dangling references from final output.
-    IDFilter::removeDecoyHits(merged_prot_ids);
-    IDFilter::removeDecoyHits(merged_peptides);
-    IDFilter::removeEmptyIdentifications(merged_peptides);
-    IDFilter::removeUnreferencedProteins(merged_prot_ids, merged_peptides);
-    IDFilter::removeDanglingProteinReferences(merged_peptides, merged_prot_ids);
-    // Protein groups built by BPIA may reference decoy accessions that were removed above.
-    IDFilter::updateProteinGroups(merged_prot_ids[0].getProteinGroups(), merged_prot_ids[0].getHits());
-    IDFilter::updateProteinGroups(merged_prot_ids[0].getIndistinguishableProteins(), merged_prot_ids[0].getHits());
-
-    // Build post-FDR claim registry from surviving target PSMs for orphan mzML output.
-    // Peaks matched to any FDR-passing PSM are excluded from orphan spectra.
-    FragmentClaimRegistry post_fdr_claimed;
-    if (!out_orphan_mzml.empty())
-    {
+      // ------------------------------------------------------------------
+      // Build post-FDR claim registry from surviving target PSMs.
+      // Always built: needed both for orphan output and for passing the
+      // next iteration its input (iter_orphan).
+      // ------------------------------------------------------------------
+      FragmentClaimRegistry post_fdr_claimed;
       for (const auto& pi : merged_peptides)
       {
         const String& native_id = pi.getSpectrumReference();
@@ -1499,193 +1538,183 @@ protected:
       OPENMS_LOG_INFO << "[diaWeaverPeptide] Post-FDR claim registry: "
                       << post_fdr_claimed.claimedCount() << " fragment trace keys claimed by "
                       << merged_peptides.size() << " FDR-passing PSMs." << std::endl;
-    }
 
-    // ------------------------------------------------------------------
-    // Step 5: Write output.
-    // ------------------------------------------------------------------
-    OPENMS_LOG_INFO << "[diaWeaverPeptide] Final result: " << merged_peptides.size() << " PSMs, "
-                    << merged_prot_ids[0].getHits().size() << " proteins." << std::endl;
+      // ------------------------------------------------------------------
+      // Step 5: Write per-iteration outputs.
+      // ------------------------------------------------------------------
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] Final result (iteration " << (iter + 1) << "): "
+                      << merged_peptides.size() << " PSMs, "
+                      << merged_prot_ids[0].getHits().size() << " proteins." << std::endl;
 
-    // --- 5a. Annotated pseudo spectra mzML ---
-    // Group surviving PeptideIdentifications by spectrum native ID (getSpectrumReference()).
-    // All peptide hits sharing the same native ID originated from the same pseudo spectrum
-    // and are written as one output spectrum containing only b/y-matched peaks.
-
-    // Helper: return the fragment_trace_id and fragment_window_id IntegerDataArrays.
-    // Throws if either is absent — both are unconditionally written by
-    // ClusterMassTracesByPrecursor and must always be present on every pseudo spectrum.
-    struct TraceArrayPair
-    {
-      const MSSpectrum::IntegerDataArray* trace_id_arr;
-      const MSSpectrum::IntegerDataArray* window_id_arr;
-    };
-    auto getTraceArrays = [](const MSSpectrum& s) -> TraceArrayPair
-    {
-      TraceArrayPair result{nullptr, nullptr};
-      for (const auto& arr : s.getIntegerDataArrays())
+      // Helper: return the fragment_trace_id and fragment_window_id IntegerDataArrays.
+      struct TraceArrayPair
       {
-        if      (arr.getName() == "fragment_trace_id")  result.trace_id_arr = &arr;
-        else if (arr.getName() == "fragment_window_id") result.window_id_arr = &arr;
-      }
-      if (result.trace_id_arr == nullptr || result.window_id_arr == nullptr)
-        throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-            "Pseudo spectrum '" + s.getNativeID() +
-            "' is missing 'fragment_trace_id' or 'fragment_window_id' IntegerDataArray. "
-            "These arrays must be present on all pseudo spectra produced by ClusterMassTracesByPrecursor.");
-      return result;
-    };
-
-    // Build native_id → PSM index map needed for annotated mzML label construction.
-    std::map<String, std::vector<Size>> native_id_to_pids;
-    if (!out_annotated_mzml.empty())
-    {
-      for (Size pid = 0; pid < merged_peptides.size(); ++pid)
+        const MSSpectrum::IntegerDataArray* trace_id_arr;
+        const MSSpectrum::IntegerDataArray* window_id_arr;
+      };
+      auto getTraceArrays = [](const MSSpectrum& s) -> TraceArrayPair
       {
-        const String& ref = merged_peptides[pid].getSpectrumReference();
-        if (!ref.empty()) native_id_to_pids[ref].push_back(pid);
-      }
-    }
-
-    if (!out_annotated_mzml.empty())
-    {
-      MSExperiment annotated_exp;
-
-      for (const auto& [native_id, pid_indices] : native_id_to_pids)
-      {
-        auto spec_it = all_pseudo_spectra.find(native_id);
-        if (spec_it == all_pseudo_spectra.end()) continue;
-        const MSSpectrum& orig = spec_it->second;
-
-        const double spectrum_rt = orig.getRT();
-
-        // Look up preprocessed spectrum metadata (proc_mzs, proc_trace_ids).
-        // Used to bridge pa.mz → trace_id via binary search on proc_mzs.
-        const CompanionInfo* ci_ptr = nullptr;
+        TraceArrayPair result{nullptr, nullptr};
+        for (const auto& arr : s.getIntegerDataArrays())
         {
-          auto ci_it = all_companion_info.find(native_id);
-          if (ci_it != all_companion_info.end()) ci_ptr = &ci_it->second;
+          if      (arr.getName() == "fragment_trace_id")  result.trace_id_arr = &arr;
+          else if (arr.getName() == "fragment_window_id") result.window_id_arr = &arr;
         }
-        if (ci_ptr == nullptr) continue;
+        if (result.trace_id_arr == nullptr || result.window_id_arr == nullptr)
+          throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+              "Pseudo spectrum '" + s.getNativeID() +
+              "' is missing 'fragment_trace_id' or 'fragment_window_id' IntegerDataArray. "
+              "These arrays must be present on all pseudo spectra produced by ClusterMassTracesByPrecursor.");
+        return result;
+      };
 
-        // Build trace_id → label map.
-        // pa.mz is from the PREPROCESSED spectrum (make_single_charged may differ from orig).
-        // Binary-search proc_mzs → proc_idx → proc_trace_ids[proc_idx] gives the exact trace_id.
-        std::unordered_map<Int, String> tid_to_label;
-
-        for (Size pid : pid_indices)
+      // --- 5a. Annotated pseudo spectra mzML ---
+      if (!iter_out_annotated_mzml.empty())
+      {
+        std::map<String, std::vector<Size>> native_id_to_pids;
+        for (Size pid = 0; pid < merged_peptides.size(); ++pid)
         {
-          for (const PeptideHit& hit : merged_peptides[pid].getHits())
+          const String& ref = merged_peptides[pid].getSpectrumReference();
+          if (!ref.empty()) native_id_to_pids[ref].push_back(pid);
+        }
+
+        MSExperiment annotated_exp;
+
+        for (const auto& [native_id, pid_indices] : native_id_to_pids)
+        {
+          auto spec_it = all_pseudo_spectra.find(native_id);
+          if (spec_it == all_pseudo_spectra.end()) continue;
+          const MSSpectrum& orig = spec_it->second;
+
+          const double spectrum_rt = orig.getRT();
+
+          const CompanionInfo* ci_ptr = nullptr;
           {
-            const String seq = hit.getSequence().toString();
-            for (const PeptideHit::PeakAnnotation& pa : hit.getPeakAnnotations())
+            auto ci_it = all_companion_info.find(native_id);
+            if (ci_it != all_companion_info.end()) ci_ptr = &ci_it->second;
+          }
+          if (ci_ptr == nullptr) continue;
+
+          std::unordered_map<Int, String> tid_to_label;
+
+          for (Size pid : pid_indices)
+          {
+            for (const PeptideHit& hit : merged_peptides[pid].getHits())
             {
-              auto lb = std::lower_bound(ci_ptr->proc_mzs.begin(), ci_ptr->proc_mzs.end(), pa.mz);
-              if (lb == ci_ptr->proc_mzs.end() || *lb != pa.mz) continue;
-              const Size proc_idx = static_cast<Size>(lb - ci_ptr->proc_mzs.begin());
-              if (proc_idx >= ci_ptr->proc_trace_ids.size()) continue;
-              const Int tid = ci_ptr->proc_trace_ids[proc_idx];
-              String label = seq + "-" + pa.annotation;
-              if (pa.charge > 1) label += "+" + String(pa.charge);
-              auto it = tid_to_label.find(tid);
-              if (it == tid_to_label.end())
-                tid_to_label.emplace(tid, label);
-              else
-                it->second += ";" + label;
+              const String seq = hit.getSequence().toString();
+              for (const PeptideHit::PeakAnnotation& pa : hit.getPeakAnnotations())
+              {
+                auto lb = std::lower_bound(ci_ptr->proc_mzs.begin(), ci_ptr->proc_mzs.end(), pa.mz);
+                if (lb == ci_ptr->proc_mzs.end() || *lb != pa.mz) continue;
+                const Size proc_idx = static_cast<Size>(lb - ci_ptr->proc_mzs.begin());
+                if (proc_idx >= ci_ptr->proc_trace_ids.size()) continue;
+                const Int tid = ci_ptr->proc_trace_ids[proc_idx];
+                String label = seq + "-" + pa.annotation;
+                if (pa.charge > 1) label += "+" + String(pa.charge);
+                auto it = tid_to_label.find(tid);
+                if (it == tid_to_label.end())
+                  tid_to_label.emplace(tid, label);
+                else
+                  it->second += ";" + label;
+              }
             }
           }
+          if (tid_to_label.empty()) continue;
+
+          const auto [trace_id_arr, window_id_arr] = getTraceArrays(orig);
+          std::unordered_map<Int, Size> orig_trace_to_idx;
+          orig_trace_to_idx.reserve(orig.size());
+          for (Size k = 0; k < orig.size(); ++k)
+            orig_trace_to_idx[(*trace_id_arr)[k]] = k;
+
+          MSSpectrum out_spec;
+          out_spec.setNativeID(native_id);
+          out_spec.setRT(spectrum_rt);
+          out_spec.setMSLevel(2);
+          if (!orig.getPrecursors().empty())
+            out_spec.getPrecursors().push_back(orig.getPrecursors()[0]);
+
+          MSSpectrum::StringDataArray annot_arr;  annot_arr.setName("fragment_annotation");
+          MSSpectrum::IntegerDataArray out_tid;   out_tid.setName("fragment_trace_id");
+          MSSpectrum::IntegerDataArray out_wid;   out_wid.setName("fragment_window_id");
+
+          for (const auto& [tid, label] : tid_to_label)
+          {
+            auto orig_it = orig_trace_to_idx.find(tid);
+            if (orig_it == orig_trace_to_idx.end()) continue;
+            const Size pk_idx = orig_it->second;
+
+            Peak1D pk; pk.setMZ(orig[pk_idx].getMZ()); pk.setIntensity(orig[pk_idx].getIntensity());
+            out_spec.push_back(pk);
+            annot_arr.push_back(label);
+            out_tid.push_back((*trace_id_arr)[pk_idx]);
+            out_wid.push_back((*window_id_arr)[pk_idx]);
+          }
+
+          if (out_spec.empty()) continue;
+          out_spec.getStringDataArrays().push_back(std::move(annot_arr));
+          if (!out_tid.empty()) out_spec.getIntegerDataArrays().push_back(std::move(out_tid));
+          if (!out_wid.empty()) out_spec.getIntegerDataArrays().push_back(std::move(out_wid));
+          annotated_exp.addSpectrum(std::move(out_spec));
         }
-        if (tid_to_label.empty()) continue;
 
-        // Build trace_id → orig_peak_index lookup from the original (pre-preprocessing) spectrum.
-        const auto [trace_id_arr, window_id_arr] = getTraceArrays(orig);
-        std::unordered_map<Int, Size> orig_trace_to_idx;
-        orig_trace_to_idx.reserve(orig.size());
-        for (Size k = 0; k < orig.size(); ++k)
-          orig_trace_to_idx[(*trace_id_arr)[k]] = k;
-
-        MSSpectrum out_spec;
-        out_spec.setNativeID(native_id);
-        out_spec.setRT(spectrum_rt);
-        out_spec.setMSLevel(2);
-        if (!orig.getPrecursors().empty())
-          out_spec.getPrecursors().push_back(orig.getPrecursors()[0]);
-
-        MSSpectrum::StringDataArray annot_arr;  annot_arr.setName("fragment_annotation");
-        MSSpectrum::IntegerDataArray out_tid;   out_tid.setName("fragment_trace_id");
-        MSSpectrum::IntegerDataArray out_wid;   out_wid.setName("fragment_window_id");
-
-        for (const auto& [tid, label] : tid_to_label)
-        {
-
-          // Locate the monoisotopic peak in the original spectrum by trace_id.
-          auto orig_it = orig_trace_to_idx.find(tid);
-          if (orig_it == orig_trace_to_idx.end()) continue;
-          const Size pk_idx = orig_it->second;
-
-          Peak1D pk; pk.setMZ(orig[pk_idx].getMZ()); pk.setIntensity(orig[pk_idx].getIntensity());
-          out_spec.push_back(pk);
-          annot_arr.push_back(label);
-          out_tid.push_back((*trace_id_arr)[pk_idx]);
-          out_wid.push_back((*window_id_arr)[pk_idx]);
-        }
-
-        if (out_spec.empty()) continue;
-        out_spec.getStringDataArrays().push_back(std::move(annot_arr));
-        if (!out_tid.empty()) out_spec.getIntegerDataArrays().push_back(std::move(out_tid));
-        if (!out_wid.empty()) out_spec.getIntegerDataArrays().push_back(std::move(out_wid));
-        annotated_exp.addSpectrum(std::move(out_spec));
+        annotated_exp.sortSpectra(true);
+        OPENMS_LOG_INFO << "[diaWeaverPeptide] Writing " << annotated_exp.size()
+                        << " annotated pseudo spectra to: " << iter_out_annotated_mzml << std::endl;
+        MzMLFile().store(iter_out_annotated_mzml, annotated_exp);
       }
 
-      annotated_exp.sortSpectra(true);
-      OPENMS_LOG_INFO << "[diaWeaverPeptide] Writing " << annotated_exp.size()
-                      << " annotated pseudo spectra to: " << out_annotated_mzml << std::endl;
-      MzMLFile().store(out_annotated_mzml, annotated_exp);
-    }
-
-    if (!out_orphan_mzml.empty())
-    {
-      MSExperiment orphan_exp;
-
-      for (const auto& [native_id, orig] : all_pseudo_spectra)
+      // --- 5b. Orphan pseudo spectra mzML ---
+      // Always compute iter_orphan: it feeds the next database iteration
+      // even when the user did not request -out_orphan_mzml.
       {
-        const auto [trace_id_arr, window_id_arr] = getTraceArrays(orig);
+        iter_orphan.clear();
 
-        MSSpectrum orphan_spec;
-        orphan_spec.setNativeID(native_id);
-        orphan_spec.setRT(orig.getRT());
-        orphan_spec.setMSLevel(2);
-        if (!orig.getPrecursors().empty())
-          orphan_spec.getPrecursors() = orig.getPrecursors();
-
-        MSSpectrum::IntegerDataArray out_tid; out_tid.setName("fragment_trace_id");
-        MSSpectrum::IntegerDataArray out_wid; out_wid.setName("fragment_window_id");
-
-        for (Size i = 0; i < orig.size(); ++i)
+        for (const auto& [native_id, orig] : all_pseudo_spectra)
         {
-          const auto key = FragmentClaimRegistry::makeKey((*window_id_arr)[i], (*trace_id_arr)[i]);
-          if (post_fdr_claimed.isClaimed(key)) continue;
-          orphan_spec.push_back(orig[i]);
-          out_tid.push_back((*trace_id_arr)[i]);
-          out_wid.push_back((*window_id_arr)[i]);
+          const auto [trace_id_arr, window_id_arr] = getTraceArrays(orig);
+
+          MSSpectrum orphan_spec;
+          orphan_spec.setNativeID(native_id);
+          orphan_spec.setRT(orig.getRT());
+          orphan_spec.setMSLevel(2);
+          if (!orig.getPrecursors().empty())
+            orphan_spec.getPrecursors() = orig.getPrecursors();
+
+          MSSpectrum::IntegerDataArray out_tid; out_tid.setName("fragment_trace_id");
+          MSSpectrum::IntegerDataArray out_wid; out_wid.setName("fragment_window_id");
+
+          for (Size i = 0; i < orig.size(); ++i)
+          {
+            const auto key = FragmentClaimRegistry::makeKey((*window_id_arr)[i], (*trace_id_arr)[i]);
+            if (post_fdr_claimed.isClaimed(key)) continue;
+            orphan_spec.push_back(orig[i]);
+            out_tid.push_back((*trace_id_arr)[i]);
+            out_wid.push_back((*window_id_arr)[i]);
+          }
+
+          if (orphan_spec.empty()) continue;
+          if (!out_tid.empty()) orphan_spec.getIntegerDataArrays().push_back(std::move(out_tid));
+          if (!out_wid.empty()) orphan_spec.getIntegerDataArrays().push_back(std::move(out_wid));
+          iter_orphan.addSpectrum(std::move(orphan_spec));
         }
 
-        if (orphan_spec.empty()) continue;
-        if (!out_tid.empty()) orphan_spec.getIntegerDataArrays().push_back(std::move(out_tid));
-        if (!out_wid.empty()) orphan_spec.getIntegerDataArrays().push_back(std::move(out_wid));
-        orphan_exp.addSpectrum(std::move(orphan_spec));
+        iter_orphan.sortSpectra(true);
+
+        if (!iter_out_orphan_mzml.empty())
+        {
+          OPENMS_LOG_INFO << "[diaWeaverPeptide] Writing " << iter_orphan.size()
+                          << " orphan pseudo spectra to: " << iter_out_orphan_mzml << std::endl;
+          MzMLFile().store(iter_out_orphan_mzml, iter_orphan);
+        }
       }
 
-      orphan_exp.sortSpectra(true);
-      OPENMS_LOG_INFO << "[diaWeaverPeptide] Writing " << orphan_exp.size()
-                      << " orphan pseudo spectra to: " << out_orphan_mzml << std::endl;
-      MzMLFile().store(out_orphan_mzml, orphan_exp);
-    }
+      // --- 5c. Peptide/protein identifications ---
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] Writing output: " << iter_out_idxml << std::endl;
+      FileHandler().storeIdentifications(iter_out_idxml, merged_prot_ids, merged_peptides,
+                                         {FileTypes::IDXML});
 
-    // --- 5b. Peptide/protein identifications ---
-    OPENMS_LOG_INFO << "[diaWeaverPeptide] Writing output: " << out_idxml << std::endl;
-    FileHandler().storeIdentifications(out_idxml, merged_prot_ids, merged_peptides,
-                                       {FileTypes::IDXML});
+    } // end for (iter) — outer database iteration loop
 
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time);
