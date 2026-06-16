@@ -1264,7 +1264,7 @@ protected:
         const ProSEAlgorithm::ExitCodes ec =
           prose.searchWithClaiming(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
                                    window_registry, &window_debug_pep_ids,
-                                   skip_density_filters_, skip_deisotoping_);
+                                   true, true);
 
 #pragma omp critical (collect_pseudo_spectra)
         {
