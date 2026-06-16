@@ -282,20 +282,23 @@ class OPENMS_DLLAPI ProSEAlgorithm :
      * Extends search(PeakMap&, SearchContext&, ...) with an iterative re-scoring loop:
      * 1. Initial search produces scored PSMs for all pseudo spectra.
      * 2. PSMs are sorted descending by score.
-     * 3. Fragment trace IDs claimed by higher-scoring PSMs are excluded when
-     *    re-scoring lower-scoring PSMs that share the same fragments.
-     * 4. PSMs that retain at least @p min_unique_fragments unclaimed fragments
-     *    are accepted into the output; others are discarded.
+     * 3. For each PSM in that order, fragment traces already claimed by higher-scoring
+     *    PSMs are excluded; the hyperscore is recalculated using only the remaining
+     *    uniquely owned fragments. PSMs with zero unique fragments receive a score
+     *    of 0 and are ranked last by FDR rather than hard-filtered.
+     * 4. Unclaimed traces are registered in @p out_registry.
      *
      * The @p pseudo_spectra must carry "fragment_trace_id" IntegerDataArrays
      * (emitted by ClusterMassTracesByPrecursor). Spectra without this array are
      * scored normally without claiming.
      *
-     * @param[in,out] pseudo_spectra  Pseudo-spectra from ClusterMassTracesByPrecursor.
-     * @param[in,out] ctx             Pre-built SearchContext (shared FragmentIndex).
-     * @param[out]    prot_ids        Output protein identifications.
-     * @param[out]    pep_ids         Output peptide identifications.
-     * @param[in]     min_unique_fragments  Minimum unclaimed fragments for PSM acceptance (default 3).
+     * @param[in,out] pseudo_spectra        Pseudo-spectra from ClusterMassTracesByPrecursor.
+     * @param[in,out] ctx                   Pre-built SearchContext (shared FragmentIndex).
+     * @param[out]    prot_ids              Output protein identifications.
+     * @param[out]    pep_ids              Output peptide identifications (recalculated scores).
+     * @param[out]    out_registry          Registry of claimed fragment trace keys.
+     * @param[out]    out_pre_filter_pep_ids Optional flat PSM list in greedy-descent order
+     *                                      with recalculated hyperscores; used for debug TSV.
      * @return ExitCodes indicating success or error.
      */
     ExitCodes searchWithClaiming(PeakMap& pseudo_spectra,
@@ -304,7 +307,6 @@ class OPENMS_DLLAPI ProSEAlgorithm :
                                  PeptideIdentificationList& pep_ids,
                                  FragmentClaimRegistry& out_registry,
                                  PeptideIdentificationList* out_pre_filter_pep_ids = nullptr,
-                                 Size min_unique_fragments = 3,
                                  bool skip_window_filters = true,
                                  bool skip_deisotoping = false) const;
 

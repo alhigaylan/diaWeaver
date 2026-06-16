@@ -449,11 +449,6 @@ protected:
     search_algo_params_with_subsection.insert("Search:", ProSEAlgorithm().getDefaults());
     registerFullParam_(search_algo_params_with_subsection);
 
-    registerIntOption_("min_unique_fragments", "<int>", 3,
-      "Minimum number of unclaimed fragment trace IDs required to retain a PSM after "
-      "the iterative fragment claiming pass.", false);
-    setMinInt_("min_unique_fragments", 1);
-
     registerFlag_("skip_density_filters",
       "Skip WindowMower and NLargest during spectrum preprocessing. "
       "Deisotoping is unaffected by this flag and is always applied unless "
@@ -707,7 +702,6 @@ protected:
     search_params.setValue("FDR:PSM",     0.0);
     search_params.setValue("FDR:protein", 0.0);
 
-    const Size min_unique_fragments_ = static_cast<Size>(getIntOption_("min_unique_fragments"));
     const bool skip_density_filters_ = getFlag_("skip_density_filters");
     const bool skip_deisotoping_     = getFlag_("skip_deisotoping");
 
@@ -1071,7 +1065,7 @@ protected:
 
       const ProSEAlgorithm::ExitCodes ec =
         prose.searchWithClaiming(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
-                                 window_registry, &window_debug_pep_ids, min_unique_fragments_,
+                                 window_registry, &window_debug_pep_ids,
                                  skip_density_filters_, skip_deisotoping_);
 
       // Collect debug PSMs and companion info from preprocessed spectra.
@@ -1215,7 +1209,7 @@ protected:
 
         const ProSEAlgorithm::ExitCodes ec =
           prose.searchWithClaiming(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
-                                   window_registry, &window_debug_pep_ids, min_unique_fragments_,
+                                   window_registry, &window_debug_pep_ids,
                                    skip_density_filters_, skip_deisotoping_);
 
 #pragma omp critical (collect_pseudo_spectra)
