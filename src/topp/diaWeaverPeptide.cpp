@@ -42,6 +42,7 @@
 #include <cmath>
 #include <fstream>
 #include <set>
+#include <unordered_set>
 #include <chrono>
 
 #ifdef _OPENMP
@@ -462,6 +463,13 @@ protected:
     registerFlag_("skip_deisotoping",
       "Skip the Deisotoper during spectrum preprocessing. "
       "Use for evaluation or when isotope patterns are unreliable.");
+    registerFlag_("spectrum_level_orphan",
+      "Use spectrum-level orphan strategy instead of the default fragment-level strategy. "
+      "Fragment-level (default): orphan peaks are individual fragment ions not claimed by any "
+      "FDR-passing PSM; hyperscores are recalculated competitively within each DIA window. "
+      "Spectrum-level: entire pseudo spectra with no FDR-passing PSM are passed to the next "
+      "iteration intact; each spectrum is scored independently with no hyperscore recalculation. "
+      "This matches the conventional multi-stage database search approach used in the field.");
 
 #ifdef WITH_OPENTIMS
     registerTOPPSubsection_("bruker", "Options for reading Bruker TimsTOF .d files (requires WITH_OPENTIMS)");
@@ -720,8 +728,9 @@ protected:
     search_params.setValue("FDR:PSM",     0.0);
     search_params.setValue("FDR:protein", 0.0);
 
-    const bool skip_density_filters_ = getFlag_("skip_density_filters");
-    const bool skip_deisotoping_     = getFlag_("skip_deisotoping");
+    const bool skip_density_filters_   = getFlag_("skip_density_filters");
+    const bool skip_deisotoping_       = getFlag_("skip_deisotoping");
+    const bool spectrum_level_orphan   = getFlag_("spectrum_level_orphan");
 
 #ifdef _OPENMP
     const int num_threads = getIntOption_("threads");
@@ -1099,21 +1108,38 @@ protected:
       // prose is a per-thread firstprivate copy; ctx (FragmentIndex) is shared read-only.
       std::vector<ProteinIdentification> window_prot_ids;
       PeptideIdentificationList window_pep_ids;
-      FragmentClaimRegistry window_registry;
-      PeptideIdentificationList window_debug_pep_ids;
 
-      const ProSEAlgorithm::ExitCodes ec =
-        prose.searchWithClaiming(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
-                                 window_registry, &window_debug_pep_ids,
-                                 skip_density_filters_, skip_deisotoping_);
+      ProSEAlgorithm::ExitCodes ec;
+      if (spectrum_level_orphan)
+      {
+        ec = prose.search(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
+                          skip_density_filters_, skip_deisotoping_);
+      }
+      else
+      {
+        FragmentClaimRegistry window_registry;
+        PeptideIdentificationList window_debug_pep_ids;
+        ec = prose.searchWithClaiming(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
+                                      window_registry, &window_debug_pep_ids,
+                                      skip_density_filters_, skip_deisotoping_);
+#pragma omp critical (collect_pseudo_spectra)
+        {
+          debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
+                                          std::make_move_iterator(window_debug_pep_ids.begin()),
+                                          std::make_move_iterator(window_debug_pep_ids.end()));
+        }
+      }
 
-      // Collect debug PSMs and companion info from preprocessed spectra.
+      // Collect companion info from preprocessed spectra.
       // proc_mzs maps PeakAnnotation mz → trace_id for annotated/orphan mzML.
+      // In spectrum_level_orphan mode, window_pep_ids are also the debug pre-filter PSMs.
 #pragma omp critical (collect_pseudo_spectra)
       {
-        debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
-                                        std::make_move_iterator(window_debug_pep_ids.begin()),
-                                        std::make_move_iterator(window_debug_pep_ids.end()));
+        if (spectrum_level_orphan)
+        {
+          debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
+                                          window_pep_ids.begin(), window_pep_ids.end());
+        }
         for (const auto& spec : pseudo_spectra)
         {
           CompanionInfo ci;
@@ -1258,19 +1284,35 @@ protected:
 
         std::vector<ProteinIdentification> window_prot_ids;
         PeptideIdentificationList window_pep_ids;
-        FragmentClaimRegistry window_registry;
-        PeptideIdentificationList window_debug_pep_ids;
 
-        const ProSEAlgorithm::ExitCodes ec =
-          prose.searchWithClaiming(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
-                                   window_registry, &window_debug_pep_ids,
-                                   true, true);
+        ProSEAlgorithm::ExitCodes ec;
+        if (spectrum_level_orphan)
+        {
+          ec = prose.search(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
+                            true, true);
+        }
+        else
+        {
+          FragmentClaimRegistry window_registry;
+          PeptideIdentificationList window_debug_pep_ids;
+          ec = prose.searchWithClaiming(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
+                                        window_registry, &window_debug_pep_ids,
+                                        true, true);
+#pragma omp critical (collect_pseudo_spectra)
+          {
+            debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
+                                            std::make_move_iterator(window_debug_pep_ids.begin()),
+                                            std::make_move_iterator(window_debug_pep_ids.end()));
+          }
+        }
 
 #pragma omp critical (collect_pseudo_spectra)
         {
-          debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
-                                          std::make_move_iterator(window_debug_pep_ids.begin()),
-                                          std::make_move_iterator(window_debug_pep_ids.end()));
+          if (spectrum_level_orphan)
+          {
+            debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
+                                            window_pep_ids.begin(), window_pep_ids.end());
+          }
           for (const auto& spec : pseudo_spectra)
           {
             CompanionInfo ci;
@@ -1506,38 +1548,45 @@ protected:
       IDFilter::updateProteinGroups(merged_prot_ids[0].getIndistinguishableProteins(), merged_prot_ids[0].getHits());
 
       // ------------------------------------------------------------------
-      // Build post-FDR claim registry from surviving target PSMs.
-      // Always built: needed both for orphan output and for passing the
-      // next iteration its input (iter_orphan).
+      // Build orphan input for the next iteration.
+      // Fragment-level mode: post-FDR claim registry; peaks not claimed by
+      //   any FDR-passing PSM go into iter_orphan (partial spectra).
+      // Spectrum-level mode: collect identified native IDs; entire pseudo
+      //   spectra with no FDR-passing PSM go into iter_orphan intact.
       // ------------------------------------------------------------------
+
+      // Fragment-level: claim registry (unused in spectrum_level_orphan mode).
       FragmentClaimRegistry post_fdr_claimed;
-      for (const auto& pi : merged_peptides)
+      if (!spectrum_level_orphan)
       {
-        const String& native_id = pi.getSpectrumReference();
-        auto ci_it = all_companion_info.find(native_id);
-        if (ci_it == all_companion_info.end()) continue;
-        const CompanionInfo& ci = ci_it->second;
-        for (const auto& hit : pi.getHits())
+        for (const auto& pi : merged_peptides)
         {
-          std::vector<FragmentClaimRegistry::TraceKey> keys;
-          for (const auto& pa : hit.getPeakAnnotations())
+          const String& native_id = pi.getSpectrumReference();
+          auto ci_it = all_companion_info.find(native_id);
+          if (ci_it == all_companion_info.end()) continue;
+          const CompanionInfo& ci = ci_it->second;
+          for (const auto& hit : pi.getHits())
           {
-            auto lb = std::lower_bound(ci.proc_mzs.begin(), ci.proc_mzs.end(), pa.mz);
-            if (lb == ci.proc_mzs.end() || *lb != pa.mz) continue;
-            const Size proc_idx = static_cast<Size>(lb - ci.proc_mzs.begin());
-            if (proc_idx >= ci.proc_trace_ids.size()) continue;
-            const Int tid = ci.proc_trace_ids[proc_idx];
-            const Int wid = proc_idx < static_cast<Size>(ci.proc_window_ids.size())
-                              ? ci.proc_window_ids[proc_idx] : 0;
-            keys.push_back(FragmentClaimRegistry::makeKey(wid, tid));
+            std::vector<FragmentClaimRegistry::TraceKey> keys;
+            for (const auto& pa : hit.getPeakAnnotations())
+            {
+              auto lb = std::lower_bound(ci.proc_mzs.begin(), ci.proc_mzs.end(), pa.mz);
+              if (lb == ci.proc_mzs.end() || *lb != pa.mz) continue;
+              const Size proc_idx = static_cast<Size>(lb - ci.proc_mzs.begin());
+              if (proc_idx >= ci.proc_trace_ids.size()) continue;
+              const Int tid = ci.proc_trace_ids[proc_idx];
+              const Int wid = proc_idx < static_cast<Size>(ci.proc_window_ids.size())
+                                ? ci.proc_window_ids[proc_idx] : 0;
+              keys.push_back(FragmentClaimRegistry::makeKey(wid, tid));
+            }
+            if (!keys.empty())
+              post_fdr_claimed.tryClaim(keys, hit.getSequence().toString(), hit.getScore(), 0);
           }
-          if (!keys.empty())
-            post_fdr_claimed.tryClaim(keys, hit.getSequence().toString(), hit.getScore(), 0);
         }
+        OPENMS_LOG_INFO << "[diaWeaverPeptide] Post-FDR claim registry: "
+                        << post_fdr_claimed.claimedCount() << " fragment trace keys claimed by "
+                        << merged_peptides.size() << " FDR-passing PSMs." << std::endl;
       }
-      OPENMS_LOG_INFO << "[diaWeaverPeptide] Post-FDR claim registry: "
-                      << post_fdr_claimed.claimedCount() << " fragment trace keys claimed by "
-                      << merged_peptides.size() << " FDR-passing PSMs." << std::endl;
 
       // ------------------------------------------------------------------
       // Step 5: Write per-iteration outputs.
@@ -1670,33 +1719,57 @@ protected:
       {
         iter_orphan.clear();
 
-        for (const auto& [native_id, orig] : all_pseudo_spectra)
+        if (spectrum_level_orphan)
         {
-          const auto [trace_id_arr, window_id_arr] = getTraceArrays(orig);
+          // Spectrum-level: remove entire identified pseudo spectra.
+          // Build the set of native IDs that had at least one FDR-passing PSM.
+          std::unordered_set<String> identified_ids;
+          for (const auto& pi : merged_peptides)
+            if (!pi.getSpectrumReference().empty())
+              identified_ids.insert(pi.getSpectrumReference());
 
-          MSSpectrum orphan_spec;
-          orphan_spec.setNativeID(native_id);
-          orphan_spec.setRT(orig.getRT());
-          orphan_spec.setMSLevel(2);
-          if (!orig.getPrecursors().empty())
-            orphan_spec.getPrecursors() = orig.getPrecursors();
-
-          MSSpectrum::IntegerDataArray out_tid; out_tid.setName("fragment_trace_id");
-          MSSpectrum::IntegerDataArray out_wid; out_wid.setName("fragment_window_id");
-
-          for (Size i = 0; i < orig.size(); ++i)
+          for (const auto& [native_id, orig] : all_pseudo_spectra)
           {
-            const auto key = FragmentClaimRegistry::makeKey((*window_id_arr)[i], (*trace_id_arr)[i]);
-            if (post_fdr_claimed.isClaimed(key)) continue;
-            orphan_spec.push_back(orig[i]);
-            out_tid.push_back((*trace_id_arr)[i]);
-            out_wid.push_back((*window_id_arr)[i]);
+            if (identified_ids.count(native_id)) continue;
+            iter_orphan.addSpectrum(orig);
           }
 
-          if (orphan_spec.empty()) continue;
-          if (!out_tid.empty()) orphan_spec.getIntegerDataArrays().push_back(std::move(out_tid));
-          if (!out_wid.empty()) orphan_spec.getIntegerDataArrays().push_back(std::move(out_wid));
-          iter_orphan.addSpectrum(std::move(orphan_spec));
+          OPENMS_LOG_INFO << "[diaWeaverPeptide] Spectrum-level orphan: "
+                          << iter_orphan.size() << " unidentified pseudo spectra retained "
+                          << "(of " << all_pseudo_spectra.size() << " total, "
+                          << identified_ids.size() << " identified at FDR)." << std::endl;
+        }
+        else
+        {
+          // Fragment-level: retain peaks not claimed by any FDR-passing PSM.
+          for (const auto& [native_id, orig] : all_pseudo_spectra)
+          {
+            const auto [trace_id_arr, window_id_arr] = getTraceArrays(orig);
+
+            MSSpectrum orphan_spec;
+            orphan_spec.setNativeID(native_id);
+            orphan_spec.setRT(orig.getRT());
+            orphan_spec.setMSLevel(2);
+            if (!orig.getPrecursors().empty())
+              orphan_spec.getPrecursors() = orig.getPrecursors();
+
+            MSSpectrum::IntegerDataArray out_tid; out_tid.setName("fragment_trace_id");
+            MSSpectrum::IntegerDataArray out_wid; out_wid.setName("fragment_window_id");
+
+            for (Size i = 0; i < orig.size(); ++i)
+            {
+              const auto key = FragmentClaimRegistry::makeKey((*window_id_arr)[i], (*trace_id_arr)[i]);
+              if (post_fdr_claimed.isClaimed(key)) continue;
+              orphan_spec.push_back(orig[i]);
+              out_tid.push_back((*trace_id_arr)[i]);
+              out_wid.push_back((*window_id_arr)[i]);
+            }
+
+            if (orphan_spec.empty()) continue;
+            if (!out_tid.empty()) orphan_spec.getIntegerDataArrays().push_back(std::move(out_tid));
+            if (!out_wid.empty()) orphan_spec.getIntegerDataArrays().push_back(std::move(out_wid));
+            iter_orphan.addSpectrum(std::move(orphan_spec));
+          }
         }
 
         iter_orphan.sortSpectra(true);
