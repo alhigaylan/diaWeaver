@@ -1370,7 +1370,7 @@ protected:
         std::vector<ProteinIdentification> empty_prot;
         PeptideIdentificationList empty_pep;
         FileHandler().storeIdentifications(iter_out_idxml, empty_prot, empty_pep, {FileTypes::IDXML});
-        iter_orphan.clear();
+        iter_orphan.clear(true);
         continue;
       }
 
@@ -1717,7 +1717,7 @@ protected:
       // Always compute iter_orphan: it feeds the next database iteration
       // even when the user did not request -out_orphan_mzml.
       {
-        iter_orphan.clear();
+        iter_orphan.clear(true);
 
         if (spectrum_level_orphan)
         {
