@@ -416,7 +416,7 @@ protected:
 
       Param p_mtd = MassTraceDetection().getDefaults();
       p_mtd.setValue("mass_error_ppm", 7.0, "Allowed mass deviation (in ppm).");
-      p_mtd.setValue("min_trace_length", 5.0, "Minimum expected length of a mass trace (in seconds).");
+      p_mtd.setValue("min_trace_length", 2.0, "Minimum expected length of a mass trace (in seconds).");
       p_mtd.setValue("ion_mobility_tolerance", 0.01, "Allowed ion mobility deviation (in 1/k0).");
       p_mtd.setValue("reestimate_mt_sd", "false", "Enables dynamic re-estimation of m/z variance during mass trace collection stage.");
       p_mtd.setValue("quant_method", "max_height", "Method of quantification for mass traces.");
@@ -445,10 +445,10 @@ protected:
       p_ffp.setValue("local_mz_range", 3.0, "MZ range where to look for isotopic mass traces");
       p_ffp.setValue("local_im_range", 0.02, "IM range where to look for isotopic mass traces");
       p_ffp.setValue("charge_lower_bound", 2, "Lowest charge state to consider");
-      p_ffp.setValue("charge_upper_bound", 4, "Highest charge state to consider");
-      p_ffp.setValue("remove_single_traces", "true", "Remove unassembled traces (single traces).");
+      p_ffp.setValue("charge_upper_bound", 3, "Highest charge state to consider for fragment ions");
+      p_ffp.setValue("remove_single_traces", "false", "Keep single-trace fragment ions (singly-represented fragments must not be discarded).");
       p_ffp.setValue("use_smoothed_intensities", "true", "Use Savitzky-Golay smoothed intensities.");
-      p_ffp.setValue("mass_defect_filtering", "true", "Filter feature hypotheses by peptide mass defect boundaries.");
+      p_ffp.setValue("mass_defect_filtering", "false", "Fragment ions do not follow peptide mass defect rules; disabled for MS2.");
       p_ffp.setValue("mass_defect_offset", 0.1, "Mass defect tolerance offset.");
       p_ffp.setValue("overlapping_features", "false", "Allow low-confidence hypotheses to reuse traces.");
       p_ffp.setValue("hypothesis_score_quantile", 0.5, "Score quantile threshold for low-confidence hypotheses.");
@@ -1003,9 +1003,23 @@ protected:
               StringList tokens;
               feat_label.split("_", tokens);
               if (tokens.empty()) continue;
+
               auto it = trace_lookup.find(tokens[0]);
-              if (it != trace_lookup.end())
+              if (it == trace_lookup.end()) continue;
+
+              const int z = f.getCharge();
+              if (z >= 2)
+              {
+                MassTrace trace_copy = *(it->second);
+                for (Peak2D& peak : trace_copy)
+                  peak.setMZ(peak.getMZ() * z - (z - 1) * Constants::PROTON_MASS_U);
+                trace_copy.updateMeanMZ();
+                ms2_traces.push_back(std::move(trace_copy));
+              }
+              else
+              {
                 ms2_traces.push_back(*(it->second));
+              }
             }
             OPENMS_LOG_INFO << "MS2 FeatureFinderPeptide: " << ms2_features.size()
                             << " features -> " << ms2_traces.size()

@@ -44,6 +44,8 @@ namespace OpenMS
       SPEC_SEMI = 1, ///< semi specific, i.e., one of the two cleavage sites must fulfill requirements
       SPEC_FULL = 2, ///< fully enzyme specific, e.g., tryptic (ends with KR, AA-before is KR), or peptide is at protein terminal ends
       SPEC_UNKNOWN = 3,
+      SPEC_SEMI_EXCLUSIVE = 4, ///< exactly one enzyme-specific terminus; fully-specific products are excluded
+      SPEC_NONE_EXCLUSIVE = 5, ///< neither terminus is enzyme-specific; semi- and fully-specific products are excluded
       SPEC_NOCTERM = 8, ///< no requirements on CTerm (currently not supported in the class)
       SPEC_NONTERM = 9, ///< no requirements on NTerm (currently not supported in the class)
       SIZE_OF_SPECIFICITY = 10
