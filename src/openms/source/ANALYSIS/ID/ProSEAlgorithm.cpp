@@ -571,6 +571,20 @@ namespace OpenMS
           ph.setScore(ah.score);
           ph.setSequence(ah.sequence);
 
+          // Carry Phase 1 z=1 match data forward for searchWithClaiming recalculation.
+          // Stored as meta values so the data survives the full pipeline without changing
+          // PeptideHit's public interface.
+          if (!ah.matched_exp_idxs.empty())
+          {
+            IntList exp_idxs_il;
+            exp_idxs_il.reserve(ah.matched_exp_idxs.size());
+            for (Size idx : ah.matched_exp_idxs)
+              exp_idxs_il.push_back(static_cast<Int>(idx));
+            ph.setMetaValue("_prose_matched_exp_idxs", exp_idxs_il);
+            ph.setMetaValue("_prose_matched_ion_types",
+                            String(ah.matched_ion_types.begin(), ah.matched_ion_types.end()));
+          }
+
           // Generate theoretical spectrum + alignment for annotations that need it.
           // The alignment tolerance mirrors the search's fragment tolerance so the
           // reported FRAGMENT_ERROR_MEDIAN_PPM is not polluted by far-off spurious
@@ -1090,6 +1104,8 @@ namespace OpenMS
         ah.mean_error = static_cast<float>(detail.mean_error);
         ah.matched_prefix_ions = static_cast<uint16_t>(detail.matched_prefix_ions);
         ah.matched_suffix_ions = static_cast<uint16_t>(detail.matched_suffix_ions);
+        ah.matched_exp_idxs  = std::move(detail.matched_exp_idxs);
+        ah.matched_ion_types = std::move(detail.matched_ion_types);
         ah.isotope_error = sms.isotope_error_;
         ah.applied_charge = sms.precursor_charge_;
         ah.delta_mass = 0.0;
@@ -1776,48 +1792,6 @@ namespace OpenMS
       return pair;
     };
 
-    // Returns (global_trace_key, annotation_index) pairs for peaks the hit matched.
-    // global_trace_key = FragmentClaimRegistry::makeKey(window_id, trace_id).
-    // pa.mz is an exact copy of spec[exp_idx].getMZ(), so binary search is safe.
-    using TraceAnnotPair = std::pair<FragmentClaimRegistry::TraceKey, Size>;
-    auto getMatchedTraceIdsIndexed = [&](Size spec_idx, const PeptideHit& hit)
-        -> std::vector<TraceAnnotPair>
-    {
-      const TraceArrayPair arrs = getSpecTraceArrays(spec_idx);
-      if (arrs.trace_id == nullptr || arrs.window_id == nullptr) return {};
-
-      const MSSpectrum& spec = pseudo_spectra[spec_idx];
-
-      // Build mz cache for this spectrum if not already present.
-      auto& mz_vec = spec_mz_cache[spec_idx];
-      if (mz_vec.empty() && !spec.empty())
-      {
-        mz_vec.reserve(spec.size());
-        for (const auto& pk : spec) mz_vec.push_back(pk.getMZ());
-      }
-
-      const auto& annotations = hit.getPeakAnnotations();
-      std::vector<TraceAnnotPair> result;
-      result.reserve(annotations.size());
-
-      for (Size ai = 0; ai < annotations.size(); ++ai)
-      {
-        auto lb = std::lower_bound(mz_vec.begin(), mz_vec.end(), annotations[ai].mz);
-        if (lb != mz_vec.end() && *lb == annotations[ai].mz)
-        {
-          const Size pk_idx = static_cast<Size>(lb - mz_vec.begin());
-          if (pk_idx < arrs.trace_id->size())
-          {
-            const FragmentClaimRegistry::TraceKey key =
-                FragmentClaimRegistry::makeKey((*arrs.window_id)[pk_idx],
-                                              (*arrs.trace_id)[pk_idx]);
-            result.emplace_back(key, ai);
-          }
-        }
-      }
-      return result;
-    };
-
     // Log-factorial helper replicating the HyperScore formula:
     //   logfact(x)       = ln(x!) relative to base 2  (i.e. ln(x!/1!))
     //   logfact(x, base) = ln(x! / (base-1)!)         (partial factorial)
@@ -1829,68 +1803,49 @@ namespace OpenMS
 
     for (const PSMEntry& psm : psm_list)
     {
-      const PeptideHit& hit = peptide_ids[psm.pep_id_idx].getHits()[psm.hit_idx];
-      std::vector<TraceAnnotPair> matched_indexed =
-          getMatchedTraceIdsIndexed(psm.spectrum_idx, hit);
+      PeptideHit& mhit = peptide_ids[psm.pep_id_idx].getHits()[psm.hit_idx];
 
-      if (matched_indexed.empty())
-      {
-        const MSSpectrum* spec_ptr = (psm.spectrum_idx < pseudo_spectra.size())
-                                       ? &pseudo_spectra[psm.spectrum_idx]
-                                       : nullptr;
-        const String native_id = spec_ptr ? spec_ptr->getNativeID() : String("unknown");
-        const Size   n_annots  = hit.getPeakAnnotations().size();
-        const TraceArrayPair arrs = getSpecTraceArrays(psm.spectrum_idx);
-        const bool   has_trace_arr  = (arrs.trace_id  != nullptr);
-        const bool   has_window_arr = (arrs.window_id != nullptr);
+      // Retrieve the Phase 1 z=1 match data stored by postProcessHits_.
+      // These indices point into the same preprocessed experimental spectrum used
+      // during initial scoring, so they are fully consistent with the FI search.
+      if (!mhit.metaValueExists("_prose_matched_exp_idxs")) continue;
+      const IntList exp_idxs     = mhit.getMetaValue("_prose_matched_exp_idxs").toIntList();
+      const String  ion_type_str = mhit.getMetaValue("_prose_matched_ion_types").toString();
 
-        OPENMS_LOG_ERROR << "[ProSE/searchWithClaiming] matched_indexed is empty for PSM:\n"
-                         << "  spectrum native_id       : " << native_id << "\n"
-                         << "  spectrum_idx             : " << psm.spectrum_idx << "\n"
-                         << "  sequence                 : " << psm.sequence << "\n"
-                         << "  score                    : " << psm.score << "\n"
-                         << "  PeakAnnotations          : " << n_annots << "\n"
-                         << "  fragment_trace_id present : " << (has_trace_arr  ? "YES" : "NO") << "\n"
-                         << "  fragment_window_id present: " << (has_window_arr ? "YES" : "NO") << "\n"
-                         << "  Cause: "
-                         << (!has_trace_arr || !has_window_arr
-                               ? "spectrum is missing 'fragment_trace_id' and/or 'fragment_window_id' array"
-                               : (n_annots == 0
-                                    ? "PeptideHit has zero PeakAnnotations"
-                                    : "no annotation mz matched any spectrum peak mz (tolerance or sorting issue)"))
-                         << std::endl;
-        continue;
-      }
+      const TraceArrayPair arrs = getSpecTraceArrays(psm.spectrum_idx);
+      if (arrs.trace_id == nullptr || arrs.window_id == nullptr) continue;
 
-      // Collect uniquely owned fragment traces — unclaimed or already claimed by the same sequence.
+      const MSSpectrum& exp_spectrum = pseudo_spectra[psm.spectrum_idx];
+
+      // Walk every z=1 match from Phase 1. For each, check trace ownership and
+      // accumulate score components for peaks that are not claimed by a higher-scoring
+      // different peptide. The dot_product term uses the same formula as
+      // computeWithDetail: exp_intensity * theo_intensity, where theo_intensity = 1.0.
       std::vector<FragmentClaimRegistry::TraceKey> claimable;
-      std::vector<Size> owned_annot_idxs;
-
-      for (const auto& [tid, ai] : matched_indexed)
-      {
-        const FragmentClaimRegistry::ClaimRecord* rec = registry.getClaimRecord(tid);
-        if (rec == nullptr || rec->peptide_seq == psm.sequence)
-        {
-          owned_annot_idxs.push_back(ai);
-          if (rec == nullptr) claimable.push_back(tid);
-        }
-      }
-
-      // Recalculate hyperscore using only the uniquely owned fragment peaks.
-      // PSMs with zero unique fragments receive a score of 0 and are ranked
-      // last by FDR rather than removed by a hard threshold.
-      const auto& annotations = hit.getPeakAnnotations();
+      std::vector<Size> owned_exp_idxs;
       int prefix_count = 0, suffix_count = 0;
       double dot_product = 0.0;
 
-      for (Size ai : owned_annot_idxs)
+      for (Size mi = 0; mi < exp_idxs.size(); ++mi)
       {
-        const auto& pa = annotations[ai];
-        if (pa.annotation.empty()) continue;
-        const char c = pa.annotation[0];
-        if      (c == 'a' || c == 'b' || c == 'c') ++prefix_count;
-        else if (c == 'x' || c == 'y' || c == 'z') ++suffix_count;
-        dot_product += pa.intensity;
+        const Size exp_idx = static_cast<Size>(exp_idxs[mi]);
+        if (exp_idx >= exp_spectrum.size() || exp_idx >= arrs.trace_id->size()) continue;
+
+        const FragmentClaimRegistry::TraceKey key =
+            FragmentClaimRegistry::makeKey((*arrs.window_id)[exp_idx],
+                                           (*arrs.trace_id)[exp_idx]);
+
+        const FragmentClaimRegistry::ClaimRecord* rec = registry.getClaimRecord(key);
+        if (rec != nullptr && rec->peptide_seq != psm.sequence) continue;
+
+        const char ion_type = (mi < ion_type_str.size()) ? ion_type_str[mi] : '\0';
+        if      (ion_type == 'a' || ion_type == 'b' || ion_type == 'c') ++prefix_count;
+        else if (ion_type == 'x' || ion_type == 'y' || ion_type == 'z') ++suffix_count;
+
+        dot_product += exp_spectrum[exp_idx].getIntensity(); // theo_intensity = 1.0
+
+        if (rec == nullptr) claimable.push_back(key);
+        owned_exp_idxs.push_back(exp_idx);
       }
 
       const int i_min = std::min(prefix_count, suffix_count);
@@ -1900,7 +1855,6 @@ namespace OpenMS
                                + logfact(i_max, i_min + 1);
 
       // Write updated score and ion counts back; downstream FDR operates on this value.
-      PeptideHit& mhit = peptide_ids[psm.pep_id_idx].getHits()[psm.hit_idx];
       mhit.setScore(new_score);
       mhit.setMetaValue(Constants::UserParam::MATCHED_PREFIX_IONS, prefix_count);
       mhit.setMetaValue(Constants::UserParam::MATCHED_SUFFIX_IONS, suffix_count);
@@ -1928,30 +1882,22 @@ namespace OpenMS
 
         if (comp_offsets_arr && comp_trace_ids_arr && comp_window_ids_arr)
         {
-          const auto& mz_vec = spec_mz_cache[psm.spectrum_idx];
           std::vector<FragmentClaimRegistry::TraceKey> companion_claimable;
-
-          for (Size ai : owned_annot_idxs)
+          for (Size exp_idx : owned_exp_idxs)
           {
-            const auto& pa = annotations[ai];
-            auto lb = std::lower_bound(mz_vec.begin(), mz_vec.end(), pa.mz);
-            if (lb == mz_vec.end() || *lb != pa.mz) continue;
-            const Size pk_idx = static_cast<Size>(lb - mz_vec.begin());
-            if (pk_idx + 1 >= comp_offsets_arr->size()) continue;
-
-            const Int start = (*comp_offsets_arr)[pk_idx];
-            const Int end   = (*comp_offsets_arr)[pk_idx + 1];
+            if (exp_idx + 1 >= comp_offsets_arr->size()) continue;
+            const Int start = (*comp_offsets_arr)[exp_idx];
+            const Int end   = (*comp_offsets_arr)[exp_idx + 1];
             for (Int ci = start; ci < end; ++ci)
             {
               const FragmentClaimRegistry::TraceKey comp_key =
                   FragmentClaimRegistry::makeKey((*comp_window_ids_arr)[ci],
                                                  (*comp_trace_ids_arr)[ci]);
-              const auto* rec = registry.getClaimRecord(comp_key);
-              if (rec == nullptr || rec->peptide_seq == psm.sequence)
+              const auto* rec2 = registry.getClaimRecord(comp_key);
+              if (rec2 == nullptr || rec2->peptide_seq == psm.sequence)
                 companion_claimable.push_back(comp_key);
             }
           }
-
           if (!companion_claimable.empty())
             registry.tryClaim(companion_claimable, psm.sequence, psm.score, psm.spectrum_idx);
         }

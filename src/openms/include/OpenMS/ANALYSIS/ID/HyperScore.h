@@ -49,6 +49,12 @@ struct OPENMS_DLLAPI HyperScore
     size_t matched_prefix_ions = 0;  ///< N-terminal ions (a, b, c)
     size_t matched_suffix_ions = 0;  ///< C-terminal ions (x, y, z)
     double mean_error = 0.0;
+    /// Index into the experimental spectrum for each matched theoretical ion (parallel to matched_ion_types).
+    /// Populated by computeWithDetail to allow callers to reconstruct the exact match set without re-running scoring.
+    std::vector<Size> matched_exp_idxs;
+    /// Effective ion-type character for each match: 'a'/'b'/'c' (prefix) or 'x'/'y'/'z' (suffix); '\0' for other.
+    /// Parallel to matched_exp_idxs.
+    std::vector<char> matched_ion_types;
   };
 
   static double computeWithDetail(double fragment_mass_tolerance, 

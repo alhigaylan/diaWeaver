@@ -393,6 +393,11 @@ class OPENMS_DLLAPI ProSEAlgorithm :
       uint16_t applied_charge = 0; ///< precursor charge used for this PSM
       uint16_t matched_prefix_ions = 0; ///< number of matched prefix ions (a/b/c)
       uint16_t matched_suffix_ions = 0; ///< number of matched suffix ions (x/y/z)
+      /// Experimental peak indices and ion types from the Phase 1 z=1 scoring pass.
+      /// Populated from HyperScore::PSMDetail and carried into PeptideHit meta values
+      /// so searchWithClaiming can recalculate scores without re-running scoring.
+      std::vector<Size> matched_exp_idxs;
+      std::vector<char> matched_ion_types;
 
       static bool hasBetterScore(const AnnotatedHit_& a, const AnnotatedHit_& b)
       {

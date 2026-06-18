@@ -141,14 +141,17 @@ namespace OpenMS
         dot_product += (*it).getIntensity() * it.ref().getIntensity();
         const String& name = (*ion_names)[it.refIdx()];
         const char c = name[0];
-        if (c == 'a' || c == 'b' || c == 'c') ++prefix_ion_count;
-        else if (c == 'x' || c == 'y' || c == 'z') ++suffix_ion_count;
+        char eff_ion = '\0';
+        if (c == 'a' || c == 'b' || c == 'c') { ++prefix_ion_count; eff_ion = c; }
+        else if (c == 'x' || c == 'y' || c == 'z') { ++suffix_ion_count; eff_ion = c; }
         else if (auto p = name.find('$'); p != String::npos && p + 1 < name.size())
         {
-          const char d = name[p + 1];
-          if (d == 'a' || d == 'b' || d == 'c') ++prefix_ion_count;
-          else if (d == 'x' || d == 'y' || d == 'z') ++suffix_ion_count;
+          const char e = name[p + 1];
+          if (e == 'a' || e == 'b' || e == 'c') { ++prefix_ion_count; eff_ion = e; }
+          else if (e == 'x' || e == 'y' || e == 'z') { ++suffix_ion_count; eff_ion = e; }
         }
+        d.matched_exp_idxs.push_back(it.tgtIdx());
+        d.matched_ion_types.push_back(eff_ion);
       }
     }
     else
@@ -160,14 +163,17 @@ namespace OpenMS
         dot_product += (*it).getIntensity() * it.ref().getIntensity();
         const String& name = (*ion_names)[it.refIdx()];
         const char c = name[0];
-        if (c == 'a' || c == 'b' || c == 'c') ++prefix_ion_count;
-        else if (c == 'x' || c == 'y' || c == 'z') ++suffix_ion_count;
+        char eff_ion = '\0';
+        if (c == 'a' || c == 'b' || c == 'c') { ++prefix_ion_count; eff_ion = c; }
+        else if (c == 'x' || c == 'y' || c == 'z') { ++suffix_ion_count; eff_ion = c; }
         else if (auto p = name.find('$'); p != String::npos && p + 1 < name.size())
         {
-          const char d = name[p + 1];
-          if (d == 'a' || d == 'b' || d == 'c') ++prefix_ion_count;
-          else if (d == 'x' || d == 'y' || d == 'z') ++suffix_ion_count;
+          const char e = name[p + 1];
+          if (e == 'a' || e == 'b' || e == 'c') { ++prefix_ion_count; eff_ion = e; }
+          else if (e == 'x' || e == 'y' || e == 'z') { ++suffix_ion_count; eff_ion = e; }
         }
+        d.matched_exp_idxs.push_back(it.tgtIdx());
+        d.matched_ion_types.push_back(eff_ion);
       }
     }
 
