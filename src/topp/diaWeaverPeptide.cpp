@@ -446,6 +446,18 @@ protected:
       "Parameters for FeatureFinderPeptide algorithm (precursor detection on MS1)");
     registerSubsection_("MassTraceExtractor",
       "Parameters for MassTraceExtractor algorithm (fragment trace detection on MS2)");
+
+    registerStringOption_("deisotope_ms2", "<toggle>", "true",
+      "Run FeatureFinderPeptide on MS2 fragment traces to resolve isotope envelopes and charge states "
+      "before clustering. Only the monoisotopic trace per assembled feature is passed to the clusterer, "
+      "reducing redundancy from isotopologue peaks. "
+      "Set to false to pass all raw MS2 mass traces directly (original behavior).", false);
+    setValidStrings_("deisotope_ms2", {"true", "false"});
+
+    registerSubsection_("FeatureFinderPeptideMS2",
+      "Parameters for FeatureFinderPeptide on MS2 fragment traces (used when -deisotope_ms2 is true). "
+      "Initially mirrors FeatureFinderPeptide (MS1) defaults.");
+
     registerSubsection_("ClusterMassTraces",
       "Parameters for clustering mass traces into pseudo spectra");
 
@@ -633,6 +645,66 @@ protected:
 
       return combined;
     }
+    if (name == "FeatureFinderPeptideMS2")
+    {
+      // Mirrors FeatureFinderPeptide (MS1) defaults; tune for fragment ions as needed.
+      Param combined;
+
+      Param p_com;
+      p_com.setValue("noise_threshold_int", 60.0, "Intensity threshold below which peaks are regarded as noise.");
+      p_com.setValue("chrom_peak_snr", 1.0, "Minimum signal-to-noise a mass trace should have.");
+      p_com.setValue("chrom_fwhm", 5.0, "Expected chromatographic peak width (in seconds).");
+      combined.insert("common:", p_com);
+      combined.setSectionDescription("common", "Common parameters for all other subsections");
+
+      Param p_mtd = MassTraceDetection().getDefaults();
+      p_mtd.setValue("mass_error_ppm", 7.0, "Allowed mass deviation (in ppm).");
+      p_mtd.setValue("min_trace_length", 5.0, "Minimum expected length of a mass trace (in seconds).");
+      p_mtd.setValue("ion_mobility_tolerance", 0.01, "Allowed ion mobility deviation (in 1/k0).");
+      p_mtd.setValue("reestimate_mt_sd", "false", "Enables dynamic re-estimation of m/z variance.");
+      p_mtd.setValue("quant_method", "max_height", "Quantification method for mass traces.");
+      p_mtd.setValue("trace_termination_outliers", 2, "Cancel trace extension after this many consecutive empty spectra.");
+      p_mtd.setValue("impute_zeros_missing_scans", "true", "Insert zero-intensity points at empty scan positions.");
+      p_mtd.remove("noise_threshold_int");
+      p_mtd.remove("chrom_peak_snr");
+      p_mtd.remove("auto_noise_threshold");
+      p_mtd.remove("noise_estimation_n_scans");
+      p_mtd.remove("noise_estimation_percentile");
+      combined.insert("mtd:", p_mtd);
+      combined.setSectionDescription("mtd", "Mass Trace Detection parameters");
+
+      Param p_epd2;
+      p_epd2.setValue("enabled", "true", "Enable elution peak detection.");
+      p_epd2.setValue("width_filtering", "off", "Filter unlikely peak widths.");
+      p_epd2.setValidStrings("enabled", {"true", "false"});
+      p_epd2.insert("", ElutionPeakDetection().getDefaults());
+      p_epd2.remove("chrom_peak_snr");
+      p_epd2.remove("chrom_fwhm");
+      combined.insert("epd:", p_epd2);
+      combined.setSectionDescription("epd", "Elution Profile Detection");
+
+      Param p_ffp = FeatureFindingPeptide().getDefaults();
+      p_ffp.setValue("local_rt_range", 5.0, "RT range where to look for coeluting mass traces");
+      p_ffp.setValue("local_mz_range", 3.0, "MZ range where to look for isotopic mass traces");
+      p_ffp.setValue("local_im_range", 0.02, "IM range where to look for isotopic mass traces");
+      p_ffp.setValue("charge_lower_bound", 2, "Lowest charge state to consider");
+      p_ffp.setValue("charge_upper_bound", 4, "Highest charge state to consider");
+      p_ffp.setValue("remove_single_traces", "true", "Remove unassembled traces.");
+      p_ffp.setValue("use_smoothed_intensities", "true", "Use Savitzky-Golay smoothed intensities.");
+      p_ffp.setValue("mass_defect_filtering", "true", "Filter by peptide mass defect boundaries.");
+      p_ffp.setValue("mass_defect_offset", 0.1, "Mass defect tolerance offset.");
+      p_ffp.setValue("overlapping_features", "false", "Allow low-confidence hypotheses to reuse traces.");
+      p_ffp.setValue("hypothesis_score_quantile", 0.5, "Score quantile threshold for low-confidence hypotheses.");
+      p_ffp.setValue("rt_max_lag", 5, "Maximum lag for cross-correlation.");
+      p_ffp.setValue("rt_min_pearson_correlation", 0.3, "Minimum Pearson correlation.");
+      p_ffp.setValue("rt_peak_overlap_threshold", 0.3, "Minimum FWHM overlap proportion.");
+      p_ffp.remove("chrom_fwhm");
+      p_ffp.remove("report_chromatograms");
+      combined.insert("ffp:", p_ffp);
+      combined.setSectionDescription("ffp", "FeatureFindingPeptide parameters");
+
+      return combined;
+    }
     if (name == "ClusterMassTraces")
     {
       Param p;
@@ -718,6 +790,13 @@ protected:
     Param mte_epd_param          = getParam_().copy("MassTraceExtractor:epd:", true);
 
     const Param cluster_param    = getParam_().copy("ClusterMassTraces:", true);
+
+    // FeatureFinderPeptideMS2 parameters (for MS2 deisotoping when -deisotope_ms2 is true)
+    const bool deisotope_ms2       = (getStringOption_("deisotope_ms2") == "true");
+    const Param ms2ffp_common_param = getParam_().copy("FeatureFinderPeptideMS2:common:", true);
+    Param ms2ffp_mtd_param          = getParam_().copy("FeatureFinderPeptideMS2:mtd:", true);
+    Param ms2ffp_epd_param          = getParam_().copy("FeatureFinderPeptideMS2:epd:", true);
+    Param ms2ffp_ffp_param          = getParam_().copy("FeatureFinderPeptideMS2:ffp:", true);
 
     // ProSE search parameters: defer FDR to post-merge (always, since we have
     // multiple windows; per-window FDR would be statistically meaningless).
@@ -999,7 +1078,41 @@ protected:
       peakPickInPlace_(ms2_exp, picker_im, picker_hr, im_info.available,
                        aggregate_scans, bruker_im_centroiding, inner_threads);
 
-      // --- 3c. MassTraceExtractor on MS2 ---
+      // --- 3c. MS2 trace extraction (MassTraceExtractor or FeatureFinderPeptide) ---
+      // When deisotope_ms2 is true, FeatureFinderPeptide assembles isotope envelopes and
+      // resolves charge states; only the monoisotopic trace per feature is kept.
+      // When false, MassTraceExtractor passes all raw traces directly (original behavior).
+      if (deisotope_ms2)
+      {
+        FeatureMap ms2_features;
+        std::vector<MassTrace> ms2_all_traces;
+        Param mtd_copy = ms2ffp_mtd_param;
+        Param epd_copy = ms2ffp_epd_param;
+        Param ffp_copy = ms2ffp_ffp_param;
+        if (runFeatureFinderPeptide_(ms2_exp, ms2ffp_common_param, mtd_copy, epd_copy, ffp_copy,
+                                     ms2_features, ms2_all_traces))
+        {
+          std::map<String, const MassTrace*> trace_lookup;
+          for (const auto& tr : ms2_all_traces)
+            trace_lookup[tr.getLabel()] = &tr;
+
+          for (const auto& f : ms2_features)
+          {
+            if (!f.metaValueExists("label")) continue;
+            String feat_label = f.getMetaValue("label");
+            StringList tokens;
+            feat_label.split("_", tokens);
+            if (tokens.empty()) continue;
+            auto it = trace_lookup.find(tokens[0]);
+            if (it != trace_lookup.end())
+              ms2_traces.push_back(*(it->second));
+          }
+          OPENMS_LOG_INFO << "[diaWeaverPeptide] MS2 FFP: " << ms2_features.size()
+                          << " features -> " << ms2_traces.size()
+                          << " monoisotopic fragment traces" << std::endl;
+        }
+      }
+      else
       {
         Param mte_mtd_copy = mte_mtd_param;
         Param mte_epd_copy = mte_epd_param;
