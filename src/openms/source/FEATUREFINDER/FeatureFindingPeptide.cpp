@@ -74,6 +74,9 @@ namespace OpenMS
     defaults_.setValue("mass_defect_offset", 0.1, "Mass defect tolerance offset (in Da, applied to the fractional mass) for the peptide mass defect filter. Increasing defect tolerance is recommended for modified peptides", {"advanced"});
     defaults_.setMinFloat("mass_defect_offset", 0.0);
 
+    defaults_.setValue("minimum_isotopes_nr", 2, "Minimum number of isotopic mass traces required for a feature hypothesis to be reported. Must be at least 2 (monoisotopic + one isotope trace).");
+    defaults_.setMinInt("minimum_isotopes_nr", 2);
+
     defaultsToParam_();
 
     this->setLogType(CMD);
@@ -116,6 +119,7 @@ namespace OpenMS
     hypothesis_score_quantile_ = (double)param_.getValue("hypothesis_score_quantile");
     enable_mass_defect_filtering_ = param_.getValue("mass_defect_filtering").toBool();
     mass_defect_offset_ = (double)param_.getValue("mass_defect_offset");
+    minimum_isotopes_nr_ = static_cast<Size>((int)param_.getValue("minimum_isotopes_nr"));
   }
 
 
@@ -571,6 +575,12 @@ namespace OpenMS
 
     // sort feature candidates by their score (descending)
     std::sort(feat_hypos.begin(), feat_hypos.end(), CmpHypothesesByScore());
+
+    // Remove hypotheses that don't meet the minimum isotope trace count.
+    feat_hypos.erase(
+      std::remove_if(feat_hypos.begin(), feat_hypos.end(),
+        [this](const FeatureHypothesis& fh) { return fh.getSize() < minimum_isotopes_nr_; }),
+      feat_hypos.end());
 
     // Compute the score threshold at hypothesis_score_quantile_.
     // The vector is sorted descending, so the quantile index from the high end
