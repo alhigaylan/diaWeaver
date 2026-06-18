@@ -17,7 +17,7 @@ using namespace std;
 
 namespace OpenMS
 {
-  const std::string EnzymaticDigestion::NamesOfSpecificity[] = {"none", "semi", "full", "unknown", "unknown", "unknown", "unknown", "unknown", "no-cterm", "no-nterm"};
+  const std::string EnzymaticDigestion::NamesOfSpecificity[] = {"none", "semi", "full", "unknown", "semitryptic-only", "nontryptic-only", "unknown", "unknown", "no-cterm", "no-nterm"};
   const std::string EnzymaticDigestion::NoCleavage = "no cleavage";
   const std::string EnzymaticDigestion::UnspecificCleavage = "unspecific cleavage";
 
@@ -289,8 +289,15 @@ namespace OpenMS
       spec_c = true;
     }
 
-    if ((spec_n && spec_c) ||                                // full spec
-        ((specificity_ == SPEC_SEMI) && (spec_n || spec_c))) // semi spec
+    bool valid = false;
+    if (specificity_ == SPEC_NONE_EXCLUSIVE)
+      valid = !spec_n && !spec_c;
+    else if (specificity_ == SPEC_SEMI_EXCLUSIVE)
+      valid = (spec_n != spec_c);
+    else // SPEC_FULL, SPEC_SEMI
+      valid = (spec_n && spec_c) || ((specificity_ == SPEC_SEMI) && (spec_n || spec_c));
+
+    if (valid)
     {
       if (ignore_missed_cleavages)
       {
@@ -481,14 +488,35 @@ namespace OpenMS
       return 0;
     }
 
-    // naive cleavage sites — fully-specific products + missed cleavages
-    std::vector<int> fragment_positions = tokenize_(sequence.getString());
-    Size wrong_size = digestAfterTokenize_(fragment_positions, sequence, output, min_length, max_length);
+    // SPEC_NONE_EXCLUSIVE: substrings where neither terminus is at a cleavage site.
+    // Protein termini count as specific, so only internal-to-internal substrings are emitted.
+    if (specificity_ == SPEC_NONE_EXCLUSIVE)
+    {
+      std::vector<int> fp = tokenize_(sequence.getString());
+      fp.push_back(static_cast<int>(sequence.size())); // sorted: [0, cut1, ..., seq.size()]
+      for (Size i = 1; i + min_length <= sequence.size(); ++i)
+      {
+        if (std::binary_search(fp.begin(), fp.end(), static_cast<int>(i))) continue;
+        const Size j_max = std::min(i + max_length, sequence.size() - 1);
+        for (Size j = i + min_length; j <= j_max; ++j)
+        {
+          if (!std::binary_search(fp.begin(), fp.end(), static_cast<int>(j)))
+            output.emplace_back(sequence.substr(i, j - i));
+        }
+      }
+      return 0;
+    }
 
-    // Semi-specific: in addition to the fully-specific products above, generate variants
-    // where one terminus is a non-cleavage site. semiSpecificDigestion_() returns pair<Size,Size>
-    // as (start, end) which we convert to substr(start, length) for StringView sub-views.
-    if (specificity_ == SPEC_SEMI)
+    // Fully-specific products (SPEC_FULL and SPEC_SEMI include these; SPEC_SEMI_EXCLUSIVE does not).
+    std::vector<int> fragment_positions = tokenize_(sequence.getString());
+    Size wrong_size = 0;
+    if (specificity_ != SPEC_SEMI_EXCLUSIVE)
+      wrong_size = digestAfterTokenize_(fragment_positions, sequence, output, min_length, max_length);
+
+    // Semi-specific: one terminus is a non-cleavage site.
+    // SPEC_SEMI appends these on top of the fully-specific products above.
+    // SPEC_SEMI_EXCLUSIVE emits these ONLY (fully-specific products are excluded).
+    if (specificity_ == SPEC_SEMI || specificity_ == SPEC_SEMI_EXCLUSIVE)
     {
       fragment_positions.push_back(static_cast<int>(sequence.size()));
       std::vector<std::pair<Size, Size>> semi_pairs;
@@ -541,15 +569,36 @@ namespace OpenMS
       return 0;
     }
 
-    // naive cleavage sites — fully-specific products + missed cleavages
-    std::vector<int> fragment_positions = tokenize_(sequence.getString());
-    Size wrong_size = digestAfterTokenize_(fragment_positions, sequence, output, min_length, max_length);
+    // SPEC_NONE_EXCLUSIVE: substrings where neither terminus is at a cleavage site.
+    // Protein termini count as specific, so only internal-to-internal substrings are emitted.
+    // Output pairs are (start, length) to match the convention of this overload.
+    if (specificity_ == SPEC_NONE_EXCLUSIVE)
+    {
+      std::vector<int> fp = tokenize_(sequence.getString());
+      fp.push_back(static_cast<int>(sequence.size())); // sorted: [0, cut1, ..., seq.size()]
+      for (Size i = 1; i + min_length <= sequence.size(); ++i)
+      {
+        if (std::binary_search(fp.begin(), fp.end(), static_cast<int>(i))) continue;
+        const Size j_max = std::min(i + max_length, sequence.size() - 1);
+        for (Size j = i + min_length; j <= j_max; ++j)
+        {
+          if (!std::binary_search(fp.begin(), fp.end(), static_cast<int>(j)))
+            output.emplace_back(i, j - i);
+        }
+      }
+      return 0;
+    }
 
-    // Semi-specific: in addition to the fully-specific products above, generate variants
-    // where one terminus is a non-cleavage site. semiSpecificDigestion_() returns (start, end)
-    // pairs (matching ProteaseDigestion convention), so convert to (start, length) to match
-    // digestAfterTokenize_'s convention used in this overload.
-    if (specificity_ == SPEC_SEMI)
+    // Fully-specific products (SPEC_FULL and SPEC_SEMI include these; SPEC_SEMI_EXCLUSIVE does not).
+    std::vector<int> fragment_positions = tokenize_(sequence.getString());
+    Size wrong_size = 0;
+    if (specificity_ != SPEC_SEMI_EXCLUSIVE)
+      wrong_size = digestAfterTokenize_(fragment_positions, sequence, output, min_length, max_length);
+
+    // Semi-specific: one terminus is a non-cleavage site.
+    // SPEC_SEMI appends these on top of the fully-specific products above.
+    // SPEC_SEMI_EXCLUSIVE emits these ONLY (fully-specific products are excluded).
+    if (specificity_ == SPEC_SEMI || specificity_ == SPEC_SEMI_EXCLUSIVE)
     {
       fragment_positions.push_back(static_cast<int>(sequence.size()));
       std::vector<std::pair<Size, Size>> semi_pairs;

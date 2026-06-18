@@ -2189,14 +2189,15 @@ init_hits.hits_.erase(it_zero, init_hits.hits_.end());
 
     defaults_.setValue("peptide:missed_cleavages", 1, "Missed cleavages for digestion");
     defaults_.setValue("peptide:enzyme_specificity", "full",
-      "Enzyme cleavage specificity required for both peptide termini.\n"
-      "  'full' : both termini must be enzyme-specific (canonical, e.g. tryptic).\n"
-      "  'semi' : only one terminus needs to be enzyme-specific (semi-tryptic).\n"
-      "  'none' : no enzyme constraint at either terminus; every substring of length\n"
-      "           [min_size, max_size] is enumerated. This is the canonical setting for\n"
-      "           immunopeptidomics (e.g. HLA peptides 8..12mers). For very large search\n"
-      "           spaces consider tightening 'peptide:min_size'/'peptide:max_size'.");
-    defaults_.setValidStrings("peptide:enzyme_specificity", {"full", "semi", "none"});
+      "Enzyme cleavage specificity for the peptide termini.\n"
+      "  'full'             : both termini must be enzyme-specific (canonical, e.g. tryptic).\n"
+      "  'semi'             : at least one terminus must be enzyme-specific (includes fully-specific).\n"
+      "  'semitryptic-only' : exactly one terminus is enzyme-specific; fully-specific products excluded.\n"
+      "  'none'             : no enzyme constraint; every substring of length [min_size, max_size]\n"
+      "                       is enumerated. Canonical setting for immunopeptidomics (e.g. HLA 8..12mers).\n"
+      "  'nontryptic-only'  : neither terminus is enzyme-specific; semi- and fully-specific products\n"
+      "                       are excluded.");
+    defaults_.setValidStrings("peptide:enzyme_specificity", {"full", "semi", "semitryptic-only", "none", "nontryptic-only"});
     defaults_.setValue("peptide:min_size", 7, "Minimal peptide length for database");
     defaults_.setValue("peptide:max_size", 40, "Maximal peptide length for database");
 
