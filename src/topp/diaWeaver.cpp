@@ -455,6 +455,7 @@ protected:
       p_ffp.setValue("rt_max_lag", 5, "Maximum lag for cross-correlation.");
       p_ffp.setValue("rt_min_pearson_correlation", 0.3, "Minimum Pearson correlation.");
       p_ffp.setValue("rt_peak_overlap_threshold", 0.3, "Minimum FWHM overlap proportion.");
+      p_ffp.setValue("minimum_isotopes_nr", 3, "Minimum isotopic traces required for MS2 fragment ion features.");
       p_ffp.remove("chrom_fwhm");
       p_ffp.remove("report_chromatograms");
       combined.insert("ffp:", p_ffp);
