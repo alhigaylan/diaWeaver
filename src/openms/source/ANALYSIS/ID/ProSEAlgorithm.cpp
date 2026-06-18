@@ -1904,6 +1904,24 @@ namespace OpenMS
       }
     }
 
+    // Re-sort hits within each PeptideIdentification by recalculated score so the
+    // best-scoring hit is at index 0. The claiming loop processes PSMs in initial-score
+    // order, so the within-spectrum ordering is now stale. FalseDiscoveryRate with
+    // use_all_hits=true still computes correct q-values regardless, but downstream
+    // consumers (idXML writers, IDFilter, any caller expecting index 0 = best) require
+    // this ordering guarantee.
+    for (auto& pid : peptide_ids)
+    {
+      auto& hits = pid.getHits();
+      if (hits.size() > 1)
+      {
+        std::sort(hits.begin(), hits.end(),
+                  [](const PeptideHit& a, const PeptideHit& b) {
+                    return a.getScore() > b.getScore();
+                  });
+      }
+    }
+
     // Build out_pre_filter_pep_ids from psm_list order with recalculated scores.
     // One entry per PSM in globally score-processed order so the debug TSV
     // faithfully reflects the greedy descent sequence with updated hyperscores.
