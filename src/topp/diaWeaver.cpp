@@ -453,7 +453,7 @@ protected:
       p_ffp.setValue("overlapping_features", "false", "Allow low-confidence hypotheses to reuse traces.");
       p_ffp.setValue("hypothesis_score_quantile", 0.5, "Score quantile threshold for low-confidence hypotheses.");
       p_ffp.setValue("rt_max_lag", 5, "Maximum lag for cross-correlation.");
-      p_ffp.setValue("rt_min_pearson_correlation", 0.3, "Minimum Pearson correlation.");
+      p_ffp.setValue("rt_min_pearson_correlation", 0.7, "Minimum Pearson correlation between two mass trace elution profiles for MS2 isotope grouping.");
       p_ffp.setValue("rt_peak_overlap_threshold", 0.3, "Minimum FWHM overlap proportion.");
       p_ffp.setValue("minimum_isotopes_nr", 3, "Minimum isotopic traces required for MS2 fragment ion features.");
       p_ffp.remove("chrom_fwhm");
