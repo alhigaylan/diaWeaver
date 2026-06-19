@@ -798,12 +798,6 @@ protected:
       return tier_name; // "semitryptic-only" and "nontryptic-only" are already valid FragmentIndex values
     };
 
-    // Derive per-step output path. Dispatches to the legacy _N scheme or the new _N_M_label scheme.
-    auto makeOutputName = [&](const String& path, Size db_idx, Size tier_idx, const String& tier_label) -> String {
-      if (using_tiers) return makeStepName(path, db_idx, tier_idx, tier_label);
-      return makeIterName(path, db_idx);
-    };
-
     // Derive per-iteration output path by inserting "_N" (1-based) before the extension.
     // Legacy naming: _N (1-based database index). Used when -specificity_tiers is absent.
     auto makeIterName = [](const String& path, Size db_idx) -> String {
@@ -821,6 +815,12 @@ protected:
       const size_t dot = path.find_last_of('.');
       if (dot == String::npos) return path + suffix;
       return path.substr(0, dot) + suffix + path.substr(dot);
+    };
+
+    // Derive per-step output path. Dispatches to the legacy _N scheme or the new _N_M_label scheme.
+    auto makeOutputName = [&](const String& path, Size db_idx, Size tier_idx, const String& tier_label) -> String {
+      if (using_tiers) return makeStepName(path, db_idx, tier_idx, tier_label);
+      return makeIterName(path, db_idx);
     };
 
     const bool save_precursors  = getFlag_("save_unfragmented_precursors");
@@ -1480,7 +1480,7 @@ protected:
         if (spectrum_level_orphan)
         {
           ec = prose.search(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
-                            true, true);
+                            true);
         }
         else
         {
@@ -1488,7 +1488,7 @@ protected:
           PeptideIdentificationList window_debug_pep_ids;
           ec = prose.searchWithClaiming(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
                                         window_registry, &window_debug_pep_ids,
-                                        true, true);
+                                        true);
 #pragma omp critical (collect_pseudo_spectra)
           {
             debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
