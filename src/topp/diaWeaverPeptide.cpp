@@ -1763,14 +1763,6 @@ protected:
         }
       }
 
-      IDFilter::removeDecoyHits(merged_prot_ids);
-      IDFilter::removeDecoyHits(merged_peptides);
-      IDFilter::removeEmptyIdentifications(merged_peptides);
-      IDFilter::removeUnreferencedProteins(merged_prot_ids, merged_peptides);
-      IDFilter::removeDanglingProteinReferences(merged_peptides, merged_prot_ids);
-      IDFilter::updateProteinGroups(merged_prot_ids[0].getProteinGroups(), merged_prot_ids[0].getHits());
-      IDFilter::updateProteinGroups(merged_prot_ids[0].getIndistinguishableProteins(), merged_prot_ids[0].getHits());
-
       // ------------------------------------------------------------------
       // Build orphan input for the next iteration.
       // Fragment-level mode: post-FDR claim registry; peaks not claimed by
@@ -1882,7 +1874,7 @@ protected:
                 const Size proc_idx = static_cast<Size>(lb - ci_ptr->proc_mzs.begin());
                 if (proc_idx >= ci_ptr->proc_trace_ids.size()) continue;
                 const Int tid = ci_ptr->proc_trace_ids[proc_idx];
-                String label = seq + "-" + pa.annotation;
+                String label = (hit.isDecoy() ? "[DECOY]" : "") + seq + "-" + pa.annotation;
                 if (pa.charge > 1) label += "+" + String(pa.charge);
                 auto it = tid_to_label.find(tid);
                 if (it == tid_to_label.end())
@@ -2005,6 +1997,16 @@ protected:
           MzMLFile().store(iter_out_orphan_mzml, iter_orphan);
         }
       }
+
+      // Decoys that passed FDR were kept through fragment claiming and annotated
+      // mzML output. Remove them now so the idXML contains targets only.
+      IDFilter::removeDecoyHits(merged_prot_ids);
+      IDFilter::removeDecoyHits(merged_peptides);
+      IDFilter::removeEmptyIdentifications(merged_peptides);
+      IDFilter::removeUnreferencedProteins(merged_prot_ids, merged_peptides);
+      IDFilter::removeDanglingProteinReferences(merged_peptides, merged_prot_ids);
+      IDFilter::updateProteinGroups(merged_prot_ids[0].getProteinGroups(), merged_prot_ids[0].getHits());
+      IDFilter::updateProteinGroups(merged_prot_ids[0].getIndistinguishableProteins(), merged_prot_ids[0].getHits());
 
       // --- 5c. Peptide/protein identifications ---
       OPENMS_LOG_INFO << "[diaWeaverPeptide] Writing output: " << iter_out_idxml << std::endl;
