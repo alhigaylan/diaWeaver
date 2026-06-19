@@ -41,6 +41,7 @@
 #include <OpenMS/CONCEPT/Constants.h>
 #include <cmath>
 #include <fstream>
+#include <regex>
 #include <set>
 #include <unordered_set>
 #include <chrono>
@@ -166,6 +167,20 @@ protected:
     return c;
   }
 #endif
+
+  // -------------------------------------------------------------------------
+  // Parse the gene name from a FASTA description line.
+  // Looks for GN=<token> (UniProt standard). Returns empty string if absent.
+  // -------------------------------------------------------------------------
+  static String parseGeneFromDescription_(const String& description)
+  {
+    static const std::regex re_gene("GN=(\\S+)");
+    std::smatch m;
+    const std::string& s = description;
+    if (std::regex_search(s, m, re_gene))
+      return m[1].str();
+    return "";
+  }
 
   // -------------------------------------------------------------------------
   // Run the FeatureFinderPeptide pipeline on a centroided MSExperiment.
@@ -973,6 +988,20 @@ protected:
       }
       OPENMS_LOG_INFO << "[diaWeaverPeptide] Loaded " << fasta_db.size() << " protein sequences." << std::endl;
 
+      // Build accession→gene map from this database (used for tier-gene filtering).
+      std::map<String, String> accession_to_gene;
+      for (const auto& entry : fasta_db)
+      {
+        String gene = parseGeneFromDescription_(entry.description);
+        if (gene.empty())
+          OPENMS_LOG_DEBUG << "[diaWeaverPeptide] No GN= field found for protein '"
+                           << entry.identifier << "'. Tier-gene filter will use an empty gene name for this entry." << std::endl;
+        accession_to_gene[entry.identifier] = std::move(gene);
+      }
+
+      // Restricted DB for tiers 1+: populated after tier-0 FDR when using_tiers is true.
+      std::vector<FASTAFile::FASTAEntry> restricted_fasta_db;
+
       for (Size tier_idx = 0; tier_idx < specificity_tiers.size() && !orphan_exhausted; ++tier_idx)
       {
         // Stop early if the prior step produced no orphan peaks (avoids building index for nothing).
@@ -1006,9 +1035,12 @@ protected:
         prose.setLogType(log_type_);
         prose.setParameters(tier_search_params);
 
+        const std::vector<FASTAFile::FASTAEntry>& tier_db =
+            (tier_idx > 0) ? restricted_fasta_db : fasta_db;
+
         OPENMS_LOG_INFO << "[diaWeaverPeptide] Building fragment index for tier '"
-                        << tier_name << "'..." << std::endl;
-        ProSEAlgorithm::SearchContext ctx = prose.prepareContext(fasta_db);
+                        << tier_name << "' (" << tier_db.size() << " proteins)..." << std::endl;
+        ProSEAlgorithm::SearchContext ctx = prose.prepareContext(tier_db);
         OPENMS_LOG_INFO << "[diaWeaverPeptide] Fragment index built. " << ctx.fragment_index.getPeptides().size()
                         << " peptide entries indexed." << std::endl;
 
@@ -1978,6 +2010,25 @@ protected:
       OPENMS_LOG_INFO << "[diaWeaverPeptide] Writing output: " << iter_out_idxml << std::endl;
       FileHandler().storeIdentifications(iter_out_idxml, merged_prot_ids, merged_peptides,
                                          {FileTypes::IDXML});
+
+      // After the first tier (tryptic), build a gene-restricted database for subsequent tiers.
+      // Proteins whose gene (GN= field) matches any gene identified at FDR are kept.
+      // This avoids building a full semi/nontryptic fragment index over the entire proteome.
+      if (tier_idx == 0 && using_tiers && specificity_tiers.size() > 1)
+      {
+        std::set<String> gene_allowlist;
+        for (const auto& ph : merged_prot_ids[0].getHits())
+          gene_allowlist.insert(accession_to_gene.at(ph.getAccession()));
+
+        for (const auto& entry : fasta_db)
+          if (gene_allowlist.count(accession_to_gene.at(entry.identifier)))
+            restricted_fasta_db.push_back(entry);
+
+        OPENMS_LOG_INFO << "[diaWeaverPeptide] Tier-gene filter: "
+                        << gene_allowlist.size() << " genes → "
+                        << restricted_fasta_db.size() << " proteins retained for tier(s) 2+."
+                        << std::endl;
+      }
 
       } // end for (tier_idx) — inner tier loop
     } // end for (db_idx) — outer database loop
