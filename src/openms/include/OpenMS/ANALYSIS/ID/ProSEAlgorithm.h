@@ -273,8 +273,7 @@ class OPENMS_DLLAPI ProSEAlgorithm :
                      SearchContext& ctx,
                      std::vector<ProteinIdentification>& prot_ids,
                      PeptideIdentificationList& pep_ids,
-                     bool skip_window_filters = false,
-                     bool skip_deisotoping = false) const;
+                     bool skip_window_filters = false) const;
 
     /**
      * @brief In-memory search with iterative fragment claiming (diaWeaverPeptide).
@@ -307,8 +306,7 @@ class OPENMS_DLLAPI ProSEAlgorithm :
                                  PeptideIdentificationList& pep_ids,
                                  FragmentClaimRegistry& out_registry,
                                  PeptideIdentificationList* out_pre_filter_pep_ids = nullptr,
-                                 bool skip_window_filters = true,
-                                 bool skip_deisotoping = false) const;
+                                 bool skip_window_filters = true) const;
 
     /**
      * @brief In-memory search with modification analysis: no file I/O required.
@@ -408,21 +406,14 @@ class OPENMS_DLLAPI ProSEAlgorithm :
 
     /// @brief Filter, deisotope, and sort spectra before database search.
     ///
-    /// ThresholdMower and Normalizer always run.  The two boolean flags give
-    /// independent control over the two destructive filter groups:
+    /// ThresholdMower and Normalizer always run.
     ///
     /// @p skip_window_filters — when true, suppresses WindowMower and NLargest.
     ///   Use for pseudo spectra (DIA mass-trace clusters) where every peak is a
     ///   real ion trace that must not be discarded by a density heuristic.
-    ///
-    /// @p skip_deisotoping — when true, suppresses the Deisotoper and the CSR
-    ///   companion-array construction that follows it.  Set true for the pass-2
-    ///   search in diaWeaverPeptide (spectra are already claimed/cleaned; running
-    ///   the Deisotoper again would remove isotope traces and rebuild stale arrays).
     static void preprocessSpectra_(PeakMap& exp, double fragment_mass_tolerance,
                                     bool fragment_mass_tolerance_unit_ppm,
-                                    bool skip_window_filters = false,
-                                    bool skip_deisotoping = false);
+                                    bool skip_window_filters = false);
 
     /**
      * @brief Build a decoy-augmented copy of the input FASTA.

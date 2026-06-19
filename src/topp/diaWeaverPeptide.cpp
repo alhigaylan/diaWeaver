@@ -478,13 +478,8 @@ protected:
 
     registerFlag_("skip_density_filters",
       "Skip WindowMower and NLargest during spectrum preprocessing. "
-      "Deisotoping is unaffected by this flag and is always applied unless "
-      "-skip_deisotoping is also set. "
       "Use when spectra are pre-built pseudo spectra (e.g., from a previous diaWeaverPeptide run) "
       "where every peak is a real ion trace that must not be removed before the claiming step.");
-    registerFlag_("skip_deisotoping",
-      "Skip the Deisotoper during spectrum preprocessing. "
-      "Use for evaluation or when isotope patterns are unreliable.");
     registerFlag_("spectrum_level_orphan",
       "Use spectrum-level orphan strategy instead of the default fragment-level strategy. "
       "Fragment-level (default): orphan peaks are individual fragment ions not claimed by any "
@@ -862,7 +857,6 @@ protected:
     search_params.setValue("FDR:protein", 0.0);
 
     const bool skip_density_filters_   = getFlag_("skip_density_filters");
-    const bool skip_deisotoping_       = getFlag_("skip_deisotoping");
     const bool spectrum_level_orphan   = getFlag_("spectrum_level_orphan");
 
 #ifdef _OPENMP
@@ -884,9 +878,6 @@ protected:
       std::vector<double>          proc_mzs;
       MSSpectrum::IntegerDataArray proc_trace_ids;
       MSSpectrum::IntegerDataArray proc_window_ids;
-      MSSpectrum::IntegerDataArray offsets;
-      MSSpectrum::IntegerDataArray trace_ids;
-      MSSpectrum::IntegerDataArray window_ids;
     };
 
     // ------------------------------------------------------------------
@@ -1321,7 +1312,7 @@ protected:
       if (spectrum_level_orphan)
       {
         ec = prose.search(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
-                          skip_density_filters_, skip_deisotoping_);
+                          skip_density_filters_);
       }
       else
       {
@@ -1329,7 +1320,7 @@ protected:
         PeptideIdentificationList window_debug_pep_ids;
         ec = prose.searchWithClaiming(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
                                       window_registry, &window_debug_pep_ids,
-                                      skip_density_filters_, skip_deisotoping_);
+                                      skip_density_filters_);
 #pragma omp critical (collect_pseudo_spectra)
         {
           debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
@@ -1354,11 +1345,8 @@ protected:
           for (const auto& pk : spec) ci.proc_mzs.push_back(pk.getMZ());
           for (const auto& arr : spec.getIntegerDataArrays())
           {
-            if      (arr.getName() == "fragment_trace_id")    ci.proc_trace_ids = arr;
-            else if (arr.getName() == "fragment_window_id")   ci.proc_window_ids = arr;
-            else if (arr.getName() == "companion_offsets")    ci.offsets         = arr;
-            else if (arr.getName() == "companion_trace_ids")  ci.trace_ids       = arr;
-            else if (arr.getName() == "companion_window_ids") ci.window_ids      = arr;
+            if      (arr.getName() == "fragment_trace_id")  ci.proc_trace_ids  = arr;
+            else if (arr.getName() == "fragment_window_id") ci.proc_window_ids = arr;
           }
           if (!ci.proc_trace_ids.empty())
             all_companion_info[spec.getNativeID()] = std::move(ci);
@@ -1522,11 +1510,8 @@ protected:
             for (const auto& pk : spec) ci.proc_mzs.push_back(pk.getMZ());
             for (const auto& arr : spec.getIntegerDataArrays())
             {
-              if      (arr.getName() == "fragment_trace_id")    ci.proc_trace_ids = arr;
-              else if (arr.getName() == "fragment_window_id")   ci.proc_window_ids = arr;
-              else if (arr.getName() == "companion_offsets")    ci.offsets         = arr;
-              else if (arr.getName() == "companion_trace_ids")  ci.trace_ids       = arr;
-              else if (arr.getName() == "companion_window_ids") ci.window_ids      = arr;
+              if      (arr.getName() == "fragment_trace_id")  ci.proc_trace_ids  = arr;
+              else if (arr.getName() == "fragment_window_id") ci.proc_window_ids = arr;
             }
             if (!ci.proc_trace_ids.empty())
               all_companion_info[spec.getNativeID()] = std::move(ci);
