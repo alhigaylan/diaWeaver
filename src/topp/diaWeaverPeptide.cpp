@@ -397,6 +397,16 @@ protected:
       "appending '_N' (1-based) before the file extension of each -out_* argument.");
     setValidFormats_("database", ListUtils::create<String>("fasta"));
 
+    registerStringList_("specificity_tiers", "<list>", StringList(),
+      "Ordered list of peptide specificity tiers for multi-tier searching within each database. "
+      "When provided, each database in -database is searched once per tier in the given order, "
+      "with each tier consuming the orphan peaks produced by the prior tier. The first tier must "
+      "be 'tryptic'. Outputs are named {db}_{tier}_{label} (e.g. out_1_1_tryptic.idXML). "
+      "Valid values: tryptic, semitryptic-only, nontryptic-only. "
+      "When absent, a single search per database is performed using Search:peptide:enzyme_specificity "
+      "and the existing _N output naming is preserved.", false);
+    setValidStrings_("specificity_tiers", {"tryptic", "semitryptic-only", "nontryptic-only"});
+
     // Output
     registerOutputFile_("out_idxml", "<file>", "",
       "Merged output idXML with cross-window protein inference and FDR filtering. "
@@ -766,10 +776,53 @@ protected:
       return ILLEGAL_PARAMETERS;
     }
 
+    // Resolve -specificity_tiers. When provided, validate and use; otherwise fall back to a
+    // single-element list representing the current Search:peptide:enzyme_specificity setting.
+    StringList specificity_tiers = getStringList_("specificity_tiers");
+    const bool using_tiers = !specificity_tiers.empty();
+
+    if (using_tiers)
+    {
+      if (specificity_tiers[0] != "tryptic")
+      {
+        OPENMS_LOG_ERROR << "[diaWeaverPeptide] The first element of -specificity_tiers must be "
+                         << "'tryptic'. Got: '" << specificity_tiers[0] << "'." << std::endl;
+        return ILLEGAL_PARAMETERS;
+      }
+    }
+    else
+    {
+      // No tiers specified: single search using the existing enzyme_specificity setting.
+      // The tier_name is only used for logging; output naming uses the legacy _N scheme.
+      specificity_tiers = {getParam_().copy("Search:", true).getValue("peptide:enzyme_specificity").toString()};
+    }
+
+    // Translates a user-facing tier name to the value FragmentIndex understands.
+    auto tierToSpecificity = [](const String& tier_name) -> String {
+      if (tier_name == "tryptic") return "full";
+      return tier_name; // "semitryptic-only" and "nontryptic-only" are already valid FragmentIndex values
+    };
+
+    // Derive per-step output path. Dispatches to the legacy _N scheme or the new _N_M_label scheme.
+    auto makeOutputName = [&](const String& path, Size db_idx, Size tier_idx, const String& tier_label) -> String {
+      if (using_tiers) return makeStepName(path, db_idx, tier_idx, tier_label);
+      return makeIterName(path, db_idx);
+    };
+
     // Derive per-iteration output path by inserting "_N" (1-based) before the extension.
-    auto makeIterName = [](const String& path, Size iter_idx) -> String {
+    // Legacy naming: _N (1-based database index). Used when -specificity_tiers is absent.
+    auto makeIterName = [](const String& path, Size db_idx) -> String {
       if (path.empty()) return path;
-      const String suffix = "_" + String(iter_idx + 1);
+      const String suffix = "_" + String(db_idx + 1);
+      const size_t dot = path.find_last_of('.');
+      if (dot == String::npos) return path + suffix;
+      return path.substr(0, dot) + suffix + path.substr(dot);
+    };
+
+    // Tier naming: _N_M_label (1-based database and tier indices). Used when -specificity_tiers is provided.
+    auto makeStepName = [](const String& path, Size db_idx, Size tier_idx, const String& tier_label) -> String {
+      if (path.empty()) return path;
+      const String suffix = "_" + String(db_idx + 1) + "_" + String(tier_idx + 1) + "_" + tier_label;
       const size_t dot = path.find_last_of('.');
       if (dot == String::npos) return path + suffix;
       return path.substr(0, dot) + suffix + path.substr(dot);
@@ -898,27 +951,24 @@ protected:
 #endif
     }
 
-    // Orphan spectra carried between iterations (empty before iteration 0).
+    // Orphan spectra carried between all search steps (empty before step 0).
     MSExperiment iter_orphan;
+    bool orphan_exhausted = false;
+    Size global_step = 0;
 
     // ------------------------------------------------------------------
-    // Outer database iteration loop.
+    // Outer database loop / inner tier loop.
+    // FASTA is loaded once per database. The fragment index is rebuilt once
+    // per tier with the tier-specific enzyme specificity.
     // ------------------------------------------------------------------
-    for (Size iter = 0; iter < databases.size(); ++iter)
+    for (Size db_idx = 0; db_idx < databases.size() && !orphan_exhausted; ++db_idx)
     {
-      const String& database = databases[iter];
-      OPENMS_LOG_INFO << "[diaWeaverPeptide] === Iteration " << (iter + 1)
+      const String& database = databases[db_idx];
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] === Database " << (db_idx + 1)
                       << " / " << databases.size()
-                      << " — database: " << database << " ===" << std::endl;
+                      << " — " << database << " ===" << std::endl;
 
-      const String iter_out_idxml          = makeIterName(out_idxml, iter);
-      const String iter_out_orphan_mzml    = makeIterName(out_orphan_mzml, iter);
-      const String iter_out_annotated_mzml = makeIterName(out_annotated_mzml, iter);
-      const String iter_out_debug_tsv      = makeIterName(out_debug_tsv, iter);
-
-      // ------------------------------------------------------------------
-      // Step 1: Load FASTA and build the ProSE SearchContext for this iteration.
-      // ------------------------------------------------------------------
+      // Step 1: Load FASTA once for this database (shared across all tiers).
       OPENMS_LOG_INFO << "[diaWeaverPeptide] Loading FASTA database: " << database << std::endl;
       std::vector<FASTAFile::FASTAEntry> fasta_db;
       FASTAFile().load(database, fasta_db);
@@ -930,24 +980,54 @@ protected:
       }
       OPENMS_LOG_INFO << "[diaWeaverPeptide] Loaded " << fasta_db.size() << " protein sequences." << std::endl;
 
-      ProSEAlgorithm prose;
-      prose.setLogType(log_type_);
-      prose.setParameters(search_params);
+      for (Size tier_idx = 0; tier_idx < specificity_tiers.size() && !orphan_exhausted; ++tier_idx)
+      {
+        // Stop early if the prior step produced no orphan peaks (avoids building index for nothing).
+        if (global_step > 0 && iter_orphan.empty())
+        {
+          OPENMS_LOG_INFO << "[diaWeaverPeptide] No orphan spectra remaining after step "
+                          << global_step << ". Stopping early." << std::endl;
+          orphan_exhausted = true;
+          break;
+        }
 
-      OPENMS_LOG_INFO << "[diaWeaverPeptide] Building fragment index (shared across all windows)..." << std::endl;
-      ProSEAlgorithm::SearchContext ctx = prose.prepareContext(fasta_db);
-      OPENMS_LOG_INFO << "[diaWeaverPeptide] Fragment index built. " << ctx.fragment_index.getPeptides().size()
-                      << " peptide entries indexed." << std::endl;
+        const String& tier_name        = specificity_tiers[tier_idx];
+        const String  tier_specificity = tierToSpecificity(tier_name);
+
+        OPENMS_LOG_INFO << "[diaWeaverPeptide] === Step " << (global_step + 1)
+                        << " — database " << (db_idx + 1) << "/" << databases.size()
+                        << ", tier " << (tier_idx + 1) << "/" << specificity_tiers.size()
+                        << " (" << tier_name << ") ===" << std::endl;
+
+        const String iter_out_idxml          = makeOutputName(out_idxml,          db_idx, tier_idx, tier_name);
+        const String iter_out_orphan_mzml    = makeOutputName(out_orphan_mzml,    db_idx, tier_idx, tier_name);
+        const String iter_out_annotated_mzml = makeOutputName(out_annotated_mzml, db_idx, tier_idx, tier_name);
+        const String iter_out_debug_tsv      = makeOutputName(out_debug_tsv,       db_idx, tier_idx, tier_name);
+
+        // Step 2: Build the fragment index for this tier with the tier-specific specificity.
+        Param tier_search_params = search_params;
+        if (using_tiers)
+          tier_search_params.setValue("peptide:enzyme_specificity", tier_specificity);
+
+        ProSEAlgorithm prose;
+        prose.setLogType(log_type_);
+        prose.setParameters(tier_search_params);
+
+        OPENMS_LOG_INFO << "[diaWeaverPeptide] Building fragment index for tier '"
+                        << tier_name << "'..." << std::endl;
+        ProSEAlgorithm::SearchContext ctx = prose.prepareContext(fasta_db);
+        OPENMS_LOG_INFO << "[diaWeaverPeptide] Fragment index built. " << ctx.fragment_index.getPeptides().size()
+                        << " peptide entries indexed." << std::endl;
 
       // ------------------------------------------------------------------
       // Step 2 onwards: per-window preprocessing + search.
       // Three modes:
-      //   Normal mode  (iter 0, -in):        raw DIA → pseudo spectra → ProSE
-      //   Bypass mode  (iter 0, -in_pseudo): pre-built file → ProSE
-      //   Bypass mode  (iter > 0):           in-memory orphan from prior iter → ProSE
+      //   Normal mode  (step 0, -in):        raw DIA → pseudo spectra → ProSE
+      //   Bypass mode  (step 0, -in_pseudo): pre-built file → ProSE
+      //   Bypass mode  (step > 0):           in-memory orphan from prior step → ProSE
       // ------------------------------------------------------------------
 
-      // Per-iteration accumulators (reset each iteration).
+      // Per-step accumulators (reset each step).
       std::vector<std::vector<ProteinIdentification>> all_prot_ids;
       std::vector<PeptideIdentificationList> all_pep_ids;
       std::unordered_map<String, MSSpectrum> all_pseudo_spectra;
@@ -958,10 +1038,10 @@ protected:
       Size total_pseudo_spectra = 0;
       Size total_windows = 0;
 
-      // Plain consumer for pseudo spectra mzML: only for iteration 0 (raw DIA mode).
+      // Plain consumer for pseudo spectra mzML: only for step 0 (raw DIA mode).
       const String input_source = in.empty() ? in_pseudo : in;
       std::unique_ptr<PlainMSDataWritingConsumer> plain_consumer;
-      if (iter == 0 && !out_mzml.empty())
+      if (global_step == 0 && !out_mzml.empty())
       {
         plain_consumer = std::make_unique<PlainMSDataWritingConsumer>(out_mzml);
         plain_consumer->setExpectedSize(0, 0);
@@ -973,10 +1053,10 @@ protected:
         plain_consumer->setExperimentalSettings(es);
       }
 
-      if (iter == 0 && in_pseudo.empty())
+      if (global_step == 0 && in_pseudo.empty())
       {
         // ----------------------------------------------------------------
-        // Normal mode (iteration 0 only): raw DIA processing pipeline.
+        // Normal mode (step 0 only): raw DIA processing pipeline.
         // Window map and on-disc experiment were determined before the loop.
         // ----------------------------------------------------------------
 
@@ -1319,15 +1399,15 @@ protected:
           omp_set_num_threads(total_threads);
 #endif
 
-      } // end if (iter == 0 && in_pseudo.empty()) — normal mode
+      } // end if (global_step == 0 && in_pseudo.empty()) — normal mode
       else
       {
         // ----------------------------------------------------------------
         // Bypass mode: search pre-built pseudo spectra directly.
-        // Source: -in_pseudo file (iter 0) or in-memory orphan (iter > 0).
+        // Source: -in_pseudo file (step 0) or in-memory orphan (step > 0).
         // ----------------------------------------------------------------
         PeakMap pseudo_source;
-        if (iter == 0)
+        if (global_step == 0)
         {
           OPENMS_LOG_INFO << "[diaWeaverPeptide] Bypass mode: loading pre-built pseudo spectra from "
                           << in_pseudo << std::endl;
@@ -1341,14 +1421,9 @@ protected:
         }
         else
         {
-          if (iter_orphan.empty())
-          {
-            OPENMS_LOG_INFO << "[diaWeaverPeptide] No orphan spectra remaining after iteration "
-                            << iter << ". Stopping early." << std::endl;
-            break;
-          }
+          // iter_orphan non-emptiness is guaranteed by the check at the top of the tier loop.
           OPENMS_LOG_INFO << "[diaWeaverPeptide] Bypass mode: using " << iter_orphan.size()
-                          << " orphan spectra from iteration " << iter << " as input." << std::endl;
+                          << " orphan spectra from step " << global_step << " as input." << std::endl;
           for (const auto& spec : iter_orphan)
             pseudo_source.addSpectrum(spec);
         }
@@ -1369,7 +1444,7 @@ protected:
           if (window_id < 0)
             throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
                 "Spectrum '" + spec.getNativeID() + "' in '" +
-                (iter == 0 ? in_pseudo : String("orphan from iteration ") + String(iter)) +
+                (global_step == 0 ? in_pseudo : String("orphan from step ") + String(global_step)) +
                 "' is missing 'fragment_window_id' IntegerDataArray.");
           window_groups[window_id].addSpectrum(spec);
         }
@@ -1491,10 +1566,12 @@ protected:
       OPENMS_LOG_INFO << "[diaWeaverPeptide] All " << processed << " windows processed. "
                       << total_pseudo_spectra << " pseudo spectra searched across all windows." << std::endl;
 
+      ++global_step;
+
       if (all_pep_ids.empty())
       {
-        OPENMS_LOG_WARN << "[diaWeaverPeptide] No PSMs identified across any window for iteration "
-                        << (iter + 1) << ". Writing empty output." << std::endl;
+        OPENMS_LOG_WARN << "[diaWeaverPeptide] No PSMs identified across any window for step "
+                        << global_step << ". Writing empty output." << std::endl;
         std::vector<ProteinIdentification> empty_prot;
         PeptideIdentificationList empty_pep;
         FileHandler().storeIdentifications(iter_out_idxml, empty_prot, empty_pep, {FileTypes::IDXML});
@@ -1717,9 +1794,9 @@ protected:
       }
 
       // ------------------------------------------------------------------
-      // Step 5: Write per-iteration outputs.
+      // Step 5: Write per-step outputs.
       // ------------------------------------------------------------------
-      OPENMS_LOG_INFO << "[diaWeaverPeptide] Final result (iteration " << (iter + 1) << "): "
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] Final result (step " << global_step << "): "
                       << merged_peptides.size() << " PSMs, "
                       << merged_prot_ids[0].getHits().size() << " proteins." << std::endl;
 
@@ -1915,7 +1992,8 @@ protected:
       FileHandler().storeIdentifications(iter_out_idxml, merged_prot_ids, merged_peptides,
                                          {FileTypes::IDXML});
 
-    } // end for (iter) — outer database iteration loop
+      } // end for (tier_idx) — inner tier loop
+    } // end for (db_idx) — outer database loop
 
     auto end_time = std::chrono::high_resolution_clock::now();
     auto duration = std::chrono::duration_cast<std::chrono::seconds>(end_time - start_time);
