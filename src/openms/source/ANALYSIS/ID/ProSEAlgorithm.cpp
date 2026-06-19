@@ -157,13 +157,13 @@ namespace OpenMS
     defaults_.setValue("peptide:missed_cleavages", 1, "Number of missed cleavages.");
     defaults_.setValue("peptide:enzyme_specificity", "full",
       "Enzyme cleavage specificity required for both peptide termini.\n"
-      "  'full' : both termini must be enzyme-specific (canonical, e.g. tryptic).\n"
-      "  'semi' : only one terminus needs to be enzyme-specific (semi-tryptic).\n"
-      "  'none' : no enzyme constraint at either terminus; every substring of length\n"
-      "           [min_size, max_size] is enumerated. Use this for immunopeptidomics\n"
-      "           (e.g. HLA peptides 8..12mers). For very large search spaces consider\n"
-      "           tightening 'peptide:min_size'/'peptide:max_size'.");
-    defaults_.setValidStrings("peptide:enzyme_specificity", {"full", "semi", "none"});
+      "  'full'             : both termini must be enzyme-specific (canonical, e.g. tryptic).\n"
+      "  'semi'             : at least one terminus must be enzyme-specific (includes fully-specific).\n"
+      "  'semitryptic-only' : exactly one terminus is enzyme-specific; fully-specific products excluded.\n"
+      "  'none'             : no enzyme constraint; every substring of length [min_size, max_size]\n"
+      "                       is enumerated (immunopeptidomics / HLA).\n"
+      "  'nontryptic-only'  : neither terminus is enzyme-specific; semi- and fully-specific products excluded.");
+    defaults_.setValidStrings("peptide:enzyme_specificity", {"full", "semi", "semitryptic-only", "none", "nontryptic-only"});
     defaults_.setValue("peptide:motif", "", "If set, only peptides that contain this motif (provided as RegEx) will be considered.");
     defaults_.setSectionDescription("peptide", "Peptide Options");
 
@@ -786,7 +786,8 @@ namespace OpenMS
       for (size_t i = 0; i != old_size; ++i)
       {
         FASTAFile::FASTAEntry e = db[i];
-        if (peptide_enzyme_specificity_ == EnzymaticDigestion::SPEC_NONE)
+        if (peptide_enzyme_specificity_ == EnzymaticDigestion::SPEC_NONE ||
+            peptide_enzyme_specificity_ == EnzymaticDigestion::SPEC_NONE_EXCLUSIVE)
           e.sequence = decoy_generator.reverseProtein(AASequence::fromString(e.sequence)).toString();
         else
           e.sequence = decoy_generator.reversePeptides(AASequence::fromString(e.sequence), enzyme_).toString();
