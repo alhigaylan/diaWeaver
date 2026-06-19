@@ -863,8 +863,9 @@ namespace OpenMS
 
     // build fragment index
     startProgress(0, 1, "Building fragment index...");
-    auto this_params = getParameters();
-    ctx.fragment_index.setParameters(this_params);
+    Param fi_params = ctx.fragment_index.getDefaults();
+    fi_params.update(getParameters(), /*add_unknown=*/false);
+    ctx.fragment_index.setParameters(fi_params);
     ctx.fragment_index.build(ctx.db);
     endProgress();
 
@@ -1070,7 +1071,9 @@ namespace OpenMS
       ctx.db = std::move(full_db);
       ctx.release_fragment_index_after_scoring = true; // single-use ctx (M1)
       startProgress(0, 1, "Building fragment index...");
-      ctx.fragment_index.setParameters(getParameters());
+      Param fi_params = ctx.fragment_index.getDefaults();
+      fi_params.update(getParameters(), /*add_unknown=*/false);
+      ctx.fragment_index.setParameters(fi_params);
       ctx.fragment_index.build(ctx.db);
       endProgress();
       return search(spectra, ctx, protein_ids, peptide_ids);
