@@ -794,8 +794,10 @@ protected:
 
     // Translates a user-facing tier name to the value FragmentIndex understands.
     auto tierToSpecificity = [](const String& tier_name) -> String {
-      if (tier_name == "tryptic") return "full";
-      return tier_name; // "semitryptic-only" and "nontryptic-only" are already valid FragmentIndex values
+      if (tier_name == "tryptic")        return "full";
+      if (tier_name == "semitryptic-only") return "semi";
+      if (tier_name == "nontryptic-only")  return "none";
+      return tier_name;
     };
 
     // Derive per-iteration output path by inserting "_N" (1-based) before the extension.
