@@ -577,9 +577,15 @@ namespace OpenMS
     std::sort(feat_hypos.begin(), feat_hypos.end(), CmpHypothesesByScore());
 
     // Remove hypotheses that don't meet the minimum isotope trace count.
+    // Single-trace (charge-0) hypotheses are exempted when remove_single_traces_ is false:
+    // minimum_isotopes_nr_ is a quality gate for assembled multi-isotope features, not for
+    // unassembled single traces whose retention is controlled by remove_single_traces_.
     feat_hypos.erase(
       std::remove_if(feat_hypos.begin(), feat_hypos.end(),
-        [this](const FeatureHypothesis& fh) { return fh.getSize() < minimum_isotopes_nr_; }),
+        [this](const FeatureHypothesis& fh) {
+          if (!remove_single_traces_ && fh.getCharge() == 0) return false;
+          return fh.getSize() < minimum_isotopes_nr_;
+        }),
       feat_hypos.end());
 
     // Compute the score threshold at hypothesis_score_quantile_.
