@@ -501,7 +501,13 @@ protected:
       "FDR-passing PSM; hyperscores are recalculated competitively within each DIA window. "
       "Spectrum-level: entire pseudo spectra with no FDR-passing PSM are passed to the next "
       "iteration intact; each spectrum is scored independently with no hyperscore recalculation. "
-      "This matches the conventional multi-stage database search approach used in the field.");
+      "This matches the conventional multi-stage database search approach used in the field. "
+      "Mutually exclusive with -remove_fragments_and_psms.");
+    registerFlag_("remove_fragments_and_psms",
+      "Combined orphan strategy: remove entire pseudo spectra that have at least one FDR-passing PSM "
+      "(spectrum-level removal) AND remove claimed fragment ions from the remaining unidentified pseudo "
+      "spectra (fragment-level removal). Requires fragment claiming internally; mutually exclusive with "
+      "-spectrum_level_orphan. This is the most aggressive signal-cleaning strategy.");
 
 #ifdef WITH_OPENTIMS
     registerTOPPSubsection_("bruker", "Options for reading Bruker TimsTOF .d files (requires WITH_OPENTIMS)");
@@ -875,8 +881,16 @@ protected:
     search_params.setValue("FDR:PSM",     0.0);
     search_params.setValue("FDR:protein", 0.0);
 
-    const bool skip_density_filters_   = getFlag_("skip_density_filters");
-    const bool spectrum_level_orphan   = getFlag_("spectrum_level_orphan");
+    const bool skip_density_filters_     = getFlag_("skip_density_filters");
+    const bool spectrum_level_orphan     = getFlag_("spectrum_level_orphan");
+    const bool remove_fragments_and_psms = getFlag_("remove_fragments_and_psms");
+
+    if (spectrum_level_orphan && remove_fragments_and_psms)
+    {
+      OPENMS_LOG_ERROR << "[diaWeaverPeptide] -spectrum_level_orphan and -remove_fragments_and_psms "
+                       << "are mutually exclusive. Choose one orphan strategy." << std::endl;
+      return ILLEGAL_PARAMETERS;
+    }
 
 #ifdef _OPENMP
     const int num_threads = getIntOption_("threads");
@@ -1345,7 +1359,7 @@ protected:
       PeptideIdentificationList window_pep_ids;
 
       ProSEAlgorithm::ExitCodes ec;
-      if (spectrum_level_orphan)
+      if (spectrum_level_orphan && !remove_fragments_and_psms)
       {
         ec = prose.search(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
                           skip_density_filters_);
@@ -1513,7 +1527,7 @@ protected:
         PeptideIdentificationList window_pep_ids;
 
         ProSEAlgorithm::ExitCodes ec;
-        if (spectrum_level_orphan)
+        if (spectrum_level_orphan && !remove_fragments_and_psms)
         {
           ec = prose.search(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
                             true);
@@ -1773,9 +1787,9 @@ protected:
       //   spectra with no FDR-passing PSM go into iter_orphan intact.
       // ------------------------------------------------------------------
 
-      // Fragment-level: claim registry (unused in spectrum_level_orphan mode).
+      // Fragment-level: claim registry (unused in pure spectrum_level_orphan mode).
       FragmentClaimRegistry post_fdr_claimed;
-      if (!spectrum_level_orphan)
+      if (!spectrum_level_orphan || remove_fragments_and_psms)
       {
         for (const auto& pi : merged_peptides)
         {
@@ -1957,9 +1971,60 @@ protected:
                           << "(of " << all_pseudo_spectra.size() << " total, "
                           << identified_ids.size() << " identified at FDR)." << std::endl;
         }
+        else if (remove_fragments_and_psms)
+        {
+          // Combined: drop entire identified pseudo spectra AND remove claimed fragment ions
+          // from the remaining unidentified pseudo spectra.
+          std::unordered_set<String> identified_ids;
+          for (const auto& pi : merged_peptides)
+            if (!pi.getSpectrumReference().empty())
+              identified_ids.insert(pi.getSpectrumReference());
+
+          Size n_dropped_spectra = 0;
+          for (const auto& [native_id, orig] : all_pseudo_spectra)
+          {
+            if (identified_ids.count(native_id))
+            {
+              ++n_dropped_spectra;
+              continue;
+            }
+
+            const auto [trace_id_arr, window_id_arr] = getTraceArrays(orig);
+
+            MSSpectrum orphan_spec;
+            orphan_spec.setNativeID(native_id);
+            orphan_spec.setRT(orig.getRT());
+            orphan_spec.setMSLevel(2);
+            if (!orig.getPrecursors().empty())
+              orphan_spec.getPrecursors() = orig.getPrecursors();
+
+            MSSpectrum::IntegerDataArray out_tid; out_tid.setName("fragment_trace_id");
+            MSSpectrum::IntegerDataArray out_wid; out_wid.setName("fragment_window_id");
+
+            for (Size i = 0; i < orig.size(); ++i)
+            {
+              const auto key = FragmentClaimRegistry::makeKey((*window_id_arr)[i], (*trace_id_arr)[i]);
+              if (post_fdr_claimed.isClaimed(key)) continue;
+              orphan_spec.push_back(orig[i]);
+              out_tid.push_back((*trace_id_arr)[i]);
+              out_wid.push_back((*window_id_arr)[i]);
+            }
+
+            if (orphan_spec.empty()) continue;
+            if (!out_tid.empty()) orphan_spec.getIntegerDataArrays().push_back(std::move(out_tid));
+            if (!out_wid.empty()) orphan_spec.getIntegerDataArrays().push_back(std::move(out_wid));
+            iter_orphan.addSpectrum(std::move(orphan_spec));
+          }
+
+          OPENMS_LOG_INFO << "[diaWeaverPeptide] Combined orphan: "
+                          << n_dropped_spectra << " identified pseudo spectra removed, "
+                          << iter_orphan.size() << " unidentified pseudo spectra retained "
+                          << "(of " << all_pseudo_spectra.size() << " total) with claimed fragments stripped."
+                          << std::endl;
+        }
         else
         {
-          // Fragment-level: retain peaks not claimed by any FDR-passing PSM.
+          // Fragment-level (default): retain peaks not claimed by any FDR-passing PSM.
           for (const auto& [native_id, orig] : all_pseudo_spectra)
           {
             const auto [trace_id_arr, window_id_arr] = getTraceArrays(orig);
