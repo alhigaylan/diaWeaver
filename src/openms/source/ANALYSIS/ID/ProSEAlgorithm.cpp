@@ -1248,13 +1248,23 @@ namespace OpenMS
     endProgress();
 
     // 7. PeptideIndexing against the FULL database (not per-chunk).
+    // PeptideIndexing does not support exclusive variants; map them to inclusive.
+    // See the non-chunked path for rationale.
     PeptideIndexing indexer;
     Param param_pi = indexer.getParameters();
     param_pi.setValue("decoy_string", decoy_prefix_);
     param_pi.setValue("decoy_string_position", "prefix");
     param_pi.setValue("enzyme:name", enzyme_);
-    param_pi.setValue("enzyme:specificity",
-                      EnzymaticDigestion::NamesOfSpecificity[peptide_enzyme_specificity_]);
+    {
+      String pi_spec;
+      if (peptide_enzyme_specificity_ == EnzymaticDigestion::SPEC_SEMI_EXCLUSIVE)
+        pi_spec = "semi";
+      else if (peptide_enzyme_specificity_ == EnzymaticDigestion::SPEC_NONE_EXCLUSIVE)
+        pi_spec = "none";
+      else
+        pi_spec = EnzymaticDigestion::NamesOfSpecificity[peptide_enzyme_specificity_];
+      param_pi.setValue("enzyme:specificity", pi_spec);
+    }
     param_pi.setValue("missing_decoy_action", "silent");
     indexer.setParameters(param_pi);
 
@@ -1517,13 +1527,25 @@ namespace OpenMS
     // The PeptideIndexer drops peptides whose termini do not match the configured
     // specificity, so it must agree with the search-time setting — otherwise
     // semi-specific / non-specific PSMs would be silently filtered out here.
+    // PeptideIndexing does not support the exclusive variants ("semitryptic-only",
+    // "nontryptic-only"). Map them to their inclusive counterparts: exclusivity was
+    // already enforced during FragmentIndex digestion, so no tryptic peptides exist
+    // in the PSM list — passing "semi"/"none" here is safe and correct.
     PeptideIndexing indexer;
     Param param_pi = indexer.getParameters();
     param_pi.setValue("decoy_string", decoy_prefix_);
     param_pi.setValue("decoy_string_position", "prefix");
     param_pi.setValue("enzyme:name", enzyme_);
-    param_pi.setValue("enzyme:specificity",
-                      EnzymaticDigestion::NamesOfSpecificity[peptide_enzyme_specificity_]);
+    {
+      String pi_spec;
+      if (peptide_enzyme_specificity_ == EnzymaticDigestion::SPEC_SEMI_EXCLUSIVE)
+        pi_spec = "semi";
+      else if (peptide_enzyme_specificity_ == EnzymaticDigestion::SPEC_NONE_EXCLUSIVE)
+        pi_spec = "none";
+      else
+        pi_spec = EnzymaticDigestion::NamesOfSpecificity[peptide_enzyme_specificity_];
+      param_pi.setValue("enzyme:specificity", pi_spec);
+    }
     param_pi.setValue("missing_decoy_action", "silent");
     indexer.setParameters(param_pi);
 

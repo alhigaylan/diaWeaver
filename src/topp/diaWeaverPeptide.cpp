@@ -813,14 +813,12 @@ protected:
       specificity_tiers = {getParam_().copy("Search:", true).getValue("peptide:enzyme_specificity").toString()};
     }
 
-    // Translates a user-facing tier name to the value FragmentIndex understands.
-    // "semitryptic-only" and "nontryptic-only" are passed verbatim: FragmentIndex maps them to
-    // SPEC_SEMI_EXCLUSIVE and SPEC_NONE_EXCLUSIVE respectively, which exclude fully-tryptic
-    // products from the index. Do NOT map them to "semi"/"none" — those are non-exclusive
-    // supersets that include fully-tryptic peptides and defeat the purpose of tiered search.
+    // Translates a user-facing tier name to the ProSEAlgorithm enzyme_specificity value.
+    // ProSEAlgorithm and FragmentIndex both accept "semitryptic-only" and "nontryptic-only"
+    // natively and build an exclusive peptide index for them (tryptic peptides excluded).
     auto tierToSpecificity = [](const String& tier_name) -> String {
       if (tier_name == "tryptic") return "full";
-      return tier_name; // "semitryptic-only" and "nontryptic-only" are already valid FragmentIndex values
+      return tier_name; // "semitryptic-only" and "nontryptic-only" are valid ProSEAlgorithm values
     };
 
     // Derive per-iteration output path by inserting "_N" (1-based) before the extension.
