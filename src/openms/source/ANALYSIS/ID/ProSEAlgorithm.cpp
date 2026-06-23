@@ -1091,7 +1091,8 @@ namespace OpenMS
       PeakMap& spectra,
       std::vector<FASTAFile::FASTAEntry>& full_db,
       vector<ProteinIdentification>& protein_ids,
-      PeptideIdentificationList& peptide_ids) const
+      PeptideIdentificationList& peptide_ids,
+      bool skip_window_filters) const
   {
     const Size n_chunks = (full_db.size() + database_chunk_size_ - 1) / database_chunk_size_;
     OPENMS_LOG_INFO << "[ProSE] Database chunking enabled: " << full_db.size()
@@ -1100,7 +1101,7 @@ namespace OpenMS
 
     bool fragment_mass_tolerance_unit_ppm = (fragment_mass_tolerance_unit_ == "ppm");
     bool open_search_mode = isOpenSearchMode_();
-    preprocessSpectra_(spectra, fragment_mass_tolerance_, fragment_mass_tolerance_unit_ppm);
+    preprocessSpectra_(spectra, fragment_mass_tolerance_, fragment_mass_tolerance_unit_ppm, skip_window_filters);
 
     // Effective tolerances — may be narrowed by calibration below. Kept asymmetric
     // (lower / upper separately) so the FragmentIndex query can exploit the full
@@ -1633,7 +1634,68 @@ namespace OpenMS
     // so all PSMs survive into peptide_ids for claiming.
     ExitCodes ec = search(pseudo_spectra, ctx, protein_ids, peptide_ids, skip_window_filters);
     if (ec != ExitCodes::EXECUTION_OK) return ec;
+    return applyClaimingPass_(pseudo_spectra, peptide_ids, out_registry, out_pre_filter_pep_ids);
+  }
 
+  // =====================================================================
+  // searchWithClaiming overload: accepts raw FASTA, handles chunking.
+  // =====================================================================
+  ProSEAlgorithm::ExitCodes ProSEAlgorithm::searchWithClaiming(
+      PeakMap& pseudo_spectra,
+      const std::vector<FASTAFile::FASTAEntry>& fasta_db,
+      vector<ProteinIdentification>& protein_ids,
+      PeptideIdentificationList& peptide_ids,
+      FragmentClaimRegistry& out_registry,
+      PeptideIdentificationList* out_pre_filter_pep_ids,
+      bool skip_window_filters) const
+  {
+    // Chunking disabled → single-context path; delegate entirely.
+    if (database_chunk_size_ == 0)
+    {
+      SearchContext ctx = prepareContext(fasta_db);
+      ctx.release_fragment_index_after_scoring = true;
+      return searchWithClaiming(pseudo_spectra, ctx, protein_ids, peptide_ids,
+                                out_registry, out_pre_filter_pep_ids, skip_window_filters);
+    }
+
+    // Decide on the decoy-augmented size (mirrors search(spectra, fasta_db, ...) logic).
+    auto full_db = buildDecoyAugmentedDB_(fasta_db);
+    if (full_db.size() <= database_chunk_size_)
+    {
+      // Fits in one chunk — build context inline (avoids re-running decoy generation).
+      SearchContext ctx;
+      ctx.db = std::move(full_db);
+      ctx.release_fragment_index_after_scoring = true;
+      Param fi_params = ctx.fragment_index.getDefaults();
+      fi_params.update(getParameters(), /*add_unknown=*/false);
+      ctx.fragment_index.setParameters(fi_params);
+      ctx.fragment_index.build(ctx.db);
+      return searchWithClaiming(pseudo_spectra, ctx, protein_ids, peptide_ids,
+                                out_registry, out_pre_filter_pep_ids, skip_window_filters);
+    }
+
+    // Chunked path: score all protein chunks first (accumulating hits), then claim.
+    // searchChunked_ runs postProcessHits_ which stamps _prose_matched_exp_idxs on
+    // every PeptideHit — that is all applyClaimingPass_ needs; no DB access after this.
+    // FDR inside searchChunked_ is a no-op here because diaWeaverPeptide sets fdr_psm_=0.
+    ExitCodes ec = searchChunked_(pseudo_spectra, full_db, protein_ids, peptide_ids,
+                                  skip_window_filters);
+    if (ec != ExitCodes::EXECUTION_OK) return ec;
+    return applyClaimingPass_(pseudo_spectra, peptide_ids, out_registry, out_pre_filter_pep_ids);
+  }
+
+  // =====================================================================
+  // Claiming phases 2-4: shared by both searchWithClaiming overloads.
+  // Reads _prose_matched_exp_idxs / _prose_matched_ion_types from each
+  // PeptideHit (stamped by postProcessHits_), performs greedy claiming,
+  // recalculates hyperscores, and populates out_registry.
+  // =====================================================================
+  ProSEAlgorithm::ExitCodes ProSEAlgorithm::applyClaimingPass_(
+      PeakMap& pseudo_spectra,
+      PeptideIdentificationList& peptide_ids,
+      FragmentClaimRegistry& out_registry,
+      PeptideIdentificationList* out_pre_filter_pep_ids) const
+  {
     // Phase 2: build the fragment trace mapping from the spectra's IntegerDataArrays.
     ExperimentalFragmentIndex efi;
     efi.build(pseudo_spectra);

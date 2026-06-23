@@ -309,6 +309,40 @@ class OPENMS_DLLAPI ProSEAlgorithm :
                                  bool skip_window_filters = true) const;
 
     /**
+     * @brief In-memory search with iterative fragment claiming and transparent database chunking.
+     *
+     * Same claiming semantics as searchWithClaiming(PeakMap&, SearchContext&, ...) but
+     * accepts a raw FASTA database and handles chunking transparently when
+     * @c database:chunk_size is set. When the decoy-augmented database fits in one chunk
+     * (or chunking is disabled), this delegates directly to the SearchContext overload.
+     * When chunking is needed, all protein chunks are scored first (accumulating hits
+     * across chunks) and the claiming pass runs on the fully merged PSM set — so
+     * fragment claiming is never split across chunk boundaries.
+     *
+     * This is the preferred entry point for diaWeaverPeptide when database chunking
+     * may be required.
+     *
+     * @param[in,out] pseudo_spectra        Pseudo-spectra from ClusterMassTracesByPrecursor.
+     * @param[in]     fasta_db              Protein sequence database (target proteins only;
+     *                                      decoys are generated internally if enabled).
+     * @param[out]    prot_ids              Output protein identifications.
+     * @param[out]    pep_ids              Output peptide identifications (recalculated scores).
+     * @param[out]    out_registry          Registry of claimed fragment trace keys.
+     * @param[out]    out_pre_filter_pep_ids Optional flat PSM list in greedy-descent order
+     *                                      with recalculated hyperscores; used for debug TSV.
+     * @param[in]     skip_window_filters   When true, suppress WindowMower/NLargest during
+     *                                      preprocessing (required for pseudo spectra).
+     * @return ExitCodes indicating success or error.
+     */
+    ExitCodes searchWithClaiming(PeakMap& pseudo_spectra,
+                                 const std::vector<FASTAFile::FASTAEntry>& fasta_db,
+                                 std::vector<ProteinIdentification>& prot_ids,
+                                 PeptideIdentificationList& pep_ids,
+                                 FragmentClaimRegistry& out_registry,
+                                 PeptideIdentificationList* out_pre_filter_pep_ids = nullptr,
+                                 bool skip_window_filters = true) const;
+
+    /**
      * @brief In-memory search with modification analysis: no file I/O required.
      *
      * Same as the file-based searchWithModificationAnalysis() but takes pre-loaded data.
@@ -450,6 +484,10 @@ class OPENMS_DLLAPI ProSEAlgorithm :
      * already contain decoys if decoys_ is true. Taken by non-const reference
      * because PeptideIndexing::run() mutates it.
      *
+     * @param skip_window_filters When true, suppresses WindowMower/NLargest during
+     *        preprocessing. Pass true when spectra are pseudo spectra from
+     *        ClusterMassTracesByPrecursor.
+     *
      * @return EXECUTION_OK on success; INPUT_FILE_EMPTY / UNEXPECTED_RESULT /
      *         UNKNOWN_ERROR on PeptideIndexing failure.
      */
@@ -457,7 +495,24 @@ class OPENMS_DLLAPI ProSEAlgorithm :
         PeakMap& spectra,
         std::vector<FASTAFile::FASTAEntry>& full_db,
         std::vector<ProteinIdentification>& protein_ids,
-        PeptideIdentificationList& peptide_ids) const;
+        PeptideIdentificationList& peptide_ids,
+        bool skip_window_filters = false) const;
+
+    /**
+     * @brief Claiming pass: phases 2-4 of searchWithClaiming, shared by both overloads.
+     *
+     * Reads _prose_matched_exp_idxs / _prose_matched_ion_types meta values stamped
+     * by postProcessHits_, performs the greedy fragment claiming loop, recalculates
+     * hyperscores, and fills @p out_registry.
+     *
+     * Called after either a non-chunked search(ctx) or a chunked searchChunked_()
+     * completes, so the database is no longer needed.
+     */
+    ExitCodes applyClaimingPass_(
+        PeakMap& pseudo_spectra,
+        PeptideIdentificationList& peptide_ids,
+        FragmentClaimRegistry& out_registry,
+        PeptideIdentificationList* out_pre_filter_pep_ids) const;
 
     /**
      * @brief Score all spectra against one FragmentIndex.

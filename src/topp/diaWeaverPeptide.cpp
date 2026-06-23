@@ -1053,11 +1053,20 @@ protected:
         const std::vector<FASTAFile::FASTAEntry>& tier_db =
             (tier_idx > 0) ? restricted_fasta_db : fasta_db;
 
-        OPENMS_LOG_INFO << "[diaWeaverPeptide] Building fragment index for tier '"
-                        << tier_name << "' (" << tier_db.size() << " proteins)..." << std::endl;
-        ProSEAlgorithm::SearchContext ctx = prose.prepareContext(tier_db);
-        OPENMS_LOG_INFO << "[diaWeaverPeptide] Fragment index built. " << ctx.fragment_index.getPeptides().size()
-                        << " peptide entries indexed." << std::endl;
+        // The claiming branch uses searchWithClaiming(fasta_db, ...) which handles
+        // database chunking transparently. A pre-built SearchContext is only needed
+        // for the spectrum_level_orphan branch (prose.search with ctx), so we defer
+        // prepareContext() — and its full-index memory cost — to that path only.
+        // This means large databases with chunk_size set will not OOM here.
+        ProSEAlgorithm::SearchContext ctx;
+        if (spectrum_level_orphan && !remove_fragments_and_psms)
+        {
+          OPENMS_LOG_INFO << "[diaWeaverPeptide] Building fragment index for tier '"
+                          << tier_name << "' (" << tier_db.size() << " proteins)..." << std::endl;
+          ctx = prose.prepareContext(tier_db);
+          OPENMS_LOG_INFO << "[diaWeaverPeptide] Fragment index built. " << ctx.fragment_index.getPeptides().size()
+                          << " peptide entries indexed." << std::endl;
+        }
 
       // ------------------------------------------------------------------
       // Step 2 onwards: per-window preprocessing + search.
@@ -1398,7 +1407,7 @@ protected:
           else
           {
             FragmentClaimRegistry global_registry;
-            ec = prose.searchWithClaiming(all_spectra, ctx, global_prot_ids, global_pep_ids,
+            ec = prose.searchWithClaiming(all_spectra, tier_db, global_prot_ids, global_pep_ids,
                                           global_registry, &debug_pre_filter_pep_ids,
                                           skip_density_filters_);
           }
@@ -1494,7 +1503,7 @@ protected:
         else
         {
           FragmentClaimRegistry global_registry;
-          ec = prose.searchWithClaiming(pseudo_source, ctx, global_prot_ids, global_pep_ids,
+          ec = prose.searchWithClaiming(pseudo_source, tier_db, global_prot_ids, global_pep_ids,
                                         global_registry, &debug_pre_filter_pep_ids, true);
         }
 
