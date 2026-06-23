@@ -1711,7 +1711,6 @@ protected:
       {
         FalseDiscoveryRate debug_fdr;
         Param debug_fdr_params = debug_fdr.getParameters();
-        debug_fdr_params.setValue("use_all_hits", "true");
         debug_fdr_params.setValue("add_decoy_peptides", "true");
         debug_fdr.setParameters(debug_fdr_params);
         debug_fdr.apply(debug_pre_filter_pep_ids);
@@ -1734,7 +1733,6 @@ protected:
                           << "% threshold..." << std::endl;
           FalseDiscoveryRate fdr_tool;
           Param fdr_params = fdr_tool.getParameters();
-          fdr_params.setValue("use_all_hits", "true");
           fdr_params.setValue("add_decoy_peptides", "true");
           fdr_tool.setParameters(fdr_params);
           fdr_tool.apply(merged_peptides);

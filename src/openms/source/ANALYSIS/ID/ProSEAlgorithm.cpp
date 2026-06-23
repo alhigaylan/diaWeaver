@@ -1791,10 +1791,8 @@ namespace OpenMS
 
     // Re-sort hits within each PeptideIdentification by recalculated score so the
     // best-scoring hit is at index 0. The claiming loop processes PSMs in initial-score
-    // order, so the within-spectrum ordering is now stale. FalseDiscoveryRate with
-    // use_all_hits=true still computes correct q-values regardless, but downstream
-    // consumers (idXML writers, IDFilter, any caller expecting index 0 = best) require
-    // this ordering guarantee.
+    // order, so the within-spectrum ordering is now stale. FDR truncates to the top hit
+    // (use_all_hits=false default), so index 0 must be the winner after recalculation.
     for (auto& pid : peptide_ids)
     {
       auto& hits = pid.getHits();
