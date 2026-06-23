@@ -72,10 +72,11 @@ The processing pipeline:
 1. Determine DIA isolation windows from the input file (done once before the database loop)
 2. For each database in order:
    a. Build a ProSE fragment index from the FASTA (shared across all DIA windows for this iteration)
-   b. For each DIA window (iteration 0: raw DIA; subsequent iterations: bypass on orphan peaks):
-      - Peak picking, MassTraceExtractor, FeatureFinderPeptide, ClusterMassTracesByPrecursor
-      - ProSE database search with iterative within-window fragment claiming
-   c. Merge per-window PSMs, apply FDR, run cross-window protein inference
+   b. Phase 1 (parallel): preprocess all DIA windows — peak picking, MassTraceExtractor,
+      FeatureFinderPeptide, ClusterMassTracesByPrecursor — to produce pseudo spectra.
+      Each fragment peak carries a globally unique (window_idx, trace_idx) key.
+      Phase 2 (serial): single ProSE search across all pseudo spectra combined.
+   c. Apply FDR and protein inference
    d. Build post-FDR claim registry; write idXML, annotated mzML, orphan mzML for this iteration
    e. Pass orphan peaks as input to the next database iteration
 
@@ -1145,11 +1146,9 @@ protected:
       const int inner_threads = 1;
 #endif
 
-      // prose is copied per-thread via firstprivate: each outer thread operates on its
-      // own ProSEAlgorithm instance (identical parameters, independent mutable state).
       // ctx (SearchContext / FragmentIndex) is shared read-only — concurrent reads safe.
 #ifdef _OPENMP
-#pragma omp parallel for schedule(dynamic, 1) firstprivate(on_disc, prose)
+#pragma omp parallel for schedule(dynamic, 1) firstprivate(on_disc)
 #endif
     for (SignedSize idx = 0; idx < static_cast<SignedSize>(total_windows); ++idx)
     {
@@ -1343,52 +1342,14 @@ protected:
         }
       }
 
-      // --- 3h. ProSE search with iterative fragment claiming ---
-      // Snapshot raw (pre-normalization) pseudo spectra before searchWithClaiming()
-      // normalizes them in-place. orphan.mzML carries absolute mass trace intensities.
+      // --- 3h. Snapshot raw pseudo spectra and collect companion info ---
+      // ProSE is called once after the OMP loop on all windows combined.
+      // Snapshot here (pre-normalisation) so orphan.mzML carries absolute intensities.
 #pragma omp critical (collect_pseudo_spectra)
       {
         for (const auto& spec : pseudo_spectra)
+        {
           all_pseudo_spectra[spec.getNativeID()] = spec;
-      }
-
-      // prose is a per-thread firstprivate copy; ctx (FragmentIndex) is shared read-only.
-      std::vector<ProteinIdentification> window_prot_ids;
-      PeptideIdentificationList window_pep_ids;
-
-      ProSEAlgorithm::ExitCodes ec;
-      if (spectrum_level_orphan && !remove_fragments_and_psms)
-      {
-        ec = prose.search(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
-                          skip_density_filters_);
-      }
-      else
-      {
-        FragmentClaimRegistry window_registry;
-        PeptideIdentificationList window_debug_pep_ids;
-        ec = prose.searchWithClaiming(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
-                                      window_registry, &window_debug_pep_ids,
-                                      skip_density_filters_);
-#pragma omp critical (collect_pseudo_spectra)
-        {
-          debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
-                                          std::make_move_iterator(window_debug_pep_ids.begin()),
-                                          std::make_move_iterator(window_debug_pep_ids.end()));
-        }
-      }
-
-      // Collect companion info from preprocessed spectra.
-      // proc_mzs maps PeakAnnotation mz → trace_id for annotated/orphan mzML.
-      // In spectrum_level_orphan mode, window_pep_ids are also the debug pre-filter PSMs.
-#pragma omp critical (collect_pseudo_spectra)
-      {
-        if (spectrum_level_orphan)
-        {
-          debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
-                                          window_pep_ids.begin(), window_pep_ids.end());
-        }
-        for (const auto& spec : pseudo_spectra)
-        {
           CompanionInfo ci;
           for (const auto& pk : spec) ci.proc_mzs.push_back(pk.getMZ());
           for (const auto& arr : spec.getIntegerDataArrays())
@@ -1399,33 +1360,6 @@ protected:
           if (!ci.proc_trace_ids.empty())
             all_companion_info[spec.getNativeID()] = std::move(ci);
         }
-      }
-
-      if (ec != ProSEAlgorithm::ExitCodes::EXECUTION_OK || window_prot_ids.empty() || window_pep_ids.empty())
-      {
-#pragma omp critical (progress_log)
-        {
-          if (ec != ProSEAlgorithm::ExitCodes::EXECUTION_OK)
-            OPENMS_LOG_WARN << "[diaWeaverPeptide] ProSE non-OK exit code ("
-                            << static_cast<int>(ec) << ") for window " << window_label << std::endl;
-          else
-            OPENMS_LOG_INFO << "[diaWeaverPeptide] No PSMs for window " << window_label << std::endl;
-          ++processed;
-        }
-        continue;
-      }
-
-      window_prot_ids[0].setPrimaryMSRunPath({window_label});
-      window_prot_ids[0].getSearchParameters().db = database;
-
-#pragma omp critical (results_collect)
-      {
-        total_pseudo_spectra += pseudo_spectra.size();
-        OPENMS_LOG_INFO << "[diaWeaverPeptide] Window " << window_label << ": "
-                        << window_pep_ids.size() << " PSMs, "
-                        << window_prot_ids[0].getHits().size() << " protein hits." << std::endl;
-        all_prot_ids.push_back(std::move(window_prot_ids));
-        all_pep_ids.push_back(std::move(window_pep_ids));
         ++processed;
       }
         } // end normal window loop
@@ -1434,6 +1368,62 @@ protected:
         if (threads_outer_loop > 0)
           omp_set_num_threads(total_threads);
 #endif
+
+      // --- 3i. Single ProSE search across all preprocessed pseudo spectra ---
+      // Build a working copy; searchWithClaiming normalises spectra in-place and
+      // all_pseudo_spectra must stay un-normalised for orphan mzML output.
+      {
+        MSExperiment all_spectra;
+        all_spectra.reserve(all_pseudo_spectra.size());
+        for (const auto& kv : all_pseudo_spectra)
+          all_spectra.addSpectrum(kv.second);
+
+        total_pseudo_spectra = all_spectra.size();
+        OPENMS_LOG_INFO << "[diaWeaverPeptide] Running ProSE on " << total_pseudo_spectra
+                        << " pseudo spectra from " << total_windows << " windows." << std::endl;
+
+        if (!all_spectra.empty())
+        {
+          std::vector<ProteinIdentification> global_prot_ids;
+          PeptideIdentificationList global_pep_ids;
+          ProSEAlgorithm::ExitCodes ec;
+
+          if (spectrum_level_orphan && !remove_fragments_and_psms)
+          {
+            ec = prose.search(all_spectra, ctx, global_prot_ids, global_pep_ids,
+                              skip_density_filters_);
+            debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
+                                            global_pep_ids.begin(), global_pep_ids.end());
+          }
+          else
+          {
+            FragmentClaimRegistry global_registry;
+            ec = prose.searchWithClaiming(all_spectra, ctx, global_prot_ids, global_pep_ids,
+                                          global_registry, &debug_pre_filter_pep_ids,
+                                          skip_density_filters_);
+          }
+
+          if (ec != ProSEAlgorithm::ExitCodes::EXECUTION_OK || global_prot_ids.empty() || global_pep_ids.empty())
+          {
+            if (ec != ProSEAlgorithm::ExitCodes::EXECUTION_OK)
+              OPENMS_LOG_WARN << "[diaWeaverPeptide] ProSE non-OK exit code ("
+                              << static_cast<int>(ec) << ") for step " << (global_step + 1) << std::endl;
+            else
+              OPENMS_LOG_INFO << "[diaWeaverPeptide] No PSMs identified in step "
+                              << (global_step + 1) << "." << std::endl;
+          }
+          else
+          {
+            OPENMS_LOG_INFO << "[diaWeaverPeptide] ProSE: " << global_pep_ids.size()
+                            << " PSMs, " << global_prot_ids[0].getHits().size()
+                            << " protein hits." << std::endl;
+            global_prot_ids[0].setPrimaryMSRunPath({File::basename(input_source)});
+            global_prot_ids[0].getSearchParameters().db = database;
+            all_prot_ids.push_back(std::move(global_prot_ids));
+            all_pep_ids.push_back(std::move(global_pep_ids));
+          }
+        }
+      }
 
       } // end if (global_step == 0 && in_pseudo.empty()) — normal mode
       else
@@ -1464,140 +1454,73 @@ protected:
             pseudo_source.addSpectrum(spec);
         }
 
-        // Group spectra by fragment_window_id to reconstruct the original window partition.
-        std::map<Int, PeakMap> window_groups;
-        for (const MSSpectrum& spec : pseudo_source)
+        // Snapshot raw spectra and collect companion info before ProSE normalises in-place.
+        for (const auto& spec : pseudo_source)
         {
-          Int window_id = -1;
+          all_pseudo_spectra[spec.getNativeID()] = spec;
+          CompanionInfo ci;
+          for (const auto& pk : spec) ci.proc_mzs.push_back(pk.getMZ());
           for (const auto& arr : spec.getIntegerDataArrays())
           {
-            if (arr.getName() == "fragment_window_id" && !arr.empty())
-            {
-              window_id = arr[0];
-              break;
-            }
+            if      (arr.getName() == "fragment_trace_id")  ci.proc_trace_ids  = arr;
+            else if (arr.getName() == "fragment_window_id") ci.proc_window_ids = arr;
           }
-          if (window_id < 0)
-            throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-                "Spectrum '" + spec.getNativeID() + "' in '" +
-                (global_step == 0 ? in_pseudo : String("orphan from step ") + String(global_step)) +
-                "' is missing 'fragment_window_id' IntegerDataArray.");
-          window_groups[window_id].addSpectrum(spec);
+          if (!ci.proc_trace_ids.empty())
+            all_companion_info[spec.getNativeID()] = std::move(ci);
         }
-
-        // Convert to a vector so OMP can index by position.
-        std::vector<std::pair<Int, PeakMap>> bypass_windows;
-        bypass_windows.reserve(window_groups.size());
-        for (auto& [wid, group] : window_groups)
-          bypass_windows.emplace_back(wid, std::move(group));
-
-        total_windows = bypass_windows.size();
-        OPENMS_LOG_INFO << "[diaWeaverPeptide] Bypass mode: " << total_windows
-                        << " window groups, " << pseudo_source.size() << " spectra total." << std::endl;
-
-#ifdef _OPENMP
-      omp_set_num_threads(num_threads);
-#pragma omp parallel for schedule(dynamic, 1) firstprivate(prose)
-#endif
-      for (SignedSize idx = 0; idx < static_cast<SignedSize>(total_windows); ++idx)
-      {
-        const Int bypass_window_id = bypass_windows[idx].first;
-        PeakMap& pseudo_spectra = bypass_windows[idx].second;
-        const String window_label = "bypass_window_" + String(bypass_window_id);
 
         if (plain_consumer)
         {
-#pragma omp critical (write_spectra)
-          {
-            for (auto& spec : pseudo_spectra)
-              plain_consumer->consumeSpectrum(spec);
-          }
+          for (auto& spec : pseudo_source)
+            plain_consumer->consumeSpectrum(spec);
         }
 
-        // Snapshot raw spectra before normalization, same reasoning as normal mode.
-#pragma omp critical (collect_pseudo_spectra)
-        {
-          for (const auto& spec : pseudo_spectra)
-            all_pseudo_spectra[spec.getNativeID()] = spec;
-        }
+        total_pseudo_spectra = pseudo_source.size();
+        total_windows = 1;
+        processed = total_pseudo_spectra;
+        OPENMS_LOG_INFO << "[diaWeaverPeptide] Bypass mode: " << total_pseudo_spectra
+                        << " spectra. Running ProSE." << std::endl;
 
-        std::vector<ProteinIdentification> window_prot_ids;
-        PeptideIdentificationList window_pep_ids;
-
+        std::vector<ProteinIdentification> global_prot_ids;
+        PeptideIdentificationList global_pep_ids;
         ProSEAlgorithm::ExitCodes ec;
+
         if (spectrum_level_orphan && !remove_fragments_and_psms)
         {
-          ec = prose.search(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
-                            true);
+          ec = prose.search(pseudo_source, ctx, global_prot_ids, global_pep_ids, true);
+          debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
+                                          global_pep_ids.begin(), global_pep_ids.end());
         }
         else
         {
-          FragmentClaimRegistry window_registry;
-          PeptideIdentificationList window_debug_pep_ids;
-          ec = prose.searchWithClaiming(pseudo_spectra, ctx, window_prot_ids, window_pep_ids,
-                                        window_registry, &window_debug_pep_ids,
-                                        true);
-#pragma omp critical (collect_pseudo_spectra)
-          {
-            debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
-                                            std::make_move_iterator(window_debug_pep_ids.begin()),
-                                            std::make_move_iterator(window_debug_pep_ids.end()));
-          }
+          FragmentClaimRegistry global_registry;
+          ec = prose.searchWithClaiming(pseudo_source, ctx, global_prot_ids, global_pep_ids,
+                                        global_registry, &debug_pre_filter_pep_ids, true);
         }
 
-#pragma omp critical (collect_pseudo_spectra)
+        if (ec != ProSEAlgorithm::ExitCodes::EXECUTION_OK || global_prot_ids.empty() || global_pep_ids.empty())
         {
-          if (spectrum_level_orphan)
-          {
-            debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
-                                            window_pep_ids.begin(), window_pep_ids.end());
-          }
-          for (const auto& spec : pseudo_spectra)
-          {
-            CompanionInfo ci;
-            for (const auto& pk : spec) ci.proc_mzs.push_back(pk.getMZ());
-            for (const auto& arr : spec.getIntegerDataArrays())
-            {
-              if      (arr.getName() == "fragment_trace_id")  ci.proc_trace_ids  = arr;
-              else if (arr.getName() == "fragment_window_id") ci.proc_window_ids = arr;
-            }
-            if (!ci.proc_trace_ids.empty())
-              all_companion_info[spec.getNativeID()] = std::move(ci);
-          }
+          if (ec != ProSEAlgorithm::ExitCodes::EXECUTION_OK)
+            OPENMS_LOG_WARN << "[diaWeaverPeptide] ProSE non-OK exit code ("
+                            << static_cast<int>(ec) << ") for step " << (global_step + 1) << std::endl;
+          else
+            OPENMS_LOG_INFO << "[diaWeaverPeptide] No PSMs identified in step "
+                            << (global_step + 1) << "." << std::endl;
         }
-
-        if (ec != ProSEAlgorithm::ExitCodes::EXECUTION_OK || window_prot_ids.empty() || window_pep_ids.empty())
+        else
         {
-#pragma omp critical (progress_log)
-          {
-            if (ec != ProSEAlgorithm::ExitCodes::EXECUTION_OK)
-              OPENMS_LOG_WARN << "[diaWeaverPeptide] ProSE non-OK exit code ("
-                              << static_cast<int>(ec) << ") for " << window_label << std::endl;
-            else
-              OPENMS_LOG_INFO << "[diaWeaverPeptide] No PSMs for " << window_label << std::endl;
-            ++processed;
-          }
-          continue;
+          OPENMS_LOG_INFO << "[diaWeaverPeptide] ProSE: " << global_pep_ids.size()
+                          << " PSMs, " << global_prot_ids[0].getHits().size()
+                          << " protein hits." << std::endl;
+          global_prot_ids[0].setPrimaryMSRunPath({File::basename(input_source)});
+          global_prot_ids[0].getSearchParameters().db = database;
+          all_prot_ids.push_back(std::move(global_prot_ids));
+          all_pep_ids.push_back(std::move(global_pep_ids));
         }
-
-        window_prot_ids[0].setPrimaryMSRunPath({window_label});
-        window_prot_ids[0].getSearchParameters().db = database;
-
-#pragma omp critical (results_collect)
-        {
-          total_pseudo_spectra += pseudo_spectra.size();
-          OPENMS_LOG_INFO << "[diaWeaverPeptide] " << window_label << ": "
-                          << window_pep_ids.size() << " PSMs, "
-                          << window_prot_ids[0].getHits().size() << " protein hits." << std::endl;
-          all_prot_ids.push_back(std::move(window_prot_ids));
-          all_pep_ids.push_back(std::move(window_pep_ids));
-          ++processed;
-        }
-      } // end bypass loop
       } // end else — bypass mode
 
-      OPENMS_LOG_INFO << "[diaWeaverPeptide] All " << processed << " windows processed. "
-                      << total_pseudo_spectra << " pseudo spectra searched across all windows." << std::endl;
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] Preprocessed " << processed << " windows, "
+                      << total_pseudo_spectra << " pseudo spectra passed to ProSE." << std::endl;
 
       ++global_step;
 
@@ -1613,10 +1536,10 @@ protected:
       }
 
       // ------------------------------------------------------------------
-      // Step 4: Cross-window merge, protein inference, FDR (per iteration).
+      // Step 4: Protein inference and FDR (per iteration).
       // ------------------------------------------------------------------
-      OPENMS_LOG_INFO << "[diaWeaverPeptide] Merging " << all_pep_ids.size()
-                      << " per-window result sets..." << std::endl;
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] Running protein inference and FDR on "
+                      << all_pep_ids[0].size() << " PSMs..." << std::endl;
 
       IDMergerAlgorithm merger;
       for (Size i = 0; i < all_prot_ids.size(); ++i)
@@ -1751,7 +1674,7 @@ protected:
         IDFilter::removeUnreferencedProteins(merged_prot_ids, merged_peptides);
       }
 
-      OPENMS_LOG_INFO << "[diaWeaverPeptide] Running cross-window protein inference on "
+      OPENMS_LOG_INFO << "[diaWeaverPeptide] Running protein inference on "
                       << merged_peptides.size() << " PSMs..." << std::endl;
       BasicProteinInferenceAlgorithm bpia;
       bpia.run(merged_peptides, merged_prot_ids);
