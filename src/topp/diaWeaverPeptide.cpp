@@ -1645,20 +1645,9 @@ protected:
                         << std::endl;
       };
 
-      // Assign q-values to the pre-filter debug snapshot for annotation only.
-      bool debug_has_qvalues = false;
-      if (has_decoys && !debug_pre_filter_pep_ids.empty())
-      {
-        FalseDiscoveryRate debug_fdr;
-        Param debug_fdr_params = debug_fdr.getParameters();
-        debug_fdr_params.setValue("add_decoy_peptides", "true");
-        debug_fdr.setParameters(debug_fdr_params);
-        debug_fdr.apply(debug_pre_filter_pep_ids);
-        debug_has_qvalues = true;
-      }
-      write_debug_tsv(debug_has_qvalues);
-
       // PSM-level FDR.
+      // Q-values are captured before filtering to annotate the debug TSV below.
+      std::unordered_map<String, double> spec_to_qval;
       if (user_psm_fdr > 0.0)
       {
         if (!has_decoys)
@@ -1676,11 +1665,33 @@ protected:
           fdr_params.setValue("add_decoy_peptides", "true");
           fdr_tool.setParameters(fdr_params);
           fdr_tool.apply(merged_peptides);
+          // Capture q-values before filtering so all debug candidates can be annotated.
+          for (const auto& pi : merged_peptides)
+            if (!pi.getHits().empty())
+              spec_to_qval[pi.getSpectrumReference()] = pi.getHits()[0].getScore();
           IDFilter::filterHitsByScore(merged_peptides, user_psm_fdr);
           IDFilter::removeEmptyIdentifications(merged_peptides);
           OPENMS_LOG_INFO << "[diaWeaverPeptide] " << merged_peptides.size()
                           << " PSMs retained after PSM FDR." << std::endl;
         }
+      }
+
+      // Annotate all debug candidates with q-values from the real FDR and write TSV.
+      // Q-values come from merged_peptides (1 PSM per spectrum, correctly computed).
+      // Non-top candidates get their spectrum's top PSM q-value; spectra not in FDR get NA.
+      {
+        const String dbg_orig_score_key = "ln(hyperscore)_score";
+        for (auto& pi : debug_pre_filter_pep_ids)
+        {
+          auto it = spec_to_qval.find(pi.getSpectrumReference());
+          if (it == spec_to_qval.end()) continue;
+          for (auto& hit : pi.getHits())
+          {
+            hit.setMetaValue(dbg_orig_score_key, hit.getScore());
+            hit.setScore(it->second);
+          }
+        }
+        write_debug_tsv(!spec_to_qval.empty());
       }
 
       if (user_protein_fdr == 0.0)
