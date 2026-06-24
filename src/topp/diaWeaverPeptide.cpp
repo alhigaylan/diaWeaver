@@ -1676,15 +1676,20 @@ protected:
         }
       }
 
-      // Annotate all debug candidates with q-values from the real FDR and write TSV.
-      // Q-values come from merged_peptides (1 PSM per spectrum, correctly computed).
-      // Non-top candidates get their spectrum's top PSM q-value; spectra not in FDR get NA.
+      // Annotate the debug snapshot and write TSV.
+      // Only the top-ranking PSM per spectrum (first occurrence in the list, which is
+      // built from psm_list in score-descending order) receives a real q-value from the
+      // FDR computation. All lower-ranking candidates keep their own hyperscore and show
+      // NA for q-value — they never entered FDR so no q-value exists for them.
       {
         const String dbg_orig_score_key = "ln(hyperscore)_score";
+        std::unordered_set<String> annotated;
         for (auto& pi : debug_pre_filter_pep_ids)
         {
-          auto it = spec_to_qval.find(pi.getSpectrumReference());
-          if (it == spec_to_qval.end()) continue;
+          const String& ref = pi.getSpectrumReference();
+          auto it = spec_to_qval.find(ref);
+          if (it == spec_to_qval.end()) continue;       // FDR not run or spectrum absent
+          if (!annotated.insert(ref).second) continue;  // non-top PSM for this spectrum
           for (auto& hit : pi.getHits())
           {
             hit.setMetaValue(dbg_orig_score_key, hit.getScore());
