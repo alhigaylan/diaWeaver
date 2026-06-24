@@ -1853,8 +1853,7 @@ namespace OpenMS
 
     // Re-sort hits within each PeptideIdentification by recalculated score so the
     // best-scoring hit is at index 0. The claiming loop processes PSMs in initial-score
-    // order, so the within-spectrum ordering is now stale. FDR truncates to the top hit
-    // (use_all_hits=false default), so index 0 must be the winner after recalculation.
+    // order, so the within-spectrum ordering is now stale after recalculation.
     for (auto& pid : peptide_ids)
     {
       auto& hits = pid.getHits();
@@ -1870,6 +1869,7 @@ namespace OpenMS
     // Build out_pre_filter_pep_ids from psm_list order with recalculated scores.
     // One entry per PSM in globally score-processed order so the debug TSV
     // faithfully reflects the greedy descent sequence with updated hyperscores.
+    // Must happen before truncation below so psm.hit_idx remains valid.
     if (out_pre_filter_pep_ids != nullptr)
     {
       out_pre_filter_pep_ids->clear();
@@ -1880,6 +1880,14 @@ namespace OpenMS
         pi.setHits({peptide_ids[psm.pep_id_idx].getHits()[psm.hit_idx]});
         out_pre_filter_pep_ids->push_back(std::move(pi));
       }
+    }
+
+    // Truncate each spectrum to its single top-ranking PSM after recalculation.
+    // The re-sort above guarantees index 0 is the highest-scoring candidate;
+    // only that PSM should reach FDR estimation.
+    for (auto& pid : peptide_ids)
+    {
+      if (pid.getHits().size() > 1) pid.getHits().resize(1);
     }
 
     OPENMS_LOG_INFO << "[ProSE] searchWithClaiming: " << registry.claimedCount()

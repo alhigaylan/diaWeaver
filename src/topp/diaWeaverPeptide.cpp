@@ -1358,10 +1358,16 @@ protected:
       {
         for (const auto& spec : pseudo_spectra)
         {
-          all_pseudo_spectra[spec.getNativeID()] = spec;
+          // Store a sorted copy. ClusterMassTracesByPrecursor adds peaks in
+          // Pearson-score order, not m/z order. sortByPosition() co-reorders
+          // IntegerDataArrays (trace_id, window_id) in lock-step via select(),
+          // so proc_mzs and proc_trace_ids remain parallel and proc_mzs is
+          // sorted — required for the std::lower_bound lookups below.
+          MSSpectrum& stored = (all_pseudo_spectra[spec.getNativeID()] = spec);
+          stored.sortByPosition();
           CompanionInfo ci;
-          for (const auto& pk : spec) ci.proc_mzs.push_back(pk.getMZ());
-          for (const auto& arr : spec.getIntegerDataArrays())
+          for (const auto& pk : stored) ci.proc_mzs.push_back(pk.getMZ());
+          for (const auto& arr : stored.getIntegerDataArrays())
           {
             if      (arr.getName() == "fragment_trace_id")  ci.proc_trace_ids  = arr;
             else if (arr.getName() == "fragment_window_id") ci.proc_window_ids = arr;
@@ -1464,12 +1470,14 @@ protected:
         }
 
         // Snapshot raw spectra and collect companion info before ProSE normalises in-place.
+        // Sort stored copies so proc_mzs is m/z-ordered (required for lower_bound lookups).
         for (const auto& spec : pseudo_source)
         {
-          all_pseudo_spectra[spec.getNativeID()] = spec;
+          MSSpectrum& stored = (all_pseudo_spectra[spec.getNativeID()] = spec);
+          stored.sortByPosition();  // co-reorders trace_id/window_id arrays via select()
           CompanionInfo ci;
-          for (const auto& pk : spec) ci.proc_mzs.push_back(pk.getMZ());
-          for (const auto& arr : spec.getIntegerDataArrays())
+          for (const auto& pk : stored) ci.proc_mzs.push_back(pk.getMZ());
+          for (const auto& arr : stored.getIntegerDataArrays())
           {
             if      (arr.getName() == "fragment_trace_id")  ci.proc_trace_ids  = arr;
             else if (arr.getName() == "fragment_window_id") ci.proc_window_ids = arr;
