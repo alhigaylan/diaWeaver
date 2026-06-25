@@ -1690,10 +1690,14 @@ protected:
           auto it = spec_to_qval.find(ref);
           if (it == spec_to_qval.end()) continue;       // FDR not run or spectrum absent
           if (!annotated.insert(ref).second) continue;  // non-top PSM for this spectrum
-          for (auto& hit : pi.getHits())
+          // Annotate only the top hit. In searchWithClaiming mode each pi has one hit;
+          // in spectrum_level_orphan mode each pi has all ranked hits — annotating all
+          // of them would give lower-ranking hits a q-value instead of NA.
+          if (!pi.getHits().empty())
           {
-            hit.setMetaValue(dbg_orig_score_key, hit.getScore());
-            hit.setScore(it->second);
+            auto& top_hit = pi.getHits()[0];
+            top_hit.setMetaValue(dbg_orig_score_key, top_hit.getScore());
+            top_hit.setScore(it->second);
           }
         }
         write_debug_tsv(!spec_to_qval.empty());
