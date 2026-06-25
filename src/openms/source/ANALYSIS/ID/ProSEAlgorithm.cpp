@@ -1851,6 +1851,22 @@ namespace OpenMS
 
     }
 
+    // Build out_pre_filter_pep_ids from psm_list order with recalculated scores.
+    // Must happen BEFORE the per-spectrum re-sort below: re-sorting changes hit
+    // positions within each PeptideIdentification, invalidating psm.hit_idx.
+    // Scores in the hits are already the recalculated post-claiming values.
+    if (out_pre_filter_pep_ids != nullptr)
+    {
+      out_pre_filter_pep_ids->clear();
+      out_pre_filter_pep_ids->reserve(psm_list.size());
+      for (const PSMEntry& psm : psm_list)
+      {
+        PeptideIdentification pi = peptide_ids[psm.pep_id_idx];
+        pi.setHits({peptide_ids[psm.pep_id_idx].getHits()[psm.hit_idx]});
+        out_pre_filter_pep_ids->push_back(std::move(pi));
+      }
+    }
+
     // Re-sort hits within each PeptideIdentification by recalculated score so the
     // best-scoring hit is at index 0. The claiming loop processes PSMs in initial-score
     // order, so the within-spectrum ordering is now stale after recalculation.
@@ -1863,22 +1879,6 @@ namespace OpenMS
                   [](const PeptideHit& a, const PeptideHit& b) {
                     return a.getScore() > b.getScore();
                   });
-      }
-    }
-
-    // Build out_pre_filter_pep_ids from psm_list order with recalculated scores.
-    // One entry per PSM in globally score-processed order so the debug TSV
-    // faithfully reflects the greedy descent sequence with updated hyperscores.
-    // Must happen before truncation below so psm.hit_idx remains valid.
-    if (out_pre_filter_pep_ids != nullptr)
-    {
-      out_pre_filter_pep_ids->clear();
-      out_pre_filter_pep_ids->reserve(psm_list.size());
-      for (const PSMEntry& psm : psm_list)
-      {
-        PeptideIdentification pi = peptide_ids[psm.pep_id_idx];
-        pi.setHits({peptide_ids[psm.pep_id_idx].getHits()[psm.hit_idx]});
-        out_pre_filter_pep_ids->push_back(std::move(pi));
       }
     }
 

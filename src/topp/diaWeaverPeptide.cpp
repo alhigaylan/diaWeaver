@@ -1596,7 +1596,11 @@ protected:
       }
 
       // Helper: write debug TSV of all scored PSM hits before FDR threshold filtering.
-      auto write_debug_tsv = [&](bool has_qvalues)
+      // fdr_qval maps (spectrum_native_id + "\t" + full_sequence) to the q-value assigned
+      // by FDR to the top-ranked PSM for that spectrum. Any hit not present in the map
+      // (lower-ranking candidates or no FDR run) is written with NA for q_value.
+      // Hit scores are the raw post-claiming hyperscores — never mutated.
+      auto write_debug_tsv = [&](const std::unordered_map<String, double>& fdr_qval)
       {
         if (iter_out_debug_tsv.empty()) return;
         std::ofstream tsv(iter_out_debug_tsv);
@@ -1607,7 +1611,6 @@ protected:
           return;
         }
         tsv << "spectrum_native_id\tRT\tIM\tprecursor_mz\tsequence\ttarget_decoy\thyperscore\tq_value\n";
-        const String orig_score_key = "ln(hyperscore)_score";
         for (const auto& pi : debug_pre_filter_pep_ids)
         {
           const String& native_id = pi.getSpectrumReference();
@@ -1618,26 +1621,17 @@ protected:
                                       : "NA";
           for (const auto& hit : pi.getHits())
           {
-            double hyperscore, qval;
-            if (has_qvalues && hit.metaValueExists(orig_score_key))
-            {
-              hyperscore = static_cast<double>(hit.getMetaValue(orig_score_key));
-              qval       = hit.getScore();
-            }
-            else
-            {
-              hyperscore = hit.getScore();
-              qval       = -1.0;
-            }
+            const String key = native_id + "\t" + hit.getSequence().toString();
+            const auto   qit = fdr_qval.find(key);
             tsv << native_id << "\t"
                 << rt        << "\t"
                 << im_str    << "\t"
                 << prec_mz   << "\t"
                 << hit.getSequence().toString() << "\t"
                 << (hit.isDecoy() ? "decoy" : "target") << "\t"
-                << hyperscore << "\t";
-            if (qval >= 0.0) tsv << qval;
-            else             tsv << "NA";
+                << hit.getScore() << "\t";
+            if (qit != fdr_qval.end()) tsv << qit->second;
+            else                        tsv << "NA";
             tsv << "\n";
           }
         }
@@ -1646,8 +1640,10 @@ protected:
       };
 
       // PSM-level FDR.
-      // Q-values are captured before filtering to annotate the debug TSV below.
-      std::unordered_map<String, double> spec_to_qval;
+      // fdr_qval maps (spectrum_native_id + "\t" + full_sequence) → q-value for the
+      // top-ranked PSM per spectrum. Populated before threshold filtering so the debug
+      // TSV can annotate all candidates, not just those that pass the cut.
+      std::unordered_map<String, double> fdr_qval;
       if (user_psm_fdr > 0.0)
       {
         if (!has_decoys)
@@ -1665,10 +1661,11 @@ protected:
           fdr_params.setValue("add_decoy_peptides", "true");
           fdr_tool.setParameters(fdr_params);
           fdr_tool.apply(merged_peptides);
-          // Capture q-values before filtering so all debug candidates can be annotated.
+          // Capture q-values before filtering so the debug TSV covers all candidates.
           for (const auto& pi : merged_peptides)
             if (!pi.getHits().empty())
-              spec_to_qval[pi.getSpectrumReference()] = pi.getHits()[0].getScore();
+              fdr_qval[pi.getSpectrumReference() + "\t" + pi.getHits()[0].getSequence().toString()]
+                  = pi.getHits()[0].getScore();
           IDFilter::filterHitsByScore(merged_peptides, user_psm_fdr);
           IDFilter::removeEmptyIdentifications(merged_peptides);
           OPENMS_LOG_INFO << "[diaWeaverPeptide] " << merged_peptides.size()
@@ -1676,32 +1673,7 @@ protected:
         }
       }
 
-      // Annotate the debug snapshot and write TSV.
-      // Only the top-ranking PSM per spectrum (first occurrence in the list, which is
-      // built from psm_list in score-descending order) receives a real q-value from the
-      // FDR computation. All lower-ranking candidates keep their own hyperscore and show
-      // NA for q-value — they never entered FDR so no q-value exists for them.
-      {
-        const String dbg_orig_score_key = "ln(hyperscore)_score";
-        std::unordered_set<String> annotated;
-        for (auto& pi : debug_pre_filter_pep_ids)
-        {
-          const String& ref = pi.getSpectrumReference();
-          auto it = spec_to_qval.find(ref);
-          if (it == spec_to_qval.end()) continue;       // FDR not run or spectrum absent
-          if (!annotated.insert(ref).second) continue;  // non-top PSM for this spectrum
-          // Annotate only the top hit. In searchWithClaiming mode each pi has one hit;
-          // in spectrum_level_orphan mode each pi has all ranked hits — annotating all
-          // of them would give lower-ranking hits a q-value instead of NA.
-          if (!pi.getHits().empty())
-          {
-            auto& top_hit = pi.getHits()[0];
-            top_hit.setMetaValue(dbg_orig_score_key, top_hit.getScore());
-            top_hit.setScore(it->second);
-          }
-        }
-        write_debug_tsv(!spec_to_qval.empty());
-      }
+      write_debug_tsv(fdr_qval);
 
       if (user_protein_fdr == 0.0)
       {
