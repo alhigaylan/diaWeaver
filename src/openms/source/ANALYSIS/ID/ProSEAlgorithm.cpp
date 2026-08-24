@@ -84,6 +84,12 @@ namespace OpenMS
       "disabled in this mode. Only effective when spectra carry isolation-window offsets "
       "(set automatically by diaWeaverPeptide).");
     defaults_.setValidStrings("precursor:use_isolation_window", {"true", "false"});
+    defaults_.setValue("precursor:ignore_annotated_charge", "false",
+      "[experimental] If 'true', ignore each spectrum's annotated precursor charge and search "
+      "every charge in [precursor:min_charge, precursor:max_charge] instead. Useful when the "
+      "upstream charge assignment (e.g. from MS1 feature detection) is not trusted — "
+      "particularly relevant when combined with precursor:use_isolation_window.");
+    defaults_.setValidStrings("precursor:ignore_annotated_charge", {"true", "false"});
 
     defaults_.setValue("precursor:min_charge", 2, "Minimum precursor charge to be considered.");
     defaults_.setValue("precursor:max_charge", 5, "Maximum precursor charge to be considered.");

@@ -1536,7 +1536,7 @@ init_hits.hits_.erase(it_zero, init_hits.hits_.end());
     // rare negative-mode encodings) as "unknown" and fall back to the
     // configured min..max range. Without this guard, static_cast<uint16_t>(-1)
     // would wrap to 65535 and be used as an actual charge downstream.
-    if (precursor.getCharge() > 0)
+    if (!ignore_annotated_charge_ && precursor.getCharge() > 0)
     {
       charges.push_back(static_cast<uint16_t>(precursor.getCharge()));
     }
@@ -2072,7 +2072,7 @@ init_hits.hits_.erase(it_zero, init_hits.hits_.end());
       // Non-SNES path: fasta_entries not needed.
       // two posible modes. Precursor has a charge or we test all possible charges
       vector<size_t> charges;
-      if (precursor[0].getCharge())
+      if (!ignore_annotated_charge_ && precursor[0].getCharge())
       {
         charges.push_back(precursor[0].getCharge());
       }
@@ -2157,6 +2157,14 @@ init_hits.hits_.erase(it_zero, init_hits.hits_.end());
       "is disabled in this mode (the full DIA window already encompasses all co-eluting "
       "isotopes). Falls back to tolerance-based search for spectra without isolation-window offsets.");
     defaults_.setValidStrings("precursor:use_isolation_window", {"true", "false"});
+    defaults_.setValue("precursor:ignore_annotated_charge", "false",
+      "[experimental] If 'true', ignore each spectrum's annotated precursor charge (e.g. "
+      "assigned by upstream MS1 feature detection) and instead search every charge in "
+      "[precursor:min_charge, precursor:max_charge] for every spectrum, regardless of whether "
+      "a charge is already set. Useful when the upstream charge assignment is not trusted — "
+      "particularly relevant when combined with precursor:use_isolation_window. When 'false' "
+      "(default), a spectrum with a nonzero charge uses only that charge.");
+    defaults_.setValidStrings("precursor:ignore_annotated_charge", {"true", "false"});
 
     defaults_.setValue("fragment:mass_tolerance", 10.0, "Fragment mass tolerance");
     std::vector<std::string> fragment_mass_tolerance_unit_valid_strings;
@@ -2281,6 +2289,7 @@ init_hits.hits_.erase(it_zero, init_hits.hits_.end());
     precursor_mass_tolerance_upper_ = param_.getValue("precursor:mass_tolerance_upper");
     precursor_mass_tolerance_unit_ppm_ = param_.getValue("precursor:mass_tolerance_unit").toString() == "ppm";
     use_isolation_window_ = param_.getValue("precursor:use_isolation_window").toBool();
+    ignore_annotated_charge_ = param_.getValue("precursor:ignore_annotated_charge").toBool();
     fragment_mz_tolerance_ = param_.getValue("fragment:mass_tolerance");
     fragment_mz_tolerance_unit_ppm_ = param_.getValue("fragment:mass_tolerance_unit").toString() == "ppm";
 

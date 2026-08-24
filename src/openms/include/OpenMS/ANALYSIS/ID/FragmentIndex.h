@@ -605,6 +605,7 @@ protected:
     double precursor_mass_tolerance_upper_{20.0};   ///< positive magnitude, effective upper bound is +upper
     bool precursor_mass_tolerance_unit_ppm_{true};
     bool use_isolation_window_{false};  ///< if true, DIA isolation window overrides mass tolerance
+    bool ignore_annotated_charge_{false};  ///< if true, ignore each spectrum's annotated precursor charge and search [min_charge, max_charge] instead
     float fragment_mz_tolerance_;
     bool fragment_mz_tolerance_unit_ppm_{true};    
 private:
