@@ -1487,6 +1487,27 @@ init_hits.hits_.erase(it_zero, init_hits.hits_.end());
     const int16_t iso_lo = open_mode ? 0 : min_isotope_error_;
     const int16_t iso_hi = open_mode ? 0 : max_isotope_error_;
 
+    // Physical acquisition-window bounds (M+H space, this charge), when the spectrum
+    // carries them. ProSE was designed for DDA, where no such information exists; DIA
+    // pseudo spectra (diaWeaverPeptide) carry real isolation-window offsets, and a
+    // configured tolerance must never reach past what the instrument could physically
+    // have isolated, regardless of how loose the tolerance is configured. Unconditional
+    // on presence of the data — not a separate opt-in mode. Same m/z->(M+H) transform
+    // as the use_isolation_window_ branch above, which already proves it matches
+    // fi_peptides_'s (M+H)-at-charge-1 convention.
+    const auto& precursor = spectrum.getPrecursors()[0];
+    const bool has_iso_window = precursor.getIsolationWindowLowerOffset() > 0.0 ||
+                                precursor.getIsolationWindowUpperOffset() > 0.0;
+    float window_lo_mass = 0.0f, window_hi_mass = 0.0f;
+    if (has_iso_window)
+    {
+      const float prec_mz = static_cast<float>(precursor.getMZ());
+      const float lo_mz = prec_mz - static_cast<float>(precursor.getIsolationWindowLowerOffset());
+      const float hi_mz = prec_mz + static_cast<float>(precursor.getIsolationWindowUpperOffset());
+      window_lo_mass = lo_mz * charge - ((charge - 1) * static_cast<float>(Constants::PROTON_MASS_U));
+      window_hi_mass = hi_mz * charge - ((charge - 1) * static_cast<float>(Constants::PROTON_MASS_U));
+    }
+
     // SNES mode uses querySpectrumSNES_ directly (dispatched in querySpectrum);
     // this function is only reached for non-SNES searches.
     for (int16_t isotope_error = iso_lo; isotope_error <= iso_hi; ++isotope_error)
@@ -1494,7 +1515,12 @@ init_hits.hits_.erase(it_zero, init_hits.hits_.end());
       const float shifted_mass = precursor_mass
         + static_cast<float>(isotope_error) * static_cast<float>(Constants::C13C12_MASSDIFF_U);
 
-      const auto window = computeMassWindow_(shifted_mass);
+      auto window = computeMassWindow_(shifted_mass);
+      if (has_iso_window)
+      {
+        window.first  = std::max(window.first,  window_lo_mass - shifted_mass);
+        window.second = std::min(window.second, window_hi_mass - shifted_mass);
+      }
 
       SpectrumMatchesTopN candidates_iso_error;
       auto candidates_range = getPeptidesInMassWindow(shifted_mass, window);
