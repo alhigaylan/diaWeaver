@@ -1730,6 +1730,10 @@ namespace OpenMS
       Size   pep_id_idx;   // index into peptide_ids
       Size   hit_idx;      // index of PeptideHit within the PeptideIdentification
       String sequence;
+      String native_id;    // tie-break key: same peptide can tie in score across
+                            // spectra (e.g. a fragment trace shared by ClusterMassTraces'
+                            // nr_precursors_per_fragment); native_id makes claim order
+                            // deterministic instead of depending on sort implementation.
     };
 
     std::vector<PSMEntry> psm_list;
@@ -1737,7 +1741,8 @@ namespace OpenMS
 
     for (Size pid = 0; pid < peptide_ids.size(); ++pid)
     {
-      auto it = nativeid_to_spec_idx.find(peptide_ids[pid].getSpectrumReference());
+      const String& native_id = peptide_ids[pid].getSpectrumReference();
+      auto it = nativeid_to_spec_idx.find(native_id);
       if (it == nativeid_to_spec_idx.end()) continue;
       const Size spec_idx = it->second;
 
@@ -1745,13 +1750,21 @@ namespace OpenMS
       {
         const PeptideHit& hit = peptide_ids[pid].getHits()[hid];
         psm_list.push_back({hit.getScore(), spec_idx, pid, hid,
-                            hit.getSequence().toUnmodifiedString()});
+                            hit.getSequence().toUnmodifiedString(), native_id});
       }
     }
 
-    // Sort descending by score so highest-scoring PSMs claim first.
-    std::sort(psm_list.begin(), psm_list.end(),
-              [](const PSMEntry& a, const PSMEntry& b) { return a.score > b.score; });
+    // Sort descending by score so highest-scoring PSMs claim first. Ties (equal
+    // score) are broken by native_id so claim order is deterministic and does not
+    // depend on std::sort's unspecified handling of equal elements — this matters
+    // now that identical-score PSMs are no longer mutually exempt from exclusion
+    // just for sharing a sequence (see the claim check below).
+    std::stable_sort(psm_list.begin(), psm_list.end(),
+              [](const PSMEntry& a, const PSMEntry& b)
+              {
+                if (a.score != b.score) return a.score > b.score;
+                return a.native_id < b.native_id;
+              });
 
     // Phase 4: iterative claiming.
     FragmentClaimRegistry registry;
@@ -1827,7 +1840,15 @@ namespace OpenMS
                                            (*arrs.trace_id)[exp_idx]);
 
         const FragmentClaimRegistry::ClaimRecord* rec = registry.getClaimRecord(key);
-        if (rec != nullptr && rec->peptide_seq != psm.sequence) continue;
+        // Exemption from exclusion requires the exact claiming PSM (same sequence
+        // AND same spectrum) — not just the same sequence. A fragment trace can be
+        // duplicated into several pseudo spectra (ClusterMassTraces' assignment of
+        // one fragment to multiple precursors); without the spectrum_idx check, the
+        // same peptide winning one spectrum would be silently exempted from
+        // exclusion when it re-appears (via the shared trace) in a different
+        // spectrum, letting it claim there too instead of being treated as a loser
+        // like any other candidate would be.
+        if (rec != nullptr && (rec->peptide_seq != psm.sequence || rec->spectrum_idx != psm.spectrum_idx)) continue;
 
         const char ion_type = (mi < ion_type_str.size()) ? ion_type_str[mi] : '\0';
         if      (ion_type == 'a' || ion_type == 'b' || ion_type == 'c') ++prefix_count;
