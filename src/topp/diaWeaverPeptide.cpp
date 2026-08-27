@@ -1840,6 +1840,10 @@ protected:
           out_spec.setNativeID(native_id);
           out_spec.setRT(spectrum_rt);
           out_spec.setMSLevel(2);
+          out_spec.setType(orig.getType());
+          // Preserve spectrum-level ion mobility (see orphan block below).
+          out_spec.setDriftTime(orig.getDriftTime());
+          out_spec.setDriftTimeUnit(orig.getDriftTimeUnit());
           if (!orig.getPrecursors().empty())
             out_spec.getPrecursors().push_back(orig.getPrecursors()[0]);
 
@@ -1923,6 +1927,12 @@ protected:
             orphan_spec.setNativeID(native_id);
             orphan_spec.setRT(orig.getRT());
             orphan_spec.setMSLevel(2);
+            orphan_spec.setType(orig.getType());
+            // Preserve spectrum-level ion mobility so the orphan file that feeds
+            // the next iteration keeps its 1/K0 (ClusterMassTracesByPrecursor sets
+            // both spectrum- and precursor-level drift time on the pseudo spectrum).
+            orphan_spec.setDriftTime(orig.getDriftTime());
+            orphan_spec.setDriftTimeUnit(orig.getDriftTimeUnit());
             if (!orig.getPrecursors().empty())
               orphan_spec.getPrecursors() = orig.getPrecursors();
 
@@ -1961,6 +1971,12 @@ protected:
             orphan_spec.setNativeID(native_id);
             orphan_spec.setRT(orig.getRT());
             orphan_spec.setMSLevel(2);
+            orphan_spec.setType(orig.getType());
+            // Preserve spectrum-level ion mobility so the orphan file that feeds
+            // the next iteration keeps its 1/K0 (ClusterMassTracesByPrecursor sets
+            // both spectrum- and precursor-level drift time on the pseudo spectrum).
+            orphan_spec.setDriftTime(orig.getDriftTime());
+            orphan_spec.setDriftTimeUnit(orig.getDriftTimeUnit());
             if (!orig.getPrecursors().empty())
               orphan_spec.getPrecursors() = orig.getPrecursors();
 
