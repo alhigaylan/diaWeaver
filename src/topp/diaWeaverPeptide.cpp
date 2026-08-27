@@ -493,9 +493,12 @@ protected:
     registerFullParam_(search_algo_params_with_subsection);
 
     registerFlag_("skip_density_filters",
-      "Skip WindowMower and NLargest during spectrum preprocessing. "
-      "Use when spectra are pre-built pseudo spectra (e.g., from a previous diaWeaverPeptide run) "
-      "where every peak is a real ion trace that must not be removed before the claiming step.");
+      "Skip WindowMower and NLargest during spectrum preprocessing. Applies uniformly to every "
+      "ProSE search this tool runs - raw DIA (-in), pre-built pseudo spectra (-in_pseudo), and "
+      "every subsequent database/tier iteration on orphan peaks - so results are comparable "
+      "across entry points. Set when every peak is a real ion trace that must not be removed "
+      "before the claiming step; leave unset (default) to keep the density filters, which "
+      "typically improve identification yield on diaWeaver pseudo spectra.");
     registerFlag_("spectrum_level_orphan",
       "Use spectrum-level orphan strategy instead of the default fragment-level strategy. "
       "Fragment-level (default): orphan peaks are individual fragment ions not claimed by any "
@@ -1446,6 +1449,9 @@ protected:
         // ----------------------------------------------------------------
         // Bypass mode: search pre-built pseudo spectra directly.
         // Source: -in_pseudo file (step 0) or in-memory orphan (step > 0).
+        // Spectrum preprocessing (incl. WindowMower/NLargest) follows
+        // -skip_density_filters, exactly as the raw-DIA path does, so an
+        // -in_pseudo run reproduces the corresponding -in run's scoring.
         // ----------------------------------------------------------------
         PeakMap pseudo_source;
         if (global_step == 0)
@@ -1504,7 +1510,7 @@ protected:
 
         if (spectrum_level_orphan && !remove_fragments_and_psms)
         {
-          ec = prose.search(pseudo_source, ctx, global_prot_ids, global_pep_ids, true);
+          ec = prose.search(pseudo_source, ctx, global_prot_ids, global_pep_ids, skip_density_filters_);
           debug_pre_filter_pep_ids.insert(debug_pre_filter_pep_ids.end(),
                                           global_pep_ids.begin(), global_pep_ids.end());
         }
@@ -1512,7 +1518,7 @@ protected:
         {
           FragmentClaimRegistry global_registry;
           ec = prose.searchWithClaiming(pseudo_source, tier_db, global_prot_ids, global_pep_ids,
-                                        global_registry, &debug_pre_filter_pep_ids, true);
+                                        global_registry, &debug_pre_filter_pep_ids, skip_density_filters_);
         }
 
         if (ec != ProSEAlgorithm::ExitCodes::EXECUTION_OK || global_prot_ids.empty() || global_pep_ids.empty())

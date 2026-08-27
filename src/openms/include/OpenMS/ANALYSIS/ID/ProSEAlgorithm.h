@@ -306,7 +306,7 @@ class OPENMS_DLLAPI ProSEAlgorithm :
                                  PeptideIdentificationList& pep_ids,
                                  FragmentClaimRegistry& out_registry,
                                  PeptideIdentificationList* out_pre_filter_pep_ids = nullptr,
-                                 bool skip_window_filters = true) const;
+                                 bool skip_window_filters = false) const;
 
     /**
      * @brief In-memory search with iterative fragment claiming and transparent database chunking.
@@ -331,7 +331,10 @@ class OPENMS_DLLAPI ProSEAlgorithm :
      * @param[out]    out_pre_filter_pep_ids Optional flat PSM list in greedy-descent order
      *                                      with recalculated hyperscores; used for debug TSV.
      * @param[in]     skip_window_filters   When true, suppress WindowMower/NLargest during
-     *                                      preprocessing (required for pseudo spectra).
+     *                                      preprocessing. Default false (same as search()):
+     *                                      the density filters run unless the caller opts out.
+     *                                      Set true only when every peak is a real ion trace
+     *                                      that must not be removed before claiming.
      * @return ExitCodes indicating success or error.
      */
     ExitCodes searchWithClaiming(PeakMap& pseudo_spectra,
@@ -340,7 +343,7 @@ class OPENMS_DLLAPI ProSEAlgorithm :
                                  PeptideIdentificationList& pep_ids,
                                  FragmentClaimRegistry& out_registry,
                                  PeptideIdentificationList* out_pre_filter_pep_ids = nullptr,
-                                 bool skip_window_filters = true) const;
+                                 bool skip_window_filters = false) const;
 
     /**
      * @brief In-memory search with modification analysis: no file I/O required.
