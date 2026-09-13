@@ -14,6 +14,8 @@
 #include <OpenMS/KERNEL/MSExperiment.h>
 #include <OpenMS/KERNEL/MassTrace.h>
 
+#include <mutex>
+
 namespace OpenMS
 {
   /**
@@ -75,9 +77,15 @@ public:
      *
      * @param[in,out] mt_vec Input mass traces
      * @param[out] single_mtraces Output single mass traces (detected peaks)
+     * @param[in] num_threads Explicit thread count for the internal OpenMP loop.
+     *            0 (default) leaves the ambient OpenMP thread count in effect, matching
+     *            prior behavior. Callers that are themselves running inside an already-active
+     *            nested parallel region (e.g. per-window worker threads) should pass their
+     *            intended inner-loop budget explicitly here rather than relying on the ambient
+     *            default, which is not guaranteed to reflect that budget.
      *
     */
-    void detectPeaks(std::vector<MassTrace>& mt_vec, std::vector<MassTrace>& single_mtraces);
+    void detectPeaks(std::vector<MassTrace>& mt_vec, std::vector<MassTrace>& single_mtraces, Size num_threads = 0);
 
     /// Filter out mass traces below lower 5 % quartile and above upper 95 % quartile
     void filterByPeakWidth(std::vector<MassTrace>&, std::vector<MassTrace>&);
@@ -139,6 +147,10 @@ private:
 
     /// Main function to do the work
     void detectElutionPeaks_(MassTrace&, std::vector<MassTrace>&);
+
+    /// Guards push_back onto the shared single_mtraces vector in detectElutionPeaks_(),
+    /// which may be called concurrently by either OpenMP or std::thread workers.
+    std::mutex mtraces_mutex_;
   };
 
 } // namespace OpenMS

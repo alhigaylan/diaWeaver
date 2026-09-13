@@ -10,6 +10,8 @@
 
 #include <OpenMS/FEATUREFINDER/FeatureFindingMetabo.h>
 
+#include <mutex>
+
 namespace OpenMS
 {
 
@@ -48,7 +50,12 @@ public:
     ~FeatureFindingPeptide() override;
 
     /// main method of FeatureFindingPeptide
-    void run(std::vector<MassTrace>& input_mtraces, FeatureMap& output_featmap, std::vector<std::vector< OpenMS::MSChromatogram > >& output_chromatograms);
+    /// @param num_threads Explicit thread count for the internal OpenMP loop. 0 (default) leaves
+    ///        the ambient OpenMP thread count in effect, matching prior behavior. Callers running
+    ///        inside an already-active nested parallel region should pass their intended
+    ///        inner-loop budget explicitly here rather than relying on the ambient default, which
+    ///        is not guaranteed to reflect that budget.
+    void run(std::vector<MassTrace>& input_mtraces, FeatureMap& output_featmap, std::vector<std::vector< OpenMS::MSChromatogram > >& output_chromatograms, Size num_threads = 0);
 
 protected:
     void updateMembers_() override;
@@ -212,6 +219,10 @@ private:
     double rt_peak_overlap_threshold_;
     double rt_min_pearson_correlation_;
     int rt_max_lag_;
+
+    /// Guards push_back onto the shared output_hypotheses vector in findLocalFeatures_(),
+    /// which may be called concurrently by either OpenMP or std::thread workers.
+    mutable std::mutex output_hypos_mutex_;
   };
 
 }

@@ -7,6 +7,7 @@
 // --------------------------------------------------------------------------
 
 #include <OpenMS/APPLICATIONS/TOPPBase.h>
+#include <OpenMS/CONCEPT/ParallelFor.h>
 #include <OpenMS/FORMAT/MzMLFile.h>
 #include <OpenMS/FORMAT/FileHandler.h>
 #include <OpenMS/FORMAT/FileTypes.h>
@@ -31,6 +32,8 @@
 #endif
 
 #include <cmath>
+#include <iomanip>
+#include <iostream>
 #include <set>
 #include <chrono>
 
@@ -501,6 +504,10 @@ protected:
    * @param[in] ffp_param FeatureFindingPeptide parameters
    * @param[out] feat_map Output feature map
    * @param[out] traces_out Output mass traces (for accessing raw intensity data)
+   * @param[in] inner_threads Explicit thread budget for the internal EPD/FFP OpenMP loops.
+   *            0 leaves the ambient OpenMP default in effect; callers running inside an
+   *            already-active nested parallel region (e.g. diaWeaver's per-window workers)
+   *            should pass their intended inner-loop budget explicitly.
    * @return True on success, false on error
    */
   bool runFeatureFinderPeptide_(MSExperiment& ms_peakmap,
@@ -509,7 +516,8 @@ protected:
                                 Param epd_param,
                                 Param ffp_param,
                                 FeatureMap& feat_map,
-                                std::vector<MassTrace>& traces_out)
+                                std::vector<MassTrace>& traces_out,
+                                Size inner_threads = 0)
   {
     if (ms_peakmap.empty())
     {
@@ -544,7 +552,7 @@ protected:
       epd_param.remove("noise_threshold_int");
       ElutionPeakDetection epdet;
       epdet.setParameters(epd_param);
-      epdet.detectPeaks(m_traces, split_mtraces);
+      epdet.detectPeaks(m_traces, split_mtraces, inner_threads);
       if (epdet.getParameters().getValue("width_filtering") == "auto")
       {
         m_traces_final.clear();
@@ -578,7 +586,7 @@ protected:
     std::vector<std::vector<MSChromatogram>> feat_chromatograms;
     FeatureFindingPeptide ffpep;
     ffpep.setParameters(ffp_param);
-    ffpep.run(m_traces_final, feat_map, feat_chromatograms);
+    ffpep.run(m_traces_final, feat_map, feat_chromatograms, inner_threads);
 
     // Filter features with zero intensity
     auto intensity_zero = [](Feature& f) { return f.getIntensity() == 0; };
@@ -600,13 +608,16 @@ protected:
    * @param[in] mtd_param MassTraceDetection parameters
    * @param[in] epd_param ElutionPeakDetection parameters
    * @param[out] traces_out Output mass traces
+   * @param[in] inner_threads Explicit thread budget for the internal EPD OpenMP loop; see
+   *            runFeatureFinderPeptide_ for details.
    * @return True on success, false on error
    */
   bool runMassTraceExtractor_(MSExperiment& ms_peakmap,
                               const Param& common_param,
                               Param mtd_param,
                               Param epd_param,
-                              std::vector<MassTrace>& traces_out)
+                              std::vector<MassTrace>& traces_out,
+                              Size inner_threads = 0)
   {
     if (ms_peakmap.empty())
     {
@@ -642,7 +653,7 @@ protected:
       epd_param.remove("noise_threshold_int");
       ElutionPeakDetection epdet;
       epdet.setParameters(epd_param);
-      epdet.detectPeaks(m_traces, split_mtraces);
+      epdet.detectPeaks(m_traces, split_mtraces, inner_threads);
       if (epdet.getParameters().getValue("width_filtering") == "auto")
       {
         traces_out.clear();
@@ -842,23 +853,35 @@ protected:
     // ------------------------------
     Size processed = 0;
 
+    // Thread budget for per-window inner-parallel work (peak picking, feature finding,
+    // elution peak detection). Declared unconditionally so call sites below don't need
+    // #ifdef _OPENMP. Defaults to 1 (serial) when OpenMP is unavailable or nesting is off.
+    //
+    // The outer window loop below is still plain (single-level) OpenMP. The inner work
+    // is NOT nested OpenMP, though -- it's std::thread-based (see the peak-picking blocks
+    // below, and the inner_threads passed into FeatureFindingPeptide/ElutionPeakDetection).
+    // A nested `#pragma omp parallel` region's implicit end-of-region barrier proved
+    // unreliable here under ThreadSanitizer (a worker thread's write was observed racing
+    // against the owning thread's read, well after the nested region's closing brace) --
+    // std::thread::join() gives a synchronization guarantee from the C++ standard itself,
+    // independent of the OpenMP runtime's own (nested) team-join implementation.
+    int inner_threads = 1;
+
 #ifdef _OPENMP
     // Store total number of threads available
     const int total_threads = num_threads;
 
     // Calculate outer and inner thread counts
     int outer_threads = total_threads;
-    int inner_threads = 1;
+    omp_set_dynamic(0); // use exactly outer_threads, don't let the runtime silently reduce it
 
     if (threads_outer_loop > 0)
     {
       // User specified nested parallelism
       outer_threads = std::min(threads_outer_loop, total_threads);
       inner_threads = std::max(1, total_threads / outer_threads);
-      omp_set_nested(1);
-      omp_set_dynamic(0);
       OPENMS_LOG_INFO << "Using nested parallelism: " << outer_threads << " outer threads x "
-                      << inner_threads << " inner threads for peak picking." << std::endl;
+                      << inner_threads << " inner threads for peak picking/feature finding." << std::endl;
     }
     else
     {
@@ -914,18 +937,23 @@ protected:
         MSExperiment ms2_picked;
         ms2_picked.resize(ms2_exp.size());
 
-#pragma omp parallel num_threads(inner_threads)
-        {
-          PeakPickerIM picker_im;
-          picker_im.setParameters(ppim_params);
-
-#pragma omp for schedule(dynamic, 1)
-          for (SignedSize s = 0; s < static_cast<SignedSize>(ms2_exp.size()); ++s)
+        // Each worker gets its own PeakPickerIM (constructed once, reused across that
+        // worker's spectra) and writes to a unique index in ms2_picked -- no cross-thread
+        // sharing until all workers have joined below, at which point the move is safe.
+        OpenMS::parallelForWithState(
+          ms2_exp.size(), static_cast<Size>(inner_threads),
+          [&ppim_params]()
+          {
+            PeakPickerIM picker_im;
+            picker_im.setParameters(ppim_params);
+            return picker_im;
+          },
+          [&](PeakPickerIM& picker_im, Size s)
           {
             if (ms2_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
             {
               MSSpectrum aggregated;
-              aggregateSpectrum_(ms2_exp, static_cast<Size>(s), picker_im, aggregated);
+              aggregateSpectrum_(ms2_exp, s, picker_im, aggregated);
               picker_im.pickIMTraces(aggregated);
               ms2_picked[s] = std::move(aggregated);
             }
@@ -933,35 +961,36 @@ protected:
             {
               ms2_picked[s] = ms2_exp[s];
             }
-          }
-        }
+          });
 
         ms2_exp = std::move(ms2_picked);
       }
       else if (!bruker_im_centroiding)
       {
         // Standard parallel peak picking (no aggregation)
-#pragma omp parallel num_threads(inner_threads)
-        {
-          PeakPickerIM picker_im;
-          PeakPickerHiRes picker_hr;
-          if (im_info.available)
+        struct Pickers { PeakPickerIM im; PeakPickerHiRes hr; };
+        OpenMS::parallelForWithState(
+          ms2_exp.size(), static_cast<Size>(inner_threads),
+          [&]()
           {
-            picker_im.setParameters(ppim_params);
-          }
-          else
-          {
-            picker_hr.setParameters(pphr_params);
-          }
-
-#pragma omp for schedule(dynamic, 1)
-          for (SignedSize s = 0; s < static_cast<SignedSize>(ms2_exp.size()); ++s)
+            Pickers pickers;
+            if (im_info.available)
+            {
+              pickers.im.setParameters(ppim_params);
+            }
+            else
+            {
+              pickers.hr.setParameters(pphr_params);
+            }
+            return pickers;
+          },
+          [&](Pickers& pickers, Size s)
           {
             if (im_info.available)
             {
               if (ms2_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
               {
-                picker_im.pickIMTraces(ms2_exp[s]);
+                pickers.im.pickIMTraces(ms2_exp[s]);
               }
             }
             else
@@ -969,12 +998,11 @@ protected:
               if (ms2_exp[s].getType(true) != SpectrumSettings::SpectrumType::CENTROID)
               {
                 MSSpectrum picked;
-                picker_hr.pick(ms2_exp[s], picked);
+                pickers.hr.pick(ms2_exp[s], picked);
                 ms2_exp[s] = std::move(picked);
               }
             }
-          }
-        }
+          });
       }
 
       // Extract MS2 fragment traces for clustering.
@@ -991,7 +1019,7 @@ protected:
           Param epd_copy = ms2ffp_epd_param;
           Param ffp_copy = ms2ffp_ffp_param;
           if (runFeatureFinderPeptide_(ms2_exp, ms2ffp_common_param, mtd_copy, epd_copy, ffp_copy,
-                                       ms2_features, ms2_all_traces))
+                                       ms2_features, ms2_all_traces, inner_threads))
           {
             std::map<String, const MassTrace*> trace_lookup;
             for (const auto& tr : ms2_all_traces)
@@ -1031,7 +1059,7 @@ protected:
         {
           Param mte_mtd_copy = mte_mtd_param;
           Param mte_epd_copy = mte_epd_param;
-          runMassTraceExtractor_(ms2_exp, mte_common_param, mte_mtd_copy, mte_epd_copy, ms2_traces);
+          runMassTraceExtractor_(ms2_exp, mte_common_param, mte_mtd_copy, mte_epd_copy, ms2_traces, inner_threads);
         }
       }
 
@@ -1044,18 +1072,20 @@ protected:
           MSExperiment prec_picked;
           prec_picked.resize(precursor_exp.size());
 
-#pragma omp parallel num_threads(inner_threads)
-          {
-            PeakPickerIM picker_im;
-            picker_im.setParameters(ppim_params);
-
-#pragma omp for schedule(dynamic, 1)
-            for (SignedSize s = 0; s < static_cast<SignedSize>(precursor_exp.size()); ++s)
+          OpenMS::parallelForWithState(
+            precursor_exp.size(), static_cast<Size>(inner_threads),
+            [&ppim_params]()
+            {
+              PeakPickerIM picker_im;
+              picker_im.setParameters(ppim_params);
+              return picker_im;
+            },
+            [&](PeakPickerIM& picker_im, Size s)
             {
               if (precursor_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
               {
                 MSSpectrum aggregated;
-                aggregateSpectrum_(precursor_exp, static_cast<Size>(s), picker_im, aggregated);
+                aggregateSpectrum_(precursor_exp, s, picker_im, aggregated);
                 picker_im.pickIMTraces(aggregated);
                 prec_picked[s] = std::move(aggregated);
               }
@@ -1063,35 +1093,36 @@ protected:
               {
                 prec_picked[s] = precursor_exp[s];
               }
-            }
-          }
+            });
 
           precursor_exp = std::move(prec_picked);
         }
         else
         {
           // Standard parallel peak picking (no aggregation)
-#pragma omp parallel num_threads(inner_threads)
-          {
-            PeakPickerIM picker_im;
-            PeakPickerHiRes picker_hr;
-            if (im_info.available)
+          struct Pickers { PeakPickerIM im; PeakPickerHiRes hr; };
+          OpenMS::parallelForWithState(
+            precursor_exp.size(), static_cast<Size>(inner_threads),
+            [&]()
             {
-              picker_im.setParameters(ppim_params);
-            }
-            else
-            {
-              picker_hr.setParameters(pphr_params);
-            }
-
-#pragma omp for schedule(dynamic, 1)
-            for (SignedSize s = 0; s < static_cast<SignedSize>(precursor_exp.size()); ++s)
+              Pickers pickers;
+              if (im_info.available)
+              {
+                pickers.im.setParameters(ppim_params);
+              }
+              else
+              {
+                pickers.hr.setParameters(pphr_params);
+              }
+              return pickers;
+            },
+            [&](Pickers& pickers, Size s)
             {
               if (im_info.available)
               {
                 if (precursor_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
                 {
-                  picker_im.pickIMTraces(precursor_exp[s]);
+                  pickers.im.pickIMTraces(precursor_exp[s]);
                 }
               }
               else
@@ -1099,12 +1130,11 @@ protected:
                 if (precursor_exp[s].getType(true) != SpectrumSettings::SpectrumType::CENTROID)
                 {
                   MSSpectrum picked;
-                  picker_hr.pick(precursor_exp[s], picked);
+                  pickers.hr.pick(precursor_exp[s], picked);
                   precursor_exp[s] = std::move(picked);
                 }
               }
-            }
-          }
+            });
         }
         // Run FeatureFinderPeptide on precursor data, then cluster with MS2 traces
         FeatureMap precursor_features;
@@ -1113,7 +1143,7 @@ protected:
         Param epd_copy = ffm_epd_param;
         Param ffp_copy = ffm_ffp_param;
 
-        if (runFeatureFinderPeptide_(precursor_exp, ffm_common_param, mtd_copy, epd_copy, ffp_copy, precursor_features, precursor_traces)
+        if (runFeatureFinderPeptide_(precursor_exp, ffm_common_param, mtd_copy, epd_copy, ffp_copy, precursor_features, precursor_traces, inner_threads)
             && !precursor_features.empty() && !ms2_traces.empty())
         {
           MSExperiment pseudo_spectra;
@@ -1150,18 +1180,20 @@ protected:
         MSExperiment ms1_picked;
         ms1_picked.resize(ms1_exp.size());
 
-#pragma omp parallel num_threads(inner_threads)
-        {
-          PeakPickerIM picker_im;
-          picker_im.setParameters(ppim_params);
-
-#pragma omp for schedule(dynamic, 1)
-          for (SignedSize s = 0; s < static_cast<SignedSize>(ms1_exp.size()); ++s)
+        OpenMS::parallelForWithState(
+          ms1_exp.size(), static_cast<Size>(inner_threads),
+          [&ppim_params]()
+          {
+            PeakPickerIM picker_im;
+            picker_im.setParameters(ppim_params);
+            return picker_im;
+          },
+          [&](PeakPickerIM& picker_im, Size s)
           {
             if (ms1_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
             {
               MSSpectrum aggregated;
-              aggregateSpectrum_(ms1_exp, static_cast<Size>(s), picker_im, aggregated);
+              aggregateSpectrum_(ms1_exp, s, picker_im, aggregated);
               picker_im.pickIMTraces(aggregated);
               ms1_picked[s] = std::move(aggregated);
             }
@@ -1169,35 +1201,36 @@ protected:
             {
               ms1_picked[s] = ms1_exp[s];
             }
-          }
-        }
+          });
 
         ms1_exp = std::move(ms1_picked);
       }
       else if (!bruker_im_centroiding)
       {
         // Standard parallel peak picking (no aggregation)
-#pragma omp parallel num_threads(inner_threads)
-        {
-          PeakPickerIM picker_im;
-          PeakPickerHiRes picker_hr;
-          if (im_info.available)
+        struct Pickers { PeakPickerIM im; PeakPickerHiRes hr; };
+        OpenMS::parallelForWithState(
+          ms1_exp.size(), static_cast<Size>(inner_threads),
+          [&]()
           {
-            picker_im.setParameters(ppim_params);
-          }
-          else
-          {
-            picker_hr.setParameters(pphr_params);
-          }
-
-#pragma omp for schedule(dynamic, 1)
-          for (SignedSize s = 0; s < static_cast<SignedSize>(ms1_exp.size()); ++s)
+            Pickers pickers;
+            if (im_info.available)
+            {
+              pickers.im.setParameters(ppim_params);
+            }
+            else
+            {
+              pickers.hr.setParameters(pphr_params);
+            }
+            return pickers;
+          },
+          [&](Pickers& pickers, Size s)
           {
             if (im_info.available)
             {
               if (ms1_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
               {
-                picker_im.pickIMTraces(ms1_exp[s]);
+                pickers.im.pickIMTraces(ms1_exp[s]);
               }
             }
             else
@@ -1205,12 +1238,11 @@ protected:
               if (ms1_exp[s].getType(true) != SpectrumSettings::SpectrumType::CENTROID)
               {
                 MSSpectrum picked;
-                picker_hr.pick(ms1_exp[s], picked);
+                pickers.hr.pick(ms1_exp[s], picked);
                 ms1_exp[s] = std::move(picked);
               }
             }
-          }
-        }
+          });
       }
 
       // Write peak-picked MS1 spectra to output file if requested
@@ -1236,7 +1268,7 @@ protected:
         Param epd_copy = ffm_epd_param;
         Param ffp_copy = ffm_ffp_param;
 
-        if (runFeatureFinderPeptide_(ms1_exp, ffm_common_param, mtd_copy, epd_copy, ffp_copy, ms1_features, ms1_traces)
+        if (runFeatureFinderPeptide_(ms1_exp, ffm_common_param, mtd_copy, epd_copy, ffp_copy, ms1_features, ms1_traces, inner_threads)
             && !ms1_features.empty())
         {
           MSExperiment pseudo_spectra;

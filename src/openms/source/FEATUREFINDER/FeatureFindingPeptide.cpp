@@ -9,6 +9,7 @@
 #include <OpenMS/FEATUREFINDER/FeatureFindingPeptide.h>
 
 #include <OpenMS/ANALYSIS/OPENSWATH/OpenSwathHelper.h>
+#include <OpenMS/CONCEPT/ParallelFor.h>
 #include <OpenMS/CHEMISTRY/ISOTOPEDISTRIBUTION/CoarseIsotopePatternGenerator.h>
 #include <OpenMS/CONCEPT/Constants.h>
 #include <OpenMS/CONCEPT/LogStream.h>
@@ -18,6 +19,10 @@
 #include <OpenMS/SYSTEM/File.h>
 
 #include <boost/dynamic_bitset.hpp>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 // #define FFM_DEBUG
 
@@ -391,11 +396,9 @@ namespace OpenMS
     tmp_hypo.addMassTrace(*candidates[0]);
     tmp_hypo.setScore(0.0);
 
-#ifdef _OPENMP
-#pragma omp critical (OPENMS_FFMetabo_output_hypos)
-#endif
     {
       // pushing back to shared vector needs to be synchronized
+      std::lock_guard<std::mutex> lock(output_hypos_mutex_);
       output_hypotheses.push_back(tmp_hypo);
     }
 
@@ -492,11 +495,9 @@ namespace OpenMS
           fh_tmp.setCharge(charge);
           last_iso_idx = best_idx;
 
-#ifdef _OPENMP
-#pragma omp critical (OPENMS_FFMetabo_output_hypos)
-#endif
           {
             // pushing back to shared vector needs to be synchronized
+            std::lock_guard<std::mutex> lock(output_hypos_mutex_);
             output_hypotheses.push_back(fh_tmp);
           }
         }
@@ -512,7 +513,7 @@ namespace OpenMS
     } // end for charge
   } // end of findLocalFeatures_(...)
 
-  void FeatureFindingPeptide::run(std::vector<MassTrace>& input_mtraces, FeatureMap& output_featmap, std::vector<std::vector< OpenMS::MSChromatogram > >& output_chromatograms)
+  void FeatureFindingPeptide::run(std::vector<MassTrace>& input_mtraces, FeatureMap& output_featmap, std::vector<std::vector< OpenMS::MSChromatogram > >& output_chromatograms, Size num_threads)
   {
 
     output_featmap.clear();
@@ -534,18 +535,9 @@ namespace OpenMS
     // *********************************************************** //
 
     std::vector<FeatureHypothesis> feat_hypos;
-    Size progress(0);
-#ifdef _OPENMP
-#pragma omp parallel for
-#endif
-    for (SignedSize i = 0; i < (SignedSize)input_mtraces.size(); ++i)
-    {
-      IF_MASTERTHREAD this->setProgress(progress);
-#ifdef _OPENMP
-#pragma omp atomic
-#endif
-      ++progress;
 
+    auto process_trace = [&](Size i)
+    {
       std::vector<const MassTrace*> local_traces;
       double ref_trace_mz(input_mtraces[i].getCentroidMZ());
       double ref_trace_rt(input_mtraces[i].getCentroidRT());
@@ -570,6 +562,33 @@ namespace OpenMS
         }
       }
       findLocalFeatures_(local_traces, feat_hypos);
+    };
+
+    if (num_threads > 0)
+    {
+      // Explicit thread budget: this is a caller (diaWeaver) running inside its own
+      // already-active nested parallelism, where relying on a nested OpenMP region's
+      // implicit barrier proved unreliable (see diaWeaver.cpp's nested-parallelism data
+      // race investigation). Use std::thread workers instead, whose join() is a
+      // plain-C++-guaranteed synchronization point independent of the OpenMP runtime.
+      OpenMS::parallelFor(input_mtraces.size(), num_threads, process_trace);
+    }
+    else
+    {
+      Size progress(0);
+#ifdef _OPENMP
+#pragma omp parallel for
+#endif
+      for (SignedSize i = 0; i < (SignedSize)input_mtraces.size(); ++i)
+      {
+        IF_MASTERTHREAD this->setProgress(progress);
+#ifdef _OPENMP
+#pragma omp atomic
+#endif
+        ++progress;
+
+        process_trace(static_cast<Size>(i));
+      }
     }
     this->endProgress();
 
@@ -739,7 +758,29 @@ namespace OpenMS
 
     }
     output_featmap.setUniqueId(UniqueIdGenerator::getUniqueId());
-    output_featmap.sortByMZ();
+
+    // Sort by m/z, same as FeatureMap::sortByMZ(), but with an explicit, deterministic
+    // tie-break (ion mobility, then intensity, then label) for features that share the
+    // same m/z -- typically isobaric, ion-mobility-distinct species. Plain sortByMZ()'s
+    // std::sort has no tie-break, so its result for m/z-tied features depends on
+    // whatever order they arrived in beforehand, which can vary run to run when
+    // feat_hypos above was built by concurrent worker threads.
+    std::sort(output_featmap.begin(), output_featmap.end(),
+      [](const Feature& a, const Feature& b)
+      {
+        if (a.getMZ() != b.getMZ()) return a.getMZ() < b.getMZ();
+
+        auto im = [](const Feature& f) -> double
+        {
+          std::vector<double> ims = f.getMetaValue("masstrace_centroid_im");
+          return ims.empty() ? 0.0 : ims[0];
+        };
+        if (im(a) != im(b)) return im(a) < im(b);
+
+        if (a.getIntensity() != b.getIntensity()) return a.getIntensity() < b.getIntensity();
+
+        return String(a.getMetaValue("label")) < String(b.getMetaValue("label"));
+      });
   } // end of FeatureFindingPeptide::run
 
 }

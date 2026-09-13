@@ -7,6 +7,7 @@
 // --------------------------------------------------------------------------
 
 
+#include <OpenMS/CONCEPT/ParallelFor.h>
 #include <OpenMS/DATASTRUCTURES/ListUtils.h>
 #include <OpenMS/FEATUREFINDER/ElutionPeakDetection.h>
 #include <OpenMS/PROCESSING/SMOOTHING/SavitzkyGolayFilter.h>
@@ -317,27 +318,43 @@ namespace OpenMS
     return;
   }
 
-  void ElutionPeakDetection::detectPeaks(std::vector<MassTrace>& mt_vec, std::vector<MassTrace>& single_mtraces)
+  void ElutionPeakDetection::detectPeaks(std::vector<MassTrace>& mt_vec, std::vector<MassTrace>& single_mtraces, Size num_threads)
   {
     // make sure that single_mtraces is empty
     single_mtraces.clear();
 
     this->startProgress(0, mt_vec.size(), "elution peak detection");
-    Size progress(0);
+
+    if (num_threads > 0)
+    {
+      // Explicit thread budget: this is a caller (diaWeaver) running inside its own
+      // already-active nested parallelism, where relying on a nested OpenMP region's
+      // implicit barrier proved unreliable (see diaWeaver.cpp's nested-parallelism data
+      // race investigation). Use std::thread workers instead, whose join() is a
+      // plain-C++-guaranteed synchronization point independent of the OpenMP runtime.
+      OpenMS::parallelFor(mt_vec.size(), num_threads, [&](Size i)
+      {
+        detectElutionPeaks_(mt_vec[i], single_mtraces);
+      });
+    }
+    else
+    {
+      Size progress(0);
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
-    for (SignedSize i = 0; i < (SignedSize) mt_vec.size(); ++i)
-    {
-      IF_MASTERTHREAD this->setProgress(progress);
+      for (SignedSize i = 0; i < (SignedSize) mt_vec.size(); ++i)
+      {
+        IF_MASTERTHREAD this->setProgress(progress);
 
 #ifdef _OPENMP
 #pragma omp atomic
 #endif
-      ++progress;
+        ++progress;
 
-      // push_back to 'single_mtraces' is protected, so threading is ok
-      detectElutionPeaks_(mt_vec[i], single_mtraces);
+        // push_back to 'single_mtraces' is protected, so threading is ok
+        detectElutionPeaks_(mt_vec[i], single_mtraces);
+      }
     }
 
     this->endProgress();
@@ -456,10 +473,8 @@ namespace OpenMS
           mt.estimateFWHM(true);
         }
 
-#ifdef _OPENMP
-#pragma omp critical (OPENMS_ElutionPeakDetection_mtraces)
-#endif
         {
+          std::lock_guard<std::mutex> lock(mtraces_mutex_);
           single_mtraces.push_back(mt);
         }
 
@@ -541,10 +556,8 @@ namespace OpenMS
             new_mt.estimateFWHM(true);
           }
 
-#ifdef _OPENMP
-#pragma omp critical (OPENMS_ElutionPeakDetection_mtraces)
-#endif
           {
+            std::lock_guard<std::mutex> lock(mtraces_mutex_);
             single_mtraces.push_back(new_mt);
           }
         }

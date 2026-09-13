@@ -18,6 +18,7 @@ LogConfigHandler.h
 LogStream.h
 Macros.h
 MacrosTest.h
+ParallelFor.h
 PrecisionWrapper.h
 ProgressLogger.h
 RAIICleanup.h
