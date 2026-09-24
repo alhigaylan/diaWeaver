@@ -475,7 +475,9 @@ protected:
       p.setValue("max_rt_apex_difference", 5.0, "Maximal difference of the apex in retention time (in seconds).");
       p.setValue("im_tolerance", 0.02, "Ion mobility tolerance for matching precursors to fragments.");
       p.setValue("nr_precursors_per_fragment", 50, "Maximum number of precursors a fragment can be assigned to.");
-      p.setValue("rt_tolerance", 2.0, "RT tolerance (in seconds) for matching up mass trace points during correlation.");
+      p.setValue("rt_tolerance", 2.0, "RT tolerance (in seconds) for matching up mass trace points during correlation. Ignored when auto_detect_rt_tolerance is true.");
+      p.setValue("auto_detect_rt_tolerance", "true", "Estimate rt_tolerance separately for each DIA window. MS1-vs-MS2 clustering uses the largest RT distance between each MS2 scan of the window and its nearest MS1 scan; precursor-vs-MS2 clustering (both from the same scans) uses 0.001 s.");
+      p.setValidStrings("auto_detect_rt_tolerance", {"false", "true"});
       p.setValue("pearson_weight", 1.0, "Weight for the Pearson correlation component in the combined score used to rank precursor-fragment assignments.");
       p.setValue("delta_rt_weight", 1.0, "Weight for the delta RT component in the combined score used to rank precursor-fragment assignments.");
       p.setValue("delta_im_weight", 1.0, "Weight for the delta ion mobility component in the combined score used to rank precursor-fragment assignments.");
@@ -702,7 +704,9 @@ protected:
     Param mte_epd_param = getParam_().copy("MassTraceExtractor:epd:", true);
 
     // ClusterMassTraces parameters (for pseudo spectra generation)
-    const Param cluster_param = getParam_().copy("ClusterMassTraces:", true);
+    Param cluster_param = getParam_().copy("ClusterMassTraces:", true);
+    const bool auto_detect_rt_tolerance = cluster_param.getValue("auto_detect_rt_tolerance").toBool();
+    cluster_param.remove("auto_detect_rt_tolerance"); // not a ClusterMassTracesByPrecursor parameter
 
     // FeatureFinderPeptideMS2 parameters (for MS2 deisotoping when -deisotope_ms2 is true)
     const bool deisotope_ms2 = (getStringOption_("deisotope_ms2") == "true");
@@ -1148,8 +1152,15 @@ protected:
         {
           MSExperiment pseudo_spectra;
 
+          // precursor_exp and ms2_exp are split from the same scans, so their RTs are identical
+          Param window_cluster_param = cluster_param;
+          if (auto_detect_rt_tolerance)
+          {
+            window_cluster_param.setValue("rt_tolerance", 0.001);
+          }
+
           ClusterMassTracesByPrecursor clusterFragments;
-          clusterFragments.setParameters(cluster_param);
+          clusterFragments.setParameters(window_cluster_param);
           clusterFragments.run(precursor_features, precursor_traces, ms2_traces, w.lower_mz, w.upper_mz, pseudo_spectra);
 
           if (!pseudo_spectra.empty())
@@ -1274,8 +1285,30 @@ protected:
           MSExperiment pseudo_spectra;
 
           // cluster MS2 fragments by precursors
+          Param window_cluster_param = cluster_param;
+          if (auto_detect_rt_tolerance && !ms2_exp.empty())
+          {
+            // Largest RT distance between each MS2 scan of this window and its nearest MS1 scan.
+            // Both experiments are RT-sorted, so the MS1 index only moves forward.
+            double max_offset = 0.0;
+            Size i = 0;
+            for (const MSSpectrum& ms2_spec : ms2_exp)
+            {
+              const double t2 = ms2_spec.getRT();
+              while (i + 1 < ms1_exp.size() &&
+                     std::fabs(ms1_exp[i + 1].getRT() - t2) <= std::fabs(ms1_exp[i].getRT() - t2))
+              {
+                ++i;
+              }
+              max_offset = std::max(max_offset, std::fabs(ms1_exp[i].getRT() - t2));
+            }
+            OPENMS_LOG_INFO << "Window (m/z: " << w.lower_mz << "-" << w.upper_mz
+                            << "): auto-detected rt_tolerance = " << max_offset << " s" << std::endl;
+            window_cluster_param.setValue("rt_tolerance", max_offset);
+          }
+
           ClusterMassTracesByPrecursor clusterFragments;
-          clusterFragments.setParameters(cluster_param);
+          clusterFragments.setParameters(window_cluster_param);
           clusterFragments.run(ms1_features, ms1_traces, ms2_traces, w.lower_mz, w.upper_mz, pseudo_spectra);
 
           if (!pseudo_spectra.empty())
