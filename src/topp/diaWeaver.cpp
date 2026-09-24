@@ -14,6 +14,7 @@
 #include <OpenMS/KERNEL/OnDiscMSExperiment.h>
 #include <OpenMS/KERNEL/FeatureMap.h>
 #include <OpenMS/KERNEL/MassTrace.h>
+#include <OpenMS/MATH/StatisticFunctions.h>
 #include <OpenMS/SYSTEM/File.h>
 #include <OpenMS/APPLICATIONS/diaWeaver.h>
 #include <OpenMS/PROCESSING/CENTROIDING/PeakPickerIM.h>
@@ -476,7 +477,7 @@ protected:
       p.setValue("im_tolerance", 0.02, "Ion mobility tolerance for matching precursors to fragments.");
       p.setValue("nr_precursors_per_fragment", 50, "Maximum number of precursors a fragment can be assigned to.");
       p.setValue("rt_tolerance", 2.0, "RT tolerance (in seconds) for matching up mass trace points during correlation. Ignored when auto_detect_rt_tolerance is true.");
-      p.setValue("auto_detect_rt_tolerance", "true", "Estimate rt_tolerance separately for each DIA window. MS1-vs-MS2 clustering uses the largest RT distance between each MS2 scan of the window and its nearest MS1 scan; precursor-vs-MS2 clustering (both from the same scans) uses 0.001 s.");
+      p.setValue("auto_detect_rt_tolerance", "true", "Estimate rt_tolerance from the data. MS1-vs-MS2 clustering uses the median RT gap between consecutive MS1 scans (median MS1 cycle time); precursor-vs-MS2 clustering (both from the same scans) uses 0.001 s.");
       p.setValidStrings("auto_detect_rt_tolerance", {"false", "true"});
       p.setValue("pearson_weight", 1.0, "Weight for the Pearson correlation component in the combined score used to rank precursor-fragment assignments.");
       p.setValue("delta_rt_weight", 1.0, "Weight for the delta RT component in the combined score used to rank precursor-fragment assignments.");
@@ -1286,25 +1287,20 @@ protected:
 
           // cluster MS2 fragments by precursors
           Param window_cluster_param = cluster_param;
-          if (auto_detect_rt_tolerance && !ms2_exp.empty())
+          if (auto_detect_rt_tolerance && ms1_exp.size() > 1)
           {
-            // Largest RT distance between each MS2 scan of this window and its nearest MS1 scan.
-            // Both experiments are RT-sorted, so the MS1 index only moves forward.
-            double max_offset = 0.0;
-            Size i = 0;
-            for (const MSSpectrum& ms2_spec : ms2_exp)
+            // Median RT gap between consecutive MS1 scans (ms1_exp is RT-sorted).
+            std::vector<double> ms1_cycles;
+            ms1_cycles.reserve(ms1_exp.size() - 1);
+            for (Size i = 1; i < ms1_exp.size(); ++i)
             {
-              const double t2 = ms2_spec.getRT();
-              while (i + 1 < ms1_exp.size() &&
-                     std::fabs(ms1_exp[i + 1].getRT() - t2) <= std::fabs(ms1_exp[i].getRT() - t2))
-              {
-                ++i;
-              }
-              max_offset = std::max(max_offset, std::fabs(ms1_exp[i].getRT() - t2));
+              ms1_cycles.push_back(ms1_exp[i].getRT() - ms1_exp[i - 1].getRT());
             }
+            const double median_ms1_cycle = Math::median(ms1_cycles.begin(), ms1_cycles.end());
             OPENMS_LOG_INFO << "Window (m/z: " << w.lower_mz << "-" << w.upper_mz
-                            << "): auto-detected rt_tolerance = " << max_offset << " s" << std::endl;
-            window_cluster_param.setValue("rt_tolerance", max_offset);
+                            << "): auto-detected rt_tolerance = " << median_ms1_cycle
+                            << " s (median MS1 cycle time)" << std::endl;
+            window_cluster_param.setValue("rt_tolerance", median_ms1_cycle);
           }
 
           ClusterMassTracesByPrecursor clusterFragments;
