@@ -446,6 +446,8 @@ namespace OpenMS
           // initialize int score
           double int_score(0.0);
           // double int_score((candidates[0]->getIntensity(use_smoothed_intensities_))/total_weight + (candidates[mt_idx]->getIntensity(use_smoothed_intensities_))/total_weight);
+          // the pair score is only used if rt_score and mz_score are positive, so skip the costly isotope pattern otherwise
+          if (rt_score > 0.0 && mz_score > 0.0)
           {
             std::vector<double> tmp_ints(fh_tmp.getAllIntensities());
             tmp_ints.push_back(candidates[mt_idx]->getIntensity(use_smoothed_intensities_));
