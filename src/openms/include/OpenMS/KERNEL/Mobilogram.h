@@ -237,6 +237,12 @@ namespace OpenMS
       std::swap(retention_time_, mb.retention_time_);
       std::swap(drift_time_unit_, mb.drift_time_unit_);
     }
+
+    /// Swaps the peaks with a vector of peaks (e.g. for LinearResamplerAlign)
+    void swap(ContainerType& peaks) noexcept
+    {
+      data_.swap(peaks);
+    }
     //@}
 
     // Docu in base class (RangeManager)

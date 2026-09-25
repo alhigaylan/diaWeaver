@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include <OpenMS/KERNEL/Mobilogram.h>
 #include <OpenMS/KERNEL/MSSpectrum.h>
 #include <OpenMS/DATASTRUCTURES/Param.h>
 #include <OpenMS/DATASTRUCTURES/DefaultParamHandler.h>
@@ -168,16 +169,15 @@ namespace OpenMS
     /// Compute lower and upper m/z bounds based on ppm
     std::pair<double, double> ppmBounds(double mz, double ppm);
 
-    /// Extract ion mobility traces as MSSpectra from the raw TimsTOF frame
-    /// Ion mobility is temporarily written in place of m/z inside Peak1D object.
+    /// Extract ion mobility traces as Mobilograms from the raw TimsTOF frame
     /// raw m/z values are allocated to float data arrays with the label 'raw_mz'
-    std::pair<std::vector<MSSpectrum>, std::vector<bool>> extractIonMobilityTraces(
+    std::pair<std::vector<Mobilogram>, std::vector<bool>> extractIonMobilityTraces(
       const MSSpectrum& picked_spectrum,
       const MSSpectrum& raw_spectrum);
 
     /// compute m/z and ion mobility centers for picked traces. Returns centroided spectrum.
-    MSSpectrum computeCentroids_(const std::vector<MSSpectrum>& mobilogram_traces,
-                              const std::vector<MSSpectrum>& picked_traces);
+    MSSpectrum computeCentroids_(const std::vector<Mobilogram>& mobilogram_traces,
+                              const std::vector<Mobilogram>& picked_traces);
 
     /// This function takes in a boolean vector of unclaimed raw peaks from the method PickIMTraces
     /// and append them to the centroided spectrum. It uses PickIMCluster to group 'leftover' raw peaks.

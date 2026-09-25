@@ -884,6 +884,26 @@ START_SECTION(PeakType::IntensityType calculateTIC() const)
 END_SECTION
 
 
+START_SECTION(void swap(ContainerType& peaks) noexcept)
+{
+  Mobilogram mb;
+  mb.setRT(3.0);
+  mb.emplace_back(1.0, 10.0);
+  mb.emplace_back(2.0, 20.0);
+
+  Mobilogram::ContainerType peaks;
+  peaks.emplace_back(5.0, 50.0);
+
+  mb.swap(peaks);
+
+  TEST_EQUAL(mb.size(), 1)
+  TEST_REAL_SIMILAR(mb[0].getMobility(), 5.0)
+  TEST_EQUAL(peaks.size(), 2)
+  TEST_REAL_SIMILAR(peaks[1].getMobility(), 2.0)
+  TEST_REAL_SIMILAR(mb.getRT(), 3.0)
+}
+END_SECTION
+
 START_SECTION(void clear())
 {
   Mobilogram edit;

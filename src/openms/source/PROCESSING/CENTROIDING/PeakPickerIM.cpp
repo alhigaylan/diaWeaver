@@ -36,10 +36,6 @@
 
 
 using namespace std;
-#define DEBUG_PICKER
-#ifdef DEBUG_PICKER
-#include <OpenMS/FORMAT/MzMLFile.h>
-#endif
 
 namespace OpenMS
 {
@@ -100,12 +96,11 @@ namespace OpenMS
     }
 
     // We use peak FWHM (from PeakPickerHiRes) to extract ion mobility traces.
-    // Given a picked m/z peak, we write a temporary MSSpectrum() object with ion mobility measurements
-    // in place of m/z in Peak1D object. This facilitates peak picking in the ion mobility dimension.
+    // Given a picked m/z peak, we extract a Mobilogram from the raw peaks within its FWHM.
     // To enable recomputing of m/z center after ion mobility peak picking, we tack raw m/z peak values
     // in FloatDataArrays().
 
-    std::pair<std::vector<MSSpectrum>, std::vector<bool>> PeakPickerIM::extractIonMobilityTraces(
+    std::pair<std::vector<Mobilogram>, std::vector<bool>> PeakPickerIM::extractIonMobilityTraces(
       const MSSpectrum& picked_spectrum,
       const MSSpectrum& raw_spectrum)
     {
@@ -143,20 +138,13 @@ namespace OpenMS
       const auto [im_data_index, im_unit] = raw_spectrum.getIMData();
       const auto& ion_mobility_array = raw_spectrum.getFloatDataArrays()[im_data_index];
 
-      // Vector of MSSpectra for each picked m/z peak (each spectrum is a mobilogram trace)
-      std::vector<MSSpectrum> mobility_traces;
+      // One Mobilogram per picked m/z peak
+      std::vector<Mobilogram> mobility_traces;
 
       // Instead of tossing away raw peaks that failed to be picked by mass picker PeakPickerHiRes
       // we will pass them over to the output centroid spectrum
       std::vector<bool> claimed(raw_spectrum.size(), false);
 
-#ifdef DEBUG_PICKER
-      OPENMS_LOG_DEBUG << "extractIonMobilityTraces: raw_spectrum has " << raw_spectrum.size() << " peaks, "
-                       << "picked_spectrum has " << picked_spectrum.size() << " peaks.\n";
-      OPENMS_LOG_DEBUG << "extractIonMobilityTraces: raw_spectrum m/z range: ["
-                       << (raw_spectrum.empty() ? 0.0 : raw_spectrum.front().getMZ()) << ", "
-                       << (raw_spectrum.empty() ? 0.0 : raw_spectrum.back().getMZ()) << "]\n";
-#endif
 
       for (size_t i = 0; i < picked_spectrum.size(); ++i)
       {
@@ -176,19 +164,14 @@ namespace OpenMS
           continue;
         }
 
-        MSSpectrum trace_spectrum; // A single mobilogram trace
-        // Prepare FloatDataArray to store raw m/z values
-        MSSpectrum::FloatDataArray raw_mz_array;
-        raw_mz_array.setName("raw_mz");
+        // Indices of the raw peaks within the FWHM window
+        std::vector<Size> trace_indices;
 
         // Expand left
         SignedSize left_idx = center_idx;
         while (left_idx >= 0 && raw_spectrum[left_idx].getMZ() >= lower_bound)
         {
-          trace_spectrum.emplace_back(ion_mobility_array[left_idx], raw_spectrum[left_idx].getIntensity()); // IM stored as m/z temporarily
-
-          // Store the raw m/z
-          raw_mz_array.push_back(raw_spectrum[left_idx].getMZ());
+          trace_indices.push_back(left_idx);
           claimed[left_idx] = true;
           --left_idx;
         }
@@ -198,30 +181,34 @@ namespace OpenMS
         while (right_idx < static_cast<SignedSize>(raw_spectrum.size()) &&
                raw_spectrum[right_idx].getMZ() <= upper_bound)
         {
-          trace_spectrum.emplace_back(ion_mobility_array[right_idx], raw_spectrum[right_idx].getIntensity());
-
-          // Store the raw m/z data in floatDataArrays()
-          raw_mz_array.push_back(raw_spectrum[right_idx].getMZ());
+          trace_indices.push_back(right_idx);
           claimed[right_idx] = true;
           ++right_idx;
         }
 
-        // Attach the raw m/z array to trace_spectrum
-        auto& trace_float_arrays = trace_spectrum.getFloatDataArrays();
-        trace_float_arrays.push_back(std::move(raw_mz_array));
+        // Mobilogram::sortByPosition does not reorder data arrays, so sort the indices by ion mobility instead
+        std::stable_sort(trace_indices.begin(), trace_indices.end(),
+                         [&ion_mobility_array](Size a, Size b) { return ion_mobility_array[a] < ion_mobility_array[b]; });
 
-        // Sort the trace_spectrum by ion mobility (m/z), while keeping raw m/z aligned
-        trace_spectrum.sortByPosition(); // Note: having the float arrays attached ensures that sorting is performed on everything
+        Mobilogram trace;
+        Mobilogram::FloatDataArray raw_mz_array;
+        raw_mz_array.setName("raw_mz");
+        for (const Size idx : trace_indices)
+        {
+          trace.emplace_back(ion_mobility_array[idx], raw_spectrum[idx].getIntensity());
+          raw_mz_array.push_back(raw_spectrum[idx].getMZ());
+        }
+        trace.getFloatDataArrays().push_back(std::move(raw_mz_array));
 
-        mobility_traces.push_back(std::move(trace_spectrum));
+        mobility_traces.push_back(std::move(trace));
       }
 
       return {mobility_traces, claimed};
     }
 
     // Function to compute m/z centers from mobilogram_traces and picked_traces
-    MSSpectrum PeakPickerIM::computeCentroids_(const vector<MSSpectrum>& mobilogram_traces,
-                              const vector<MSSpectrum>& picked_traces)
+    MSSpectrum PeakPickerIM::computeCentroids_(const vector<Mobilogram>& mobilogram_traces,
+                              const vector<Mobilogram>& picked_traces)
     {
       MSSpectrum centroided_frame;
 
@@ -235,15 +222,12 @@ namespace OpenMS
       MSSpectrum::FloatDataArray mz_fwhm_array;
       mz_fwhm_array.setName("MZ FWHM");
 
-#ifdef DEBUG_PICKER
-      OPENMS_LOG_DEBUG << "picked_traces.size(): " << picked_traces.size() << '\n';
-#endif
       // Loop over picked traces and their corresponding raw mobilogram traces
       for (size_t i = 0; i < picked_traces.size(); ++i)
       {
         // std::cout << "Looping through picked_trace that has .. " << picked_traces[i].size() << '\n';
-        const MSSpectrum& picked_trace = picked_traces[i];
-        const MSSpectrum& raw_trace = mobilogram_traces[i];
+        const Mobilogram& picked_trace = picked_traces[i];
+        const Mobilogram& raw_trace = mobilogram_traces[i];
 
         const auto& picked_float_arrays = picked_trace.getFloatDataArrays();
 
@@ -280,9 +264,6 @@ namespace OpenMS
           continue;
         }
 
-#ifdef DEBUG_PICKER
-        OPENMS_LOG_DEBUG << "\n--- Processing picked_trace " << i << " ---\n";
-#endif
 
         // Create reusable objects outside the loop to reduce memory allocations
         MSSpectrum raw_peaks_within_bounds;
@@ -296,17 +277,12 @@ namespace OpenMS
         // Iterate through picked peaks in this trace
         for (Size j = 0; j < picked_trace.size(); ++j)
         {
-          double centroid_im = picked_trace[j].getMZ();   // Ion mobility centroid (stored as m/z)
+          double centroid_im = picked_trace[j].getMobility();
           double fwhm = fwhm_array[j];
 
           double im_lower = centroid_im - (fwhm / 2.0);
           double im_upper = centroid_im + (fwhm / 2.0);
 
-#ifdef DEBUG_PICKER
-          OPENMS_LOG_DEBUG << "Picked peak " << j << " IM centroid: " << centroid_im
-                    << " ion mobility FWHM: " << fwhm
-                    << " --> IM bounds: [" << im_lower << ", " << im_upper << "]\n";
-#endif
           // Use findNearest() to get the index of the closest peak in the raw mobilogram trace
           SignedSize center_idx = raw_trace.findNearest(centroid_im);
 
@@ -321,7 +297,7 @@ namespace OpenMS
 
           // --- Expand Left ---
           SignedSize left_idx = center_idx;
-          while (left_idx >= 0 && raw_trace[left_idx].getMZ() >= im_lower)
+          while (left_idx >= 0 && raw_trace[left_idx].getMobility() >= im_lower)
           {
             Peak1D new_peak;
             new_peak.setMZ(raw_mz_values[left_idx]);                      // m/z from FloatDataArray
@@ -334,7 +310,7 @@ namespace OpenMS
           // --- Expand Right ---
           SignedSize right_idx = center_idx + 1;
           while (right_idx < static_cast<SignedSize>(raw_trace.size()) &&
-                 raw_trace[right_idx].getMZ() <= im_upper)
+                 raw_trace[right_idx].getMobility() <= im_upper)
           {
             Peak1D new_peak;
             new_peak.setMZ(raw_mz_values[right_idx]);
@@ -344,10 +320,6 @@ namespace OpenMS
             ++right_idx;
           }
 
-#ifdef DEBUG_PICKER
-          OPENMS_LOG_DEBUG << "Picked IM peak " << j << ": collected " << raw_peaks_within_bounds.size()
-                    << " raw m/z points between IM [" << im_lower << ", " << im_upper << "]\n";
-#endif
 
           // If we only retrieved one raw peak, pass it over to centroided_frame as is
           // Resampling and smoothing the raw data distorts the intensity values.
@@ -364,10 +336,6 @@ namespace OpenMS
             ion_mobility_fwhm.push_back(fwhm);
             mz_fwhm_array.push_back(0.0);
 
-#ifdef DEBUG_PICKER
-            OPENMS_LOG_DEBUG << "[INFO] Only one raw peak found. Added directly to centroided_frame. m/z: "
-                      << single_peak.getMZ() << " intensity: " << single_peak.getIntensity() << '\n';
-#endif
             // Skip the rest of the loop and move on to the next picked_trace peak
             continue;
           }
@@ -395,11 +363,6 @@ namespace OpenMS
             ion_mobility_fwhm.push_back(fwhm);
             mz_fwhm_array.push_back(0.0);
 
-#ifdef DEBUG_PICKER
-            const Peak1D& single_peak = raw_mz_peaks[0];
-            OPENMS_LOG_DEBUG << "[INFO] sumFrame_ reduced peaks to a single entry. Added directly to centroided_frame. m/z: " << single_peak.getMZ()
-                      << " intensity: " << single_peak.getIntensity() << '\n';
-#endif
             continue;
           }
 
@@ -478,10 +441,6 @@ namespace OpenMS
 
           Math::spline_bisection(spline, left_bound, right_bound, apex_mz, apex_intensity, max_search_threshold);
 
-#ifdef DEBUG_PICKER
-          OPENMS_LOG_DEBUG << "Apex m/z: " << apex_mz << '\n';
-          OPENMS_LOG_DEBUG << "Apex intensity: " << apex_intensity << '\n';
-#endif
 
           // FWHM calculation (same binary search as before)
           double half_height = apex_intensity / 2.0;
@@ -547,11 +506,6 @@ namespace OpenMS
           // ---- FWHM result ----
           double mz_fwhm = fwhm_right_mz - fwhm_left_mz;
 
-#ifdef DEBUG_PICKER
-          OPENMS_LOG_DEBUG << "Left m/z at half height: " << fwhm_left_mz << '\n';
-          OPENMS_LOG_DEBUG << "Right m/z at half height: " << fwhm_right_mz << '\n';
-          OPENMS_LOG_DEBUG << "m/z FWHM: " << mz_fwhm << '\n';
-#endif
 
           centroided_frame.emplace_back(apex_mz, apex_intensity);
           ion_mobility_array.push_back(centroid_im);
@@ -559,9 +513,6 @@ namespace OpenMS
           mz_fwhm_array.push_back(mz_fwhm);
         }
 
-#ifdef DEBUG_PICKER
-        OPENMS_LOG_DEBUG << "--- Finished processing picked_trace " << i << " ---\n\n";
-#endif
       }
 
       auto& centroided_frame_fda = centroided_frame.getFloatDataArrays();
@@ -570,14 +521,6 @@ namespace OpenMS
       centroided_frame_fda.push_back(std::move(mz_fwhm_array));
       centroided_frame.sortByPosition();
 
-#ifdef DEBUG_PICKER
-      OPENMS_LOG_DEBUG << "Peaks in centroided frame: " << centroided_frame.size() << '\n';
-      OPENMS_LOG_DEBUG << "Printing centroided_frame inside ComputerCenters function \n";
-      for (const auto& peak : centroided_frame)
-      {
-        OPENMS_LOG_DEBUG << "m/z: " << peak.getMZ() << ", intensity: " << peak.getIntensity() << '\n';
-      }
-#endif
       return centroided_frame;
     }
 
@@ -641,21 +584,6 @@ namespace OpenMS
       // === STEP 2: Run clustering on unclaimed peaks ===
       pickIMCluster(unclaimed_frame);
 
-      #ifdef DEBUG_PICKER
-      OPENMS_LOG_DEBUG << "[Number of unclaimed peaks after clustering] " << unclaimed_frame.size() << " peaks.\n" << std::endl;
-      // PRINT CLUSTERED UNCLAIMED PEAKS //
-      if (unclaimed_frame.containsIMData())
-      {
-        const auto [debug_im_idx, debug_im_unit] = unclaimed_frame.getIMData();
-        const auto& debug_im_array = unclaimed_frame.getFloatDataArrays()[debug_im_idx];
-        for (size_t i = 0; i < unclaimed_frame.size(); ++i)
-        {
-          OPENMS_LOG_DEBUG << "clustered m/z: " << unclaimed_frame[i].getMZ()
-                    << ", inty: " << unclaimed_frame[i].getIntensity()
-                    << ", ion mobility: " << debug_im_array[i] << std::endl;
-        }
-      }
-      #endif
 
       // === STEP 3: Merge with existing centroided_frame ===
       if (!centroided_frame.containsIMData())
@@ -798,29 +726,16 @@ namespace OpenMS
       // The ppm tolerance is a dynamic way of testing m/z floats being almost identical. The raw intensity is summed.
       MSSpectrum summed_spectrum;
       sumFrame_(spectrum, summed_spectrum, sum_tolerance_mz_, true);
-#ifdef DEBUG_PICKER
-      OPENMS_LOG_DEBUG << "Spectrum after sumFrame_ has " << summed_spectrum.size() << " peaks.\n";
-#endif
 
       // ------------------------------------------ step 2a: smooth ------------------------------------------
       // Apply gaussian smoothing to the peaks projected into the m/z axis. This facilitates peak picking
       // in the m/z dimension and subseqent mobilogram extraction for each picked m/z peak.
-#ifdef DEBUG_PICKER
-      OPENMS_LOG_DEBUG << "Applying Gaussian smoothing...\n";
-#endif
       GaussFilter gauss_filter;
       Param gauss_params;
       gauss_params.setValue("ppm_tolerance", gauss_ppm_tolerance_);
       gauss_params.setValue("use_ppm_tolerance", "true");
       gauss_filter.setParameters(gauss_params);
       gauss_filter.filter(summed_spectrum);
-#ifdef DEBUG_PICKER
-      OPENMS_LOG_DEBUG << "Spectrum after Gaussian smoothing has " << summed_spectrum.size() << " peaks.\n";
-      for (const auto& peak : summed_spectrum)
-      {
-        OPENMS_LOG_DEBUG << "m/z: " << peak.getMZ() << ", intensity: " << peak.getIntensity() << '\n';
-      }
-#endif
 
       // ------------------------------------------ step 3a: m/z Peak Picking ------------------------------------------
       // Pick peaks in the m/z axis and toggle reporting peak width at half max (FWHM)
@@ -834,9 +749,6 @@ namespace OpenMS
       picker_mz.setParameters(picker_mz_p);
       MSSpectrum picked_spectrum;
       picker_mz.pick(summed_spectrum, picked_spectrum);
-#ifdef DEBUG_PICKER
-      OPENMS_LOG_DEBUG << "Size of picked spectrum: " << picked_spectrum.size() << '\n';
-#endif
       if (picked_spectrum.empty())
       {
         if (!include_unclaimed_)
@@ -896,21 +808,10 @@ namespace OpenMS
       resampler_param.setValue("spacing", mobilogram_sampling_grid_);
       resampler_param.setValue("ppm", "false");
 
-#ifdef DEBUG_PICKER
-      OPENMS_LOG_DEBUG << "Using mobilogram sampling grid: " << mobilogram_sampling_grid_ << '\n';
-#endif
-
-#ifdef DEBUG_PICKER
-      for (size_t i = 0; i < mobilogram_traces.size(); ++i)
-      {
-        OPENMS_LOG_DEBUG << "Trace " << i << " contains " << mobilogram_traces[i].size() << " points in ion mobility space.\n";
-      }
-#endif
       // ************************************************* PART II *****************************************************
       // ------------------------------------------ Ion mobility peak picking ------------------------------------------
 
-      // prepare picked ion mobility objects (we are internally using MSSpectrum object for downstream peak picking inputs).
-      vector<MSSpectrum> picked_traces;
+      vector<Mobilogram> picked_traces;
       // Remove empty traces that can occur when no raw peaks are found within the FWHM window
       // of a picked m/z peak during extractIonMobilityTraces()
       mobilogram_traces.erase(
@@ -918,81 +819,59 @@ namespace OpenMS
                    [](const auto& trace) { return trace.empty(); }),
         mobilogram_traces.end());
 
-      for (size_t i = 0; i < mobilogram_traces.size(); ++i)
-      {
-        MSSpectrum& trace = mobilogram_traces[i];
+      LinearResamplerAlign lin_resampler;
+      lin_resampler.setParameters(resampler_param);
 
-#ifdef DEBUG_PICKER
-        OPENMS_LOG_DEBUG << "\n--- Processing Trace " << i << " ---\n";
-        OPENMS_LOG_DEBUG << "Original trace has " << trace.size() << " peaks.\n";
-#endif
+      SavitzkyGolayFilter sgolay_filter;
+      Param sgolay_params;
+      sgolay_params.setValue("frame_length", sgolay_frame_length_);
+      sgolay_params.setValue("polynomial_order", sgolay_polynomial_order_);
+      sgolay_filter.setParameters(sgolay_params);
+
+      // apply PeakPickerHiRes to pick ion mobility peaks.
+      // PeakPickerHiRes can be applied to chromatograms. We reasoned the same set of parameters ideal for
+      // chromatograms is also applicable for mobilograms.
+      // Each raw mobilogram contains a float data array with raw m/z values.
+      // We will use the ion mobility peak FWHM to define min/max ion mobility boundary
+      // and recompute the m/z center based on the ion mobility peak.
+      PeakPickerHiRes picker_im;
+      Param picker_im_p;
+      picker_im_p.setValue("signal_to_noise", 0.0);
+      picker_im_p.setValue("spacing_difference_gap", 0.0);
+      picker_im_p.setValue("spacing_difference", 0.0);
+      picker_im_p.setValue("missing", 0);
+      picker_im_p.setValue("report_FWHM", "true");
+      picker_im_p.setValue("report_FWHM_unit", "absolute");
+      picker_im.setParameters(picker_im_p);
+
+      for (const Mobilogram& trace : mobilogram_traces)
+      {
         // ------------------------------------------ part 2b: smooth and resample --------------------------------
         // Prepare mobilograms for SGolay smoothing.
         // To avoid edge effects, pad both edges with zero-intensity points at distance
         // (sgolay_frame_length_ - 1) / 2 * mobilogram_sampling_grid_ from the data boundary.
         // After linear resampling this produces (sgolay_frame_length_ - 1) / 2 zero-baseline
         // nodes on each side, giving SGolay a valid window at the mobilogram edges.
-        double im_start = trace.front().getMZ();
-        double im_end = trace.back().getMZ();
-
-#ifdef DEBUG_PICKER
-        OPENMS_LOG_DEBUG << "Ion mobility range: [" << im_start << ", " << im_end << "]\n";
-#endif
+        double im_start = trace.front().getMobility();
+        double im_end = trace.back().getMobility();
         int padding_points = static_cast<int>(std::ceil((sgolay_frame_length_ - 1) / 2.0));
 
-        MSSpectrum padded_trace;
+        Mobilogram padded_trace;
         padded_trace.reserve(trace.size() + 2);
         padded_trace.emplace_back(im_start - padding_points * mobilogram_sampling_grid_, 0.0);
         for (const auto& peak : trace) padded_trace.push_back(peak);
         padded_trace.emplace_back(im_end + padding_points * mobilogram_sampling_grid_, 0.0);
 
-#ifdef DEBUG_PICKER
-        OPENMS_LOG_DEBUG << "Padded trace im range: [" << padded_trace.front().getMZ() << ", " << padded_trace.back().getMZ() << "]\n";
-#endif
-
         // Linear resample onto uniform grid; LinearResamplerAlign handles duplicate
         // IM positions in the raw trace correctly (distributes intensity to bracketing nodes).
-        LinearResamplerAlign lin_resampler;
-        lin_resampler.setParameters(resampler_param);
         lin_resampler.raster(padded_trace);
         // SGolay smooth prior to peak picking
-        SavitzkyGolayFilter sgolay_filter;
-        Param sgolay_params;
-        sgolay_params.setValue("frame_length", sgolay_frame_length_);
-        sgolay_params.setValue("polynomial_order", sgolay_polynomial_order_);
-        sgolay_filter.setParameters(sgolay_params);
         sgolay_filter.filter(padded_trace);
 
-#ifdef DEBUG_PICKER
-        OPENMS_LOG_DEBUG << "Trace after Savitzky-Golay smoothing has " << padded_trace.size() << " peaks.\n";
-        for (const auto& peak : padded_trace)
-        {
-          OPENMS_LOG_DEBUG << "m/z: " << peak.getMZ() << ", intensity: " << peak.getIntensity() << '\n';
-        }
-#endif
-        // ------------------------------------------ part 3b: im peak picking --------------------------------
-        // apply PeakPickerHiRes to pick ion mobility peaks.
-        // PeakPickerHiRes can be applied to chromatograms. We reasoned the same set of parameters ideal for
-        // chromatograms is also applicable for mobilograms.
-        // Each raw mobilogram contains a float data array with raw m/z values.
-        // We will use the ion mobility peak FWHM to define min/max ion mobility boundary
-        // and recompute the m/z center based on the ion mobility peak.
-        PeakPickerHiRes picker_im;
-        Param picker_im_p;
-        picker_im_p.setValue("signal_to_noise", 0.0);
-        picker_im_p.setValue("spacing_difference_gap", 0.0);
-        picker_im_p.setValue("spacing_difference", 0.0);
-        picker_im_p.setValue("missing", 0);
-        picker_im_p.setValue("report_FWHM", "true");
-        picker_im_p.setValue("report_FWHM_unit", "absolute");
-        picker_im.setParameters(picker_im_p);
-
-        MSSpectrum picked_trace;
-        picker_im.pick(padded_trace, picked_trace);
+        Mobilogram picked_trace;
+        std::vector<PeakPickerHiRes::PeakBoundary> boundaries;
+        picker_im.pick(padded_trace, picked_trace, boundaries, true);
         picked_traces.push_back(std::move(picked_trace));
-#ifdef DEBUG_PICKER
-        OPENMS_LOG_DEBUG << "--- Finished Processing Trace " << i << " ---\n\n";
-#endif
       }
 
       // Recompute m/z centers and output centroided frame
@@ -1007,9 +886,6 @@ namespace OpenMS
         Add_unclaimedPeaks(centroided_frame, spectrum, claimed);
       }
 
-#ifdef DEBUG_PICKER
-      OPENMS_LOG_DEBUG << "--- Centroided frame has  " << centroided_frame.size() << " --- peaks.\n";
-#endif
       // Copy only SpectrumSettings from the input into the centroided result
       static_cast<SpectrumSettings&>(centroided_frame) = static_cast<const SpectrumSettings&>(spectrum);
       centroided_frame.setMSLevel(spectrum.getMSLevel());
@@ -1020,17 +896,6 @@ namespace OpenMS
       centroided_frame.setIMPeakType(IMPeakType::IM_CENTROIDED);
       spectrum = std::move(centroided_frame);
 
-#ifdef DEBUG_PICKER
-      // Print peaks for debugging
-      OPENMS_LOG_DEBUG << "--- Spectrum final output object has ..  " << spectrum.size() << " --- peaks.\n";
-#endif
-      /*
-      for (const auto& peak : spectrum)
-      {
-        OPENMS_LOG_DEBUG << "m/z: " << peak.getMZ() << ", intensity: " << peak.getIntensity() << '\n';
-      }
-#endif
-      */
     }
 
     void PeakPickerIM::pickIMCluster(OpenMS::MSSpectrum& spectrum) const
@@ -1530,10 +1395,6 @@ namespace OpenMS
             "No IM data in first MS1 spectrum");
       }
 
-#ifdef DEBUG_PICKER
-      OPENMS_LOG_DEBUG << "pickExperimentWithAggregation: Processing " << ms1_indices.size()
-                       << " MS1 spectra with Gaussian FWHM=" << fwhm << "s, cutoff=" << cutoff << ".\n";
-#endif
 
       // Build AggregationBlocks: for each spectrum, collect neighbors with Gaussian weights
       AggregationBlocks aggregation_blocks;
