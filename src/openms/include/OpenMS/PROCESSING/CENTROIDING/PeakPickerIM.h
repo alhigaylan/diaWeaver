@@ -171,7 +171,7 @@ namespace OpenMS
 
     /// Extract ion mobility traces as Mobilograms from the raw TimsTOF frame
     /// raw m/z values are allocated to float data arrays with the label 'raw_mz'
-    std::pair<std::vector<Mobilogram>, std::vector<bool>> extractIonMobilityTraces(
+    std::vector<Mobilogram> extractIonMobilityTraces(
       const MSSpectrum& picked_spectrum,
       const MSSpectrum& raw_spectrum);
 
@@ -179,19 +179,12 @@ namespace OpenMS
     MSSpectrum computeCentroids_(const std::vector<Mobilogram>& mobilogram_traces,
                               const std::vector<Mobilogram>& picked_traces);
 
-    /// This function takes in a boolean vector of unclaimed raw peaks from the method PickIMTraces
-    /// and append them to the centroided spectrum. It uses PickIMCluster to group 'leftover' raw peaks.
-    /// In  other words, a different peak picking approach is used for low intensity raw peaks not sufficient
-    /// for ion mobilogram extraction.
-    void Add_unclaimedPeaks(MSSpectrum& centroided_frame, const MSSpectrum& raw_frame, const std::vector<bool>& claimed) const;
-
 
     double sum_tolerance_mz_{1.0};
     double gauss_ppm_tolerance_{5.0};
     double mobilogram_sampling_grid_{0.01};
     int sgolay_frame_length_{5};
     int sgolay_polynomial_order_{3};
-    bool include_unclaimed_{false};
 
     double ppm_tolerance_cluster_{50.0};
     double im_tolerance_cluster_{0.1};
