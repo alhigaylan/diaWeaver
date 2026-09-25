@@ -131,11 +131,11 @@ input.setIMFormat(IMFormat::IM_PEAK);
 }
 */
 
-START_SECTION(void pickIMTraces(MSSpectrum& spectrum))
+START_SECTION(void pickMobilograms(MSSpectrum& spectrum))
 {
     PeakPickerIM pp_im;
     
-    pp_im.pickIMTraces(input);
+    pp_im.pickMobilograms(input);
 
     TEST_EQUAL(input.size(), 2)
     TEST_REAL_SIMILAR(input[0].getIntensity(), 5.70646)

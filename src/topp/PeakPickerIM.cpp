@@ -340,7 +340,7 @@ protected:
 
       if (method_ == "mobilogram")
       {
-        pp_.pickIMTraces(spectrum);
+        pp_.pickMobilograms(spectrum);
       }
 #if 0
       else if (method_ == "cluster")
@@ -526,7 +526,7 @@ protected:
           MSSpectrum& spectrum = exp[static_cast<Size>(i)];
           // Skip already-centroided spectra (e.g., DIA MS2 with bruker:dia_ms2_centroid=true)
           if (spectrum.getIMPeakType() == IMPeakType::IM_CENTROIDED) continue;
-          if (method == "mobilogram")       picker.pickIMTraces(spectrum);
+          if (method == "mobilogram")       picker.pickMobilograms(spectrum);
 #if 0
           else if (method == "cluster")     picker.pickIMCluster(spectrum);
           else if (method == "traces")      picker.pickIMElutionProfiles(spectrum);
@@ -598,7 +598,7 @@ protected:
               // Aggregate neighbors from immutable exp, pick, store in picked_exp
               MSSpectrum aggregated;
               aggregateSpectrum_(exp, idx, thread_picker, aggregated);
-              thread_picker.pickIMTraces(aggregated);
+              thread_picker.pickMobilograms(aggregated);
               picked_exp[idx] = std::move(aggregated);
             }
             else
@@ -620,7 +620,7 @@ protected:
           try
           {
             MSSpectrum& spectrum = exp[static_cast<Size>(i)];
-            if (method == "mobilogram")       picker.pickIMTraces(spectrum);
+            if (method == "mobilogram")       picker.pickMobilograms(spectrum);
 #if 0
             else if (method == "cluster")     picker.pickIMCluster(spectrum);
             else if (method == "traces")      picker.pickIMElutionProfiles(spectrum);

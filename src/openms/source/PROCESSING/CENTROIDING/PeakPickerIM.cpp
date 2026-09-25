@@ -614,7 +614,7 @@ namespace OpenMS
       }
     }
 
-    void PeakPickerIM::pickIMTraces(MSSpectrum& spectrum)
+    void PeakPickerIM::pickMobilograms(MSSpectrum& spectrum)
     {
       // Only process MS1 spectra; non-MS1 spectra are passed through unchanged
       if (spectrum.getMSLevel() != 1)

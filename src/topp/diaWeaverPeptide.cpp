@@ -348,7 +348,7 @@ protected:
           MSSpectrum agg;
           aggregateSpectrum_(exp, static_cast<Size>(s), picker_im, agg);
           PeakPickerIM local_picker = picker_im;
-          local_picker.pickIMTraces(agg);
+          local_picker.pickMobilograms(agg);
           picked[s] = std::move(agg);
         }
         else
@@ -368,7 +368,7 @@ protected:
           if (exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
           {
             PeakPickerIM local_picker = picker_im;
-            local_picker.pickIMTraces(exp[s]);
+            local_picker.pickMobilograms(exp[s]);
           }
         }
         else
