@@ -22,20 +22,9 @@ namespace OpenMS
   /**
     @brief Peak picking algorithm for ion mobility data
     
-    This class provides three specialized methods for peak picking in ion mobility (IM) data:
-    
-    1. **pickIMTraces**: Mobilogram-based peak picking that extracts ion mobility traces
-       from raw IM data and performs centroiding on the extracted mobilograms. This method
-       processes IM data by analyzing intensity profiles along the ion mobility dimension.
-    
-    2. **pickIMCluster**: Clustering-based peak picking that groups peaks close in both
-       m/z and ion mobility space. Peaks within specified m/z (ppm) and IM tolerances are
-       averaged together using intensity-weighted averaging, reducing an IM frame to a
-       single spectrum with representative peak positions.
-    
-    3. **pickIMElutionProfiles**: Elution profile-based peak picking that extracts peaks
-       based on their elution characteristics across the ion mobility dimension. This method
-       uses m/z tolerance (ppm) to identify and pick peaks from IM elution profiles.
+    **pickIMTraces**: Mobilogram-based peak picking that extracts ion mobility traces
+    from raw IM data and performs centroiding on the extracted mobilograms. This method
+    processes IM data by analyzing intensity profiles along the ion mobility dimension.
 
   @ingroup PeakPicking
       */
@@ -65,6 +54,7 @@ namespace OpenMS
     using DefaultParamHandler::getParameters;
 
 
+#if 0
     /**
      * @brief Converts an ion mobility frame to a single spectrum with averaged IM values
      *
@@ -105,6 +95,7 @@ namespace OpenMS
      * @param[in,out] input Spectrum containing ion mobility data in its FloatDataArrays
      */
     void pickIMElutionProfiles(MSSpectrum& input) const;
+#endif
 
     /// Blocks of spectra to aggregate: maps master spectrum index to vector of (spectrum index, weight) pairs
     typedef std::map<Size, std::vector<std::pair<Size, double>>> AggregationBlocks;
@@ -186,15 +177,19 @@ namespace OpenMS
     int sgolay_frame_length_{5};
     int sgolay_polynomial_order_{3};
 
+#if 0
     double ppm_tolerance_cluster_{50.0};
     double im_tolerance_cluster_{0.1};
 
     double ppm_tolerance_elution_{50.0};
+#endif
 
     double aggregation_rt_fwhm_{1.0};   ///< Gaussian FWHM for RT-based weighting (in seconds)
     double aggregation_cutoff_{0.01};   ///< Weight cutoff for including spectra in aggregation
 
+#if 0
     /// Flag to track if CCS tolerance warning has been shown (mutable for const methods)
     mutable bool ccs_warning_shown_{false};
+#endif
   };
 } // namespace OpenMS

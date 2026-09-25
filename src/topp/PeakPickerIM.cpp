@@ -54,10 +54,7 @@ The input file can be an mzML file containing ion mobility data in concatenated 
 (where each spectrum contains an ion mobility float data array) or a Bruker TimsTOF .d
 directory (requires OpenMS built with WITH_OPENTIMS).
 
-Three peak picking methods are available:
-- @b mobilogram: Picks peaks along the ion mobility dimension using a peak picker.
-- @b cluster: Clusters peaks in the ion mobility dimension.
-- @b traces: Picks peaks using ion mobility elution profiles.
+Peaks are picked along the ion mobility dimension (@b mobilogram method).
 
 <B>The command line parameters of this tool are:</B>
 @verbinclude TOPP_PeakPickerIM.cli
@@ -151,14 +148,14 @@ protected:
 
     registerStringOption_("method", "<name>", "mobilogram",
                           "Method to pick peaks in IM dimension", false, true);
-    setValidStrings_("method", { "mobilogram", "cluster", "traces" } );
+    setValidStrings_("method", { "mobilogram" } );
 
     registerFlag_("aggregate_across_scans",
                   "If set, aggregate signal across neighboring scans using Gaussian weighting before peak picking. "
                   "This can improve signal-to-noise for low-intensity peaks.", false);
 
     addEmptyLine_();
-    registerSubsection_("algorithm", "Algorithm parameters for PeakPickerIM (organized into pickIMTraces, pickIMCluster, pickIMElutionProfiles, aggregation).");
+    registerSubsection_("algorithm", "Algorithm parameters for PeakPickerIM (organized into pickIMTraces, aggregation).");
 
 #ifdef WITH_OPENTIMS
     registerTOPPSubsection_("bruker", "Options for reading Bruker TimsTOF .d files (requires WITH_OPENTIMS)");
@@ -279,8 +276,10 @@ protected:
       Param p = picker_defaults.getDefaults();
       Param combined;
       combined.insert("pickIMTraces:",         p.copy("pickIMTraces:", true));
+#if 0
       combined.insert("pickIMCluster:",        p.copy("pickIMCluster:", true));
       combined.insert("pickIMElutionProfiles:",p.copy("pickIMElutionProfiles:", true));
+#endif
       combined.insert("aggregation:",          p.copy("aggregation:", true));
       return combined;
     }
@@ -343,6 +342,7 @@ protected:
       {
         pp_.pickIMTraces(spectrum);
       }
+#if 0
       else if (method_ == "cluster")
       {
         pp_.pickIMCluster(spectrum);
@@ -351,6 +351,7 @@ protected:
       {
         pp_.pickIMElutionProfiles(spectrum);
       }
+#endif
     }
 
     void processChromatogram_(MapType::ChromatogramType&) override {}
@@ -526,8 +527,10 @@ protected:
           // Skip already-centroided spectra (e.g., DIA MS2 with bruker:dia_ms2_centroid=true)
           if (spectrum.getIMPeakType() == IMPeakType::IM_CENTROIDED) continue;
           if (method == "mobilogram")       picker.pickIMTraces(spectrum);
+#if 0
           else if (method == "cluster")     picker.pickIMCluster(spectrum);
           else if (method == "traces")      picker.pickIMElutionProfiles(spectrum);
+#endif
         }
         catch (...)
         {
@@ -618,8 +621,10 @@ protected:
           {
             MSSpectrum& spectrum = exp[static_cast<Size>(i)];
             if (method == "mobilogram")       picker.pickIMTraces(spectrum);
+#if 0
             else if (method == "cluster")     picker.pickIMCluster(spectrum);
             else if (method == "traces")      picker.pickIMElutionProfiles(spectrum);
+#endif
           }
           catch (...)
           {

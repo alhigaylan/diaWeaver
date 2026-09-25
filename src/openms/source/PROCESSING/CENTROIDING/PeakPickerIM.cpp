@@ -540,11 +540,13 @@ namespace OpenMS
       defaults_.setValue("pickIMTraces:gauss_ppm_tolerance",      5.0,  "Gaussian smoothing m/z tolerance in ppm");
       defaults_.setValue("pickIMTraces:sgolay_frame_length",     5,     "Savitzky-Golay smoothing frame length");
       defaults_.setValue("pickIMTraces:sgolay_polynomial_order", 3,     "Savitzky-Golay smoothing polynomial order");
+#if 0
       // --- PickIMCluster parameters ---
       defaults_.setValue("pickIMCluster:ppm_tolerance_cluster", 50.0, "m/z tolerance in ppm for clustering");
       defaults_.setValue("pickIMCluster:im_tolerance_cluster", 0.1, "Ion mobility tolerance for clustering (in 1/K0 units). For CCS data, use larger values (e.g., 10-20).");
       // --- PickIMElutionProfiles parameters ---
       defaults_.setValue("pickIMElutionProfiles:ppm_tolerance_elution", 50.0, "Mass trace m/z tolerance in ppm");
+#endif
       // --- Aggregation parameters ---
       defaults_.setValue("aggregation:rt_FWHM", 5.0, "Full width at half maximum for Gaussian weighting of scans (in seconds)");
       defaults_.setValue("aggregation:cutoff", 0.01, "Weight cutoff below which spectra are not included in aggregation");
@@ -560,10 +562,12 @@ namespace OpenMS
       sgolay_frame_length_   = (int)param_.getValue("pickIMTraces:sgolay_frame_length");
       sgolay_polynomial_order_= (int)param_.getValue("pickIMTraces:sgolay_polynomial_order");
 
+#if 0
       ppm_tolerance_cluster_ = (double)param_.getValue("pickIMCluster:ppm_tolerance_cluster");
       im_tolerance_cluster_ = (double)param_.getValue("pickIMCluster:im_tolerance_cluster");
 
       ppm_tolerance_elution_ = (double)param_.getValue("pickIMElutionProfiles:ppm_tolerance_elution");
+#endif
 
       aggregation_rt_fwhm_ = (double)param_.getValue("aggregation:rt_FWHM");
       aggregation_cutoff_ = (double)param_.getValue("aggregation:cutoff");
@@ -777,6 +781,7 @@ namespace OpenMS
 
     }
 
+#if 0
     void PeakPickerIM::pickIMCluster(OpenMS::MSSpectrum& spectrum) const
     {
       if (spectrum.empty()) return;
@@ -1114,6 +1119,7 @@ namespace OpenMS
       input.setIMPeakType(IMPeakType::IM_CENTROIDED);
       removeAllFloatDataArraysExcept(input, Constants::UserParam::ION_MOBILITY_CENTROID);
     }
+#endif
 
     void PeakPickerIM::aggregateScans(const std::vector<MSSpectrum>& spectra,
                                        const std::vector<double>& weights,
