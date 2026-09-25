@@ -1382,7 +1382,7 @@ protected:
               {
                 MSSpectrum agg;
                 aggregateSpectrum_(ms2_exp, static_cast<Size>(s), pp, agg);
-                pp.pickMobilograms(agg);
+                pp.pickIMTraces(agg);
                 picked[s] = std::move(agg);
               }
               else picked[s] = ms2_exp[s];
@@ -1403,7 +1403,7 @@ protected:
               if (im_info.available)
               {
                 if (ms2_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
-                  pp_im.pickMobilograms(ms2_exp[s]);
+                  pp_im.pickIMTraces(ms2_exp[s]);
               }
               else if (ms2_exp[s].getType(true) != SpectrumSettings::SpectrumType::CENTROID)
               {
@@ -1491,7 +1491,7 @@ protected:
               {
                 MSSpectrum agg;
                 aggregateSpectrum_(ms1_exp, static_cast<Size>(s), pp, agg);
-                pp.pickMobilograms(agg);
+                pp.pickIMTraces(agg);
                 picked[s] = std::move(agg);
               }
               else picked[s] = ms1_exp[s];
@@ -1512,7 +1512,7 @@ protected:
               if (im_info.available)
               {
                 if (ms1_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
-                  pp_im.pickMobilograms(ms1_exp[s]);
+                  pp_im.pickIMTraces(ms1_exp[s]);
               }
               else if (ms1_exp[s].getType(true) != SpectrumSettings::SpectrumType::CENTROID)
               {

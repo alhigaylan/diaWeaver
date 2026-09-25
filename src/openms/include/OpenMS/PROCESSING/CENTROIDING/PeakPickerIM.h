@@ -22,7 +22,7 @@ namespace OpenMS
   /**
     @brief Peak picking algorithm for ion mobility data
     
-    **pickMobilograms**: Mobilogram-based peak picking that extracts ion mobility traces
+    **pickIMTraces**: Mobilogram-based peak picking that extracts ion mobility traces
     from raw IM data and performs centroiding on the extracted mobilograms. This method
     processes IM data by analyzing intensity profiles along the ion mobility dimension.
 
@@ -47,7 +47,7 @@ namespace OpenMS
    *
    * @param[in,out] spectrum Spectrum containing ion mobility data in its FloatDataArrays
    */
-    void pickMobilograms(MSSpectrum& spectrum);
+    void pickIMTraces(MSSpectrum& spectrum);
 
     /// Sets the parameters for peak picking.
     using DefaultParamHandler::setParameters;
@@ -128,7 +128,7 @@ namespace OpenMS
      * For each MS1 spectrum in the experiment, this method aggregates adjacent scans using
      * Gaussian weights based on RT distance. This approach boosts signal-to-noise by combining
      * peaks from multiple scans with weights that decrease with distance from the center scan.
-     * The aggregated spectra can then be passed to peak picking methods (e.g., pickMobilograms).
+     * The aggregated spectra can then be passed to peak picking methods (e.g., pickIMTraces).
      *
      * Uses parameters:
      * - aggregation:rt_FWHM: Full width at half maximum for Gaussian weighting (in seconds)

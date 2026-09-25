@@ -959,7 +959,7 @@ protected:
             {
               MSSpectrum aggregated;
               aggregateSpectrum_(ms2_exp, s, picker_im, aggregated);
-              picker_im.pickMobilograms(aggregated);
+              picker_im.pickIMTraces(aggregated);
               ms2_picked[s] = std::move(aggregated);
             }
             else
@@ -995,7 +995,7 @@ protected:
             {
               if (ms2_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
               {
-                pickers.im.pickMobilograms(ms2_exp[s]);
+                pickers.im.pickIMTraces(ms2_exp[s]);
               }
             }
             else
@@ -1091,7 +1091,7 @@ protected:
               {
                 MSSpectrum aggregated;
                 aggregateSpectrum_(precursor_exp, s, picker_im, aggregated);
-                picker_im.pickMobilograms(aggregated);
+                picker_im.pickIMTraces(aggregated);
                 prec_picked[s] = std::move(aggregated);
               }
               else
@@ -1127,7 +1127,7 @@ protected:
               {
                 if (precursor_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
                 {
-                  pickers.im.pickMobilograms(precursor_exp[s]);
+                  pickers.im.pickIMTraces(precursor_exp[s]);
                 }
               }
               else
@@ -1206,7 +1206,7 @@ protected:
             {
               MSSpectrum aggregated;
               aggregateSpectrum_(ms1_exp, s, picker_im, aggregated);
-              picker_im.pickMobilograms(aggregated);
+              picker_im.pickIMTraces(aggregated);
               ms1_picked[s] = std::move(aggregated);
             }
             else
@@ -1242,7 +1242,7 @@ protected:
             {
               if (ms1_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
               {
-                pickers.im.pickMobilograms(ms1_exp[s]);
+                pickers.im.pickIMTraces(ms1_exp[s]);
               }
             }
             else

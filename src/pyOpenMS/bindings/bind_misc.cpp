@@ -1931,7 +1931,7 @@ Additionally, overlapping peaks can be removed
     // -----------------------------------------------------------------------
     nb::class_<OpenMS::PeakPickerIM, OpenMS::DefaultParamHandler>(m, "PeakPickerIM", "Peak picking algorithm for ion mobility data")
         .def(nb::init<>())
-        .def("pickMobilograms", [](OpenMS::PeakPickerIM& self, OpenMS::MSSpectrum& spectrum) { return self.pickMobilograms(spectrum); }, "spectrum"_a, "Use trace detection for IM peak picking.")
+        .def("pickIMTraces", [](OpenMS::PeakPickerIM& self, OpenMS::MSSpectrum& spectrum) { return self.pickIMTraces(spectrum); }, "spectrum"_a, "Use trace detection for IM peak picking.")
 #if 0
         .def("pickIMCluster", [](const OpenMS::PeakPickerIM& self, OpenMS::MSSpectrum& spec) { return self.pickIMCluster(spec); }, "spec"_a, "Use clustering for IM peak picking.")
         .def("pickIMElutionProfiles", [](const OpenMS::PeakPickerIM& self, OpenMS::MSSpectrum& input) { return self.pickIMElutionProfiles(input); }, "input"_a, "Use elution profile detection for IM peak picking.")
