@@ -95,7 +95,18 @@ namespace OpenMS
             if ((entry.valid_strings.size() == 2 && entry.valid_strings[0] == "true" && entry.valid_strings[1] == "false") ||
                 (entry.valid_strings.size() == 2 && entry.valid_strings[0] == "false" && entry.valid_strings[1] == "true"))
             {
-              value = node.get<bool>() ? "true" : "false";
+              // Accept either a native JSON boolean or the plain string
+              // "true"/"false" -- hand-written parameter files often use the
+              // latter, and there is no ambiguity since this parameter only
+              // ever takes one of these two values either way.
+              if (node.is_boolean())
+              {
+                value = node.get<bool>() ? "true" : "false";
+              }
+              else
+              {
+                value = node.get<std::string>();
+              }
             }
             else if (entry.tags.count("input file"))
             {

@@ -2396,7 +2396,11 @@ namespace OpenMS
     {
       out_dir_str = std::filesystem::current_path().generic_string();
     }
-    StringList type_list = ToolHandler::getTypes(tool_name_);
+    // ToolHandler::getTypes() throws for any tool not in OpenMS's hardcoded
+    // official-tools registry. Non-official tools (official_ == false) have
+    // no registered "type" concept anyway, so skip the lookup for them --
+    // the existing empty-list fallback below already handles that case.
+    StringList type_list = official_ ? ToolHandler::getTypes(tool_name_) : StringList();
     if (type_list.empty())
       type_list.push_back(""); // no type for most tools
 
