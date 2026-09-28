@@ -325,6 +325,12 @@ namespace OpenMS
 
     this->startProgress(0, mt_vec.size(), "elution peak detection");
 
+    // One bucket per input trace, so each worker only ever writes its own bucket (no
+    // shared-vector contention) and the buckets can be concatenated afterward in a fixed,
+    // deterministic order -- unlike a shared vector filled via mutex-guarded push_back,
+    // whose order otherwise follows thread completion timing.
+    std::vector<std::vector<MassTrace>> split_per_trace(mt_vec.size());
+
     if (num_threads > 0)
     {
       // Explicit thread budget: this is a caller (diaWeaver) running inside its own
@@ -334,7 +340,7 @@ namespace OpenMS
       // plain-C++-guaranteed synchronization point independent of the OpenMP runtime.
       OpenMS::parallelFor(mt_vec.size(), num_threads, [&](Size i)
       {
-        detectElutionPeaks_(mt_vec[i], single_mtraces);
+        detectElutionPeaks_(mt_vec[i], split_per_trace[i]);
       });
     }
     else
@@ -352,12 +358,17 @@ namespace OpenMS
 #endif
         ++progress;
 
-        // push_back to 'single_mtraces' is protected, so threading is ok
-        detectElutionPeaks_(mt_vec[i], single_mtraces);
+        detectElutionPeaks_(mt_vec[i], split_per_trace[static_cast<Size>(i)]);
       }
     }
 
     this->endProgress();
+
+    // Concatenate in input-trace order (fixed regardless of thread completion order)
+    for (auto& local_traces : split_per_trace)
+    {
+      for (auto& mt : local_traces) single_mtraces.push_back(std::move(mt));
+    }
 
     return;
   }
@@ -473,10 +484,7 @@ namespace OpenMS
           mt.estimateFWHM(true);
         }
 
-        {
-          std::lock_guard<std::mutex> lock(mtraces_mutex_);
-          single_mtraces.push_back(mt);
-        }
+        single_mtraces.push_back(mt);
 
       }
     }
@@ -556,10 +564,7 @@ namespace OpenMS
             new_mt.estimateFWHM(true);
           }
 
-          {
-            std::lock_guard<std::mutex> lock(mtraces_mutex_);
-            single_mtraces.push_back(new_mt);
-          }
+          single_mtraces.push_back(new_mt);
         }
         // ------------------------------- New addition -------------------------------
         // Currently, EPD only includes the split point minima in the trace eluting earlier (located to the left)

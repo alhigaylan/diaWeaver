@@ -14,7 +14,6 @@
 #include <OpenMS/KERNEL/MSExperiment.h>
 #include <OpenMS/KERNEL/MassTrace.h>
 
-#include <mutex>
 
 namespace OpenMS
 {
@@ -147,10 +146,6 @@ private:
 
     /// Main function to do the work
     void detectElutionPeaks_(MassTrace&, std::vector<MassTrace>&);
-
-    /// Guards push_back onto the shared single_mtraces vector in detectElutionPeaks_(),
-    /// which may be called concurrently by either OpenMP or std::thread workers.
-    std::mutex mtraces_mutex_;
   };
 
 } // namespace OpenMS

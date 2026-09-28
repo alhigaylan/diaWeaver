@@ -396,11 +396,7 @@ namespace OpenMS
     tmp_hypo.addMassTrace(*candidates[0]);
     tmp_hypo.setScore(0.0);
 
-    {
-      // pushing back to shared vector needs to be synchronized
-      std::lock_guard<std::mutex> lock(output_hypos_mutex_);
-      output_hypotheses.push_back(tmp_hypo);
-    }
+    output_hypotheses.push_back(tmp_hypo);
 
     for (Size charge = charge_lower_bound_; charge <= charge_upper_bound_; ++charge)
     {
@@ -497,11 +493,7 @@ namespace OpenMS
           fh_tmp.setCharge(charge);
           last_iso_idx = best_idx;
 
-          {
-            // pushing back to shared vector needs to be synchronized
-            std::lock_guard<std::mutex> lock(output_hypos_mutex_);
-            output_hypotheses.push_back(fh_tmp);
-          }
+          output_hypotheses.push_back(fh_tmp);
         }
         else
         {
@@ -536,7 +528,11 @@ namespace OpenMS
     // and generate isotopic / charge hypotheses
     // *********************************************************** //
 
-    std::vector<FeatureHypothesis> feat_hypos;
+    // One bucket per input trace, so each worker only ever writes its own bucket (no
+    // shared-vector contention) and the buckets can be concatenated afterward in a fixed,
+    // deterministic order -- unlike a shared vector filled via mutex-guarded push_back,
+    // whose order otherwise follows thread completion timing.
+    std::vector<std::vector<FeatureHypothesis>> hypos_per_trace(input_mtraces.size());
 
     auto process_trace = [&](Size i)
     {
@@ -563,7 +559,7 @@ namespace OpenMS
           local_traces.push_back(&input_mtraces[ext_idx]);
         }
       }
-      findLocalFeatures_(local_traces, feat_hypos);
+      findLocalFeatures_(local_traces, hypos_per_trace[i]);
     };
 
     if (num_threads > 0)
@@ -593,6 +589,13 @@ namespace OpenMS
       }
     }
     this->endProgress();
+
+    // Concatenate in input-trace order (fixed regardless of thread completion order)
+    std::vector<FeatureHypothesis> feat_hypos;
+    for (auto& local_hypos : hypos_per_trace)
+    {
+      for (auto& fh : local_hypos) feat_hypos.push_back(std::move(fh));
+    }
 
     // sort feature candidates by their score (descending)
     std::sort(feat_hypos.begin(), feat_hypos.end(), CmpHypothesesByScore());

@@ -10,7 +10,6 @@
 
 #include <OpenMS/FEATUREFINDER/FeatureFindingMetabo.h>
 
-#include <mutex>
 
 namespace OpenMS
 {
@@ -219,10 +218,6 @@ private:
     double rt_peak_overlap_threshold_;
     double rt_min_pearson_correlation_;
     int rt_max_lag_;
-
-    /// Guards push_back onto the shared output_hypotheses vector in findLocalFeatures_(),
-    /// which may be called concurrently by either OpenMP or std::thread workers.
-    mutable std::mutex output_hypos_mutex_;
   };
 
 }
