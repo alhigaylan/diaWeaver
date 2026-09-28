@@ -1162,7 +1162,7 @@ protected:
 
           ClusterMassTracesByPrecursor clusterFragments;
           clusterFragments.setParameters(window_cluster_param);
-          clusterFragments.run(precursor_features, precursor_traces, ms2_traces, w.lower_mz, w.upper_mz, pseudo_spectra);
+          clusterFragments.run(precursor_features, precursor_traces, ms2_traces, w.lower_mz, w.upper_mz, pseudo_spectra, static_cast<Int>(idx));
 
           if (!pseudo_spectra.empty())
           {
@@ -1305,7 +1305,7 @@ protected:
 
           ClusterMassTracesByPrecursor clusterFragments;
           clusterFragments.setParameters(window_cluster_param);
-          clusterFragments.run(ms1_features, ms1_traces, ms2_traces, w.lower_mz, w.upper_mz, pseudo_spectra);
+          clusterFragments.run(ms1_features, ms1_traces, ms2_traces, w.lower_mz, w.upper_mz, pseudo_spectra, static_cast<Int>(idx));
 
           if (!pseudo_spectra.empty())
           {
