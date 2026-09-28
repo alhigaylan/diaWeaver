@@ -31,6 +31,16 @@ generation identically to a cataloged one. This was verified empirically (multip
 modifications combine additively; N-/C-terminal and internal deltas each affect exactly
 the b/y ions that span them) before relying on it here.
 
+<B>Fragment ion charge (max_fragment_charge, default 2).</B> Theoretical b/y ions are
+generated up to min(max_fragment_charge, precursor charge), not the full precursor charge.
+MSFragger's own fragment charge cap (fragger.params) is a small fixed value independent of
+precursor charge, not precursor_charge-1 -- matching ion charges above that would compare
+against fragment charge states MSFragger's own search never considered, inflating matched
+ion counts and recomputed hyperscore for higher-charge PSMs specifically (verified: capping
+at 2 instead of the full precursor charge dropped one real charge-4 PSM's Internal Initial
+Hyperscore from 109.6 to 88.3, closing about 40% of its gap to MSFragger's own reported
+score of 58.9).
+
 <B>Spectrum resolution.</B> psm.tsv's "Spectrum" field encodes a 0-based scan number that
 maps to the original mzML's 1-based "scan=N" native ID as scan+1 (verified empirically).
 Resolution is cross-checked against RT and precursor m/z (not charge -- MSFragger can
@@ -642,6 +652,16 @@ protected:
                           "scan-mapping errors, not used as a search window.", false);
     setMinFloat_("rt_tolerance", 0.0);
 
+    registerIntOption_("max_fragment_charge", "<charge>", 2,
+                       "Maximum charge state for theoretical b/y fragment ions, independent of precursor "
+                       "charge. MSFragger's own max_fragment_charge parameter (see fragger.params) is "
+                       "typically a small fixed value (e.g. 2), not precursor_charge-1 -- generating "
+                       "fragment ions up to the full precursor charge (the previous default here) matches "
+                       "against ion charge states MSFragger never searched at all, inflating both matched-ion "
+                       "counts and recomputed hyperscore for higher-charge PSMs. The effective cap applied is "
+                       "min(max_fragment_charge, psm charge).", false);
+    setMinInt_("max_fragment_charge", 1);
+
     registerStringOption_("allow_peptidoform_fragment_sharing", "<true/false>", "true",
                           "If true (default), a naked peptide and a co-eluting modified peptide of the same "
                           "backbone sequence (or two differently-modified forms of the same backbone) are "
@@ -676,6 +696,7 @@ protected:
     const double frag_ppm = getDoubleOption_("fragment_mz_tolerance");
     const double prec_ppm = getDoubleOption_("precursor_mz_tolerance");
     const double rt_tol = getDoubleOption_("rt_tolerance");
+    const int max_fragment_charge = getIntOption_("max_fragment_charge");
     const bool allow_peptidoform_sharing = (getStringOption_("allow_peptidoform_fragment_sharing") == "true");
     const bool neutral_losses = getFlag_("neutral_losses");
 
@@ -870,7 +891,13 @@ protected:
       catch (const Exception::BaseException&) { continue; } // already validated during parsing
 
       PeakSpectrum theo;
-      tsg.getSpectrum(theo, aa_seq, 1, psm.charge);
+      // Cap fragment ion charge at max_fragment_charge (default 2, matching MSFragger's own
+      // fixed cap in fragger.params), not the full precursor charge -- a fragment can't
+      // physically exceed the precursor's charge, but MSFragger's search never considers
+      // ion charges above its configured max regardless of precursor charge, so matching
+      // higher would find ions MSFragger itself never searched for.
+      const int theo_max_charge = std::min(max_fragment_charge, psm.charge);
+      tsg.getSpectrum(theo, aa_seq, 1, theo_max_charge);
       const auto& ion_names = theo.getStringDataArrays().at(0);
 
       const String& pep_id = psm.openms_sequence;
