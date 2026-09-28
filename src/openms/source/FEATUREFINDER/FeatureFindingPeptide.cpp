@@ -67,13 +67,6 @@ namespace OpenMS
     defaults_.setValue("rt_max_lag", 5, "Maximum lag (in number of scans) allowed when computing the normalized cross-correlation between two isotopic elution profiles. A value of 5 permits isotope traces shifted by up to 5 scans relative to the monoisotopic trace. Usually should match local_rt_range");
     defaults_.setMinInt("rt_max_lag", 0);
 
-    defaults_.setValue("overlapping_features", "false", "Allow low-confidence hypotheses (below the hypothesis_score_quantile threshold) to reuse mass traces already claimed by higher-scoring features, provided they propose a different charge state.");
-    defaults_.setValidStrings("overlapping_features", {"false","true"});
-
-    defaults_.setValue("hypothesis_score_quantile", 0.5, "Quantile of hypothesis scores used as the low-confidence threshold when overlapping_features is enabled. Hypotheses scoring below this quantile may reuse traces from higher-scoring features at a different charge state. Default is the 50th percentile (median).");
-    defaults_.setMinFloat("hypothesis_score_quantile", 0.0);
-    defaults_.setMaxFloat("hypothesis_score_quantile", 1.0);
-
     defaults_.setValue("mass_defect_filtering", "true", "Filter feature hypotheses by peptide mass defect boundaries (adapted from DIA-Umpire). Rejects features whose mass defect falls outside the linear boundary defined for peptides.");
     defaults_.setValidStrings("mass_defect_filtering", {"false","true"});
     defaults_.setValue("mass_defect_offset", 0.1, "Mass defect tolerance offset (in Da, applied to the fractional mass) for the peptide mass defect filter. Increasing defect tolerance is recommended for modified peptides", {"advanced"});
@@ -120,8 +113,6 @@ namespace OpenMS
     rt_peak_overlap_threshold_ = (double)param_.getValue("rt_peak_overlap_threshold");
     rt_min_pearson_correlation_ = (double)param_.getValue("rt_min_pearson_correlation");
     rt_max_lag_ = (int)param_.getValue("rt_max_lag");
-    overlapping_features_ = param_.getValue("overlapping_features").toBool();
-    hypothesis_score_quantile_ = (double)param_.getValue("hypothesis_score_quantile");
     enable_mass_defect_filtering_ = param_.getValue("mass_defect_filtering").toBool();
     mass_defect_offset_ = (double)param_.getValue("mass_defect_offset");
     minimum_isotopes_nr_ = static_cast<Size>((int)param_.getValue("minimum_isotopes_nr"));
@@ -612,15 +603,6 @@ namespace OpenMS
         }),
       feat_hypos.end());
 
-    // Compute the score threshold at hypothesis_score_quantile_.
-    // The vector is sorted descending, so the quantile index from the high end
-    // maps to position (size * (1 - quantile)).
-    // Used only when overlapping_features_ is enabled: hypotheses below this
-    // threshold are allowed to reuse traces from already-accepted features if
-    // they propose a different charge state for the same monoisotopic trace.
-    const Size quantile_idx = feat_hypos.empty() ? 0 : static_cast<Size>(feat_hypos.size() * (1.0 - hypothesis_score_quantile_));
-    const double score_quantile = feat_hypos.empty() ? 0.0 : feat_hypos[std::min(quantile_idx, feat_hypos.size() - 1)].getScore();
-
 #ifdef FFM_DEBUG
     std::cout << "size of hypotheses: " << feat_hypos.size() << '\n';
     // output all hypotheses:
@@ -637,74 +619,26 @@ namespace OpenMS
     // already been used by a higher scoring hypothesis.
     // *********************************************************** //
 
-    // Two exclusion maps implement the overlapping_features_ semantics:
-    //   strict_excl: traces claimed by high-confidence hypotheses (score >= quantile AND >= 3 isotopes).
-    //                Hard block — no later hypothesis may reuse these traces regardless of charge.
-    //   soft_excl:   traces claimed by low-confidence hypotheses (score < quantile OR < 3 isotopes).
-    //                Soft block — a later low-confidence hypothesis may reuse a trace here
-    //                only if it proposes a different charge state.
-    std::set<String> strict_excl;
-    std::multimap<String, int> soft_excl;
+    // A trace claimed by an already-accepted hypothesis may not be reused by a later,
+    // lower-scoring one.
+    std::set<String> claimed_traces;
 
     for (Size hypo_idx = 0; hypo_idx < feat_hypos.size(); ++hypo_idx)
     {
       const std::vector<String>& labels = feat_hypos[hypo_idx].getLabels();
-      int current_charge = feat_hypos[hypo_idx].getCharge();
-      const bool is_low_confidence = overlapping_features_ &&
-        (feat_hypos[hypo_idx].getScore() < score_quantile || feat_hypos[hypo_idx].getSize() < 3);
 
-      // Rule 1: any trace in strict_excl (claimed by a high-confidence hypothesis) → always skip.
-      bool strict_coll = false;
+      bool collision = false;
       for (const auto& lab : labels)
       {
-        if (strict_excl.count(lab))
+        if (claimed_traces.count(lab))
         {
-          strict_coll = true;
+          collision = true;
           break;
         }
       }
-      if (strict_coll) continue;
+      if (collision) continue;
 
-      // Rule 2: check soft_excl (traces from low-confidence hypotheses).
-      bool soft_coll = false;
-      for (const auto& lab : labels)
-      {
-        if (soft_excl.count(lab))
-        {
-          soft_coll = true;
-          break;
-        }
-      }
-
-      if (soft_coll)
-      {
-        // Low-confidence: allowed only if no soft claim exists at the same charge.
-        bool same_charge_coll = false;
-        for (const auto& lab : labels)
-        {
-          auto range = soft_excl.equal_range(lab);
-          for (auto it = range.first; it != range.second; ++it)
-          {
-            if (it->second == current_charge)
-            {
-              same_charge_coll = true;
-              break;
-            }
-          }
-          if (same_charge_coll) break;
-        }
-        if (same_charge_coll) continue;
-      }
-
-      // Accept hypothesis → register traces in the appropriate exclusion map.
-      if (is_low_confidence)
-      {
-        for (const auto& lab : labels) soft_excl.emplace(lab, current_charge);
-      }
-      else
-      {
-        for (const auto& lab : labels) strict_excl.insert(lab);
-      }
+      for (const auto& lab : labels) claimed_traces.insert(lab);
 
       // filter out single traces if option is set
       if (remove_single_traces_ && feat_hypos[hypo_idx].getCharge() == 0)
