@@ -144,6 +144,7 @@ XMLValidator
 diaWeaver
 diaWeaverPeptide
 diaWeaverCounter
+diaWeaverIonAccount
 SpokeML
 )
 
