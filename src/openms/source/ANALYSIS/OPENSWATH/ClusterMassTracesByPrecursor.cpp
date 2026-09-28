@@ -26,7 +26,7 @@ namespace OpenMS
     max_lag_(1),
     max_rt_apex_difference_(5.0),
     min_nr_ions_(3),
-    im_tolerance_(0.02),
+    max_im_apex_difference_(0.02),
     assign_unassigned_to_all_(false),
     rt_tolerance_(2.0),
     nr_precursors_per_fragment_(25),
@@ -55,9 +55,9 @@ namespace OpenMS
       "Minimal number of fragment ions to report a pseudo spectrum.");
     defaults_.setMinInt("min_nr_ions", 1);
 
-    defaults_.setValue("im_tolerance", 0.02,
-      "Ion mobility tolerance for matching precursors to fragments. Set to 0 to disable IM filtering.");
-    defaults_.setMinFloat("im_tolerance", 0.0);
+    defaults_.setValue("max_im_apex_difference", 0.02,
+      "Maximum ion mobility apex difference for matching precursors to fragments. Set to 0 to disable IM filtering.");
+    defaults_.setMinFloat("max_im_apex_difference", 0.0);
 
     defaults_.setValue("assign_unassigned_to_all", "false",
       "Assign unassigned MS2 fragments to all precursors within RT range.");
@@ -118,7 +118,7 @@ namespace OpenMS
     max_lag_ = param_.getValue("max_lag");
     max_rt_apex_difference_ = param_.getValue("max_rt_apex_difference");
     min_nr_ions_ = static_cast<Size>(static_cast<int>(param_.getValue("min_nr_ions")));
-    im_tolerance_ = param_.getValue("im_tolerance");
+    max_im_apex_difference_ = param_.getValue("max_im_apex_difference");
     assign_unassigned_to_all_ = param_.getValue("assign_unassigned_to_all").toBool();
     rt_tolerance_ = param_.getValue("rt_tolerance");
     nr_precursors_per_fragment_ = static_cast<Size>(static_cast<int>(param_.getValue("nr_precursors_per_fragment")));
@@ -615,9 +615,9 @@ namespace OpenMS
         }
 
         // Check ion mobility tolerance (if IM data is present)
-        if (has_im_data && im_tolerance_ > 0)
+        if (has_im_data && max_im_apex_difference_ > 0)
         {
-          if (std::fabs(precursor_im[i] - fragment_im[j]) > im_tolerance_)
+          if (std::fabs(precursor_im[i] - fragment_im[j]) > max_im_apex_difference_)
           {
             continue;
           }
@@ -653,7 +653,7 @@ namespace OpenMS
     // Combined score = w_pearson * normalized_pearson + w_rt * normalized_rt + w_im * normalized_im
     // normalized_pearson: (pearson - min_pearson_correlation_) / (1 - min_pearson_correlation_)  -> [0, 1]
     // normalized_rt:      1 - (delta_rt / max_rt_apex_difference_)                               -> [0, 1]
-    // normalized_im:      1 - (delta_im / im_tolerance_)                                         -> [0, 1]
+    // normalized_im:      1 - (delta_im / max_im_apex_difference_)                                         -> [0, 1]
     double pearson_range = 1.0 - min_pearson_correlation_;
     Size cnt_fragments_filtered = 0;
     for (Size j = 0; j < fragment_assignments.size(); ++j)
@@ -671,7 +671,7 @@ namespace OpenMS
                     {
                       double norm_pearson = (hs.pearson - min_pearson_correlation_) / pearson_range;
                       double norm_rt = 1.0 - (hs.delta_rt / max_rt_apex_difference_);
-                      double norm_im = (has_im_data && im_tolerance_ > 0) ? 1.0 - (hs.delta_im / im_tolerance_) : 1.0;
+                      double norm_im = (has_im_data && max_im_apex_difference_ > 0) ? 1.0 - (hs.delta_im / max_im_apex_difference_) : 1.0;
                       return (pearson_weight_ * norm_pearson) + (delta_rt_weight_ * norm_rt) + (delta_im_weight_ * norm_im);
                     };
                     return combined(a) > combined(b);
@@ -826,7 +826,7 @@ namespace OpenMS
                     {
                       double norm_pearson = (hs.pearson - min_pearson_correlation_) / pearson_range;
                       double norm_rt = 1.0 - (hs.delta_rt / max_rt_apex_difference_);
-                      double norm_im = (has_im_data && im_tolerance_ > 0) ? 1.0 - (hs.delta_im / im_tolerance_) : 1.0;
+                      double norm_im = (has_im_data && max_im_apex_difference_ > 0) ? 1.0 - (hs.delta_im / max_im_apex_difference_) : 1.0;
                       return (pearson_weight_ * norm_pearson) + (delta_rt_weight_ * norm_rt) + (delta_im_weight_ * norm_im);
                     };
                     return combined(a) > combined(b);
@@ -933,8 +933,8 @@ namespace OpenMS
       for (Size j = 0; j < fragment_profiles.size(); ++j)
       {
         if (std::fabs(current_rt - fragment_rt[j]) > max_rt_apex_difference_) continue;
-        if (has_im_data && im_tolerance_ > 0)
-          if (std::fabs(precursor_im[i] - fragment_im[j]) > im_tolerance_) continue;
+        if (has_im_data && max_im_apex_difference_ > 0)
+          if (std::fabs(precursor_im[i] - fragment_im[j]) > max_im_apex_difference_) continue;
         if (fragment_mz[j] >= swath_lower && fragment_mz[j] <= swath_upper) continue;
 
         int lag; double lag_intensity, pearson_score;
@@ -967,7 +967,7 @@ namespace OpenMS
                     {
                       double np = (hs.pearson - min_pearson_correlation_) / pearson_range;
                       double nr = 1.0 - (hs.delta_rt / max_rt_apex_difference_);
-                      double ni = (has_im_data && im_tolerance_ > 0) ? 1.0 - (hs.delta_im / im_tolerance_) : 1.0;
+                      double ni = (has_im_data && max_im_apex_difference_ > 0) ? 1.0 - (hs.delta_im / max_im_apex_difference_) : 1.0;
                       return (pearson_weight_ * np) + (delta_rt_weight_ * nr) + (delta_im_weight_ * ni);
                     };
                     return score(a) > score(b);
@@ -1011,7 +1011,7 @@ namespace OpenMS
                     {
                       double np = (hs.pearson - min_pearson_correlation_) / pearson_range;
                       double nr = 1.0 - (hs.delta_rt / max_rt_apex_difference_);
-                      double ni = (has_im_data && im_tolerance_ > 0) ? 1.0 - (hs.delta_im / im_tolerance_) : 1.0;
+                      double ni = (has_im_data && max_im_apex_difference_ > 0) ? 1.0 - (hs.delta_im / max_im_apex_difference_) : 1.0;
                       return (pearson_weight_ * np) + (delta_rt_weight_ * nr) + (delta_im_weight_ * ni);
                     };
                     return score(a) > score(b);

@@ -348,8 +348,6 @@ protected:
       p_ffp.setValue("use_smoothed_intensities", "true", "Use Savitzky-Golay smoothed intensities (produced by ElutionPeakDetection) instead of raw intensities.");
       p_ffp.setValue("mass_defect_filtering", "true", "Filter feature hypotheses by peptide mass defect boundaries.");
       p_ffp.setValue("mass_defect_offset", 0.1, "Mass defect tolerance offset for the peptide mass defect filter.");
-      p_ffp.setValue("overlapping_features", "false", "Allow low-confidence hypotheses to reuse mass traces already claimed by higher-scoring features, provided they propose a different charge state.");
-      p_ffp.setValue("hypothesis_score_quantile", 0.5, "Score quantile threshold used to classify hypotheses as low-confidence when overlapping_features is true. Hypotheses scoring below this quantile may reuse traces from higher-scoring features at a different charge state.");
       p_ffp.setValue("rt_max_lag", 5, "Maximum lag (in scans) for normalised cross-correlation between isotope elution profiles.");
       p_ffp.setValue("rt_min_pearson_correlation", 0.3, "Minimum Pearson correlation between two mass trace elution profiles.");
       p_ffp.setValue("rt_peak_overlap_threshold", 0.3, "Minimum FWHM overlap proportion required between two co-eluting mass traces.");
@@ -454,8 +452,6 @@ protected:
       p_ffp.setValue("use_smoothed_intensities", "true", "Use Savitzky-Golay smoothed intensities.");
       p_ffp.setValue("mass_defect_filtering", "false", "Fragment ions do not follow peptide mass defect rules; disabled for MS2.");
       p_ffp.setValue("mass_defect_offset", 0.1, "Mass defect tolerance offset.");
-      p_ffp.setValue("overlapping_features", "false", "Allow low-confidence hypotheses to reuse traces.");
-      p_ffp.setValue("hypothesis_score_quantile", 0.5, "Score quantile threshold for low-confidence hypotheses.");
       p_ffp.setValue("rt_max_lag", 5, "Maximum lag for cross-correlation.");
       p_ffp.setValue("rt_min_pearson_correlation", 0.7, "Minimum Pearson correlation between two mass trace elution profiles for MS2 isotope grouping.");
       p_ffp.setValue("rt_peak_overlap_threshold", 0.3, "Minimum FWHM overlap proportion.");
@@ -474,7 +470,7 @@ protected:
       p.setValue("max_lag", 1, "Maximal lag (e.g. by how many spectra the peak may be shifted at most).");
       p.setValue("min_nr_ions", 30, "Minimal number of ions to report a spectrum.");
       p.setValue("max_rt_apex_difference", 5.0, "Maximal difference of the apex in retention time (in seconds).");
-      p.setValue("im_tolerance", 0.02, "Ion mobility tolerance for matching precursors to fragments.");
+      p.setValue("max_im_apex_difference", 0.02, "Maximum ion mobility apex difference for matching precursors to fragments.");
       p.setValue("nr_precursors_per_fragment", 50, "Maximum number of precursors a fragment can be assigned to.");
       p.setValue("rt_tolerance", 2.0, "RT tolerance (in seconds) for matching up mass trace points during correlation. Ignored when auto_detect_rt_tolerance is true.");
       p.setValue("auto_detect_rt_tolerance", "true", "Estimate rt_tolerance from the data. MS1-vs-MS2 clustering uses the median RT gap between consecutive MS1 scans (median MS1 cycle time); precursor-vs-MS2 clustering (both from the same scans) uses 0.001 s.");

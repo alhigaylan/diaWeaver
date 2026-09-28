@@ -625,8 +625,6 @@ protected:
       p_ffp.setValue("use_smoothed_intensities", "true", "Use Savitzky-Golay smoothed intensities.");
       p_ffp.setValue("mass_defect_filtering", "true", "Filter by peptide mass defect boundaries.");
       p_ffp.setValue("mass_defect_offset", 0.1, "Mass defect tolerance offset.");
-      p_ffp.setValue("overlapping_features", "false", "Allow low-confidence hypotheses to reuse traces.");
-      p_ffp.setValue("hypothesis_score_quantile", 0.5, "Score quantile threshold for low-confidence hypotheses.");
       p_ffp.setValue("rt_max_lag", 5, "Maximum lag for cross-correlation.");
       p_ffp.setValue("rt_min_pearson_correlation", 0.3, "Minimum Pearson correlation.");
       p_ffp.setValue("rt_peak_overlap_threshold", 0.3, "Minimum FWHM overlap proportion.");
@@ -723,8 +721,6 @@ protected:
       p_ffp.setValue("use_smoothed_intensities", "true", "Use Savitzky-Golay smoothed intensities.");
       p_ffp.setValue("mass_defect_filtering", "false", "Fragment ions do not follow peptide mass defect rules; disabled for MS2.");
       p_ffp.setValue("mass_defect_offset", 0.1, "Mass defect tolerance offset.");
-      p_ffp.setValue("overlapping_features", "false", "Allow low-confidence hypotheses to reuse traces.");
-      p_ffp.setValue("hypothesis_score_quantile", 0.5, "Score quantile threshold for low-confidence hypotheses.");
       p_ffp.setValue("rt_max_lag", 5, "Maximum lag for cross-correlation.");
       p_ffp.setValue("rt_min_pearson_correlation", 0.7, "Minimum Pearson correlation between two mass trace elution profiles for MS2 isotope grouping.");
       p_ffp.setValue("rt_peak_overlap_threshold", 0.3, "Minimum FWHM overlap proportion.");
@@ -743,7 +739,7 @@ protected:
       p.setValue("max_lag", 1, "Maximal lag for cross-correlation.");
       p.setValue("min_nr_ions", 30, "Minimal number of ions to report a spectrum.");
       p.setValue("max_rt_apex_difference", 5.0, "Maximal retention time difference at apex (seconds).");
-      p.setValue("im_tolerance", 0.02, "Ion mobility tolerance for precursor-fragment matching.");
+      p.setValue("max_im_apex_difference", 0.02, "Maximum ion mobility apex difference for precursor-fragment matching.");
       p.setValue("nr_precursors_per_fragment", 50, "Maximum number of precursors a fragment can be assigned to.");
       p.setValue("rt_tolerance", 2.0, "RT tolerance for mass trace point correlation (seconds).");
       p.setValue("pearson_weight", 1.0, "Weight for Pearson correlation in combined score.");

@@ -228,8 +228,8 @@ namespace OpenMS
     /// Minimum number of ions to report a spectrum
     Size min_nr_ions_;
 
-    /// Ion mobility tolerance for matching precursors to fragments
-    double im_tolerance_;
+    /// Maximum ion mobility apex difference for matching precursors to fragments
+    double max_im_apex_difference_;
 
     /// Whether to assign unassigned fragments to all matching precursors
     bool assign_unassigned_to_all_;
