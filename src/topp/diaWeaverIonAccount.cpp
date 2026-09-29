@@ -880,6 +880,11 @@ protected:
     // in PASS 2 below, once `usage` is fully populated across every PSM.
     FragmentClaimRegistry registry;
     std::unordered_map<FragmentClaimRegistry::TraceKey, std::vector<UsageTouch>> usage;
+    // A trace's own m/z and intensity, captured on first touch. First touch is always the
+    // winner (whoever is processed first among everyone who ever touches a given key always
+    // claims it -- there is no earlier-priority PSM left to touch it after), so this is
+    // exactly the winning PSM's observed values, not an arbitrary or averaged one.
+    std::unordered_map<FragmentClaimRegistry::TraceKey, std::pair<double, float>> fragment_peak_info;
     std::vector<PsmAccounting> accounting;
     accounting.reserve(resolved.size());
 
@@ -948,6 +953,7 @@ protected:
         const float inten = rp.peak_intensity[peak_idx];
 
         usage[key].push_back({pep_id, rp.native_scan, ion_label});
+        fragment_peak_info.try_emplace(key, rp.peak_mz[peak_idx], inten);
 
         // Internal Initial Hyperscore: accumulate over every match, regardless of claim outcome.
         if (is_b) ++nb_all; else ++ny_all;
@@ -1128,7 +1134,7 @@ protected:
         OPENMS_LOG_ERROR << "[diaWeaverIonAccount] Cannot write output TSV: " << out_fragment_usage << "\n";
         return CANNOT_WRITE_OUTPUT_FILE;
       }
-      f << "window_id\tfragment_id\tcategory\tWinning PSM\tWinning Fragment Ion Annotation\t"
+      f << "window_id\tfragment_id\tmz\tintensity\tcategory\tWinning PSM\tWinning Fragment Ion Annotation\t"
            "Competing PSMs\tCompeting Fragment Ion Annotation\n";
 
       Size n_unique = 0, n_peptidoform = 0, n_shared = 0;
@@ -1139,6 +1145,10 @@ protected:
 
         const auto* rec = registry.getClaimRecord(key);
         if (rec == nullptr) continue; // every touched key is claimed by construction; defensive only
+
+        const auto info_it = fragment_peak_info.find(key);
+        const double frag_mz = (info_it != fragment_peak_info.end()) ? info_it->second.first : 0.0;
+        const float frag_intensity = (info_it != fragment_peak_info.end()) ? info_it->second.second : 0.0f;
 
         const int owner_scan = static_cast<int>(rec->spectrum_idx) + 1;
         const auto owner_it = seq_registry.find(rec->peptide_seq);
@@ -1194,7 +1204,8 @@ protected:
         else if (any_genuine_collision) { category = "shared_fragments"; ++n_shared; }
         else { category = "peptidoform_shared_fragments"; ++n_peptidoform; }
 
-        f << window_id << "\t" << fragment_id << "\t" << category << "\t" << owner_scan << "\t"
+        f << window_id << "\t" << fragment_id << "\t" << frag_mz << "\t" << frag_intensity << "\t"
+          << category << "\t" << owner_scan << "\t"
           << winner_annotation << "\t" << competing_psms << "\t" << competing_annotation << "\n";
       }
       OPENMS_LOG_INFO << "[diaWeaverIonAccount] Wrote: " << out_fragment_usage << "\n"
