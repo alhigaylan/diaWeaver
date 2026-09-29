@@ -149,6 +149,7 @@ downstream analysis can still separate or recombine files as needed.
 #include <fstream>
 #include <limits>
 #include <map>
+#include <set>
 #include <unordered_map>
 #include <vector>
 
@@ -815,18 +816,32 @@ protected:
     Size total_resolved = 0, total_psms_seen = 0, total_claimed = 0;
     Size total_unique = 0, total_peptidoform = 0, total_shared = 0;
 
+    // Distinct run stems present in psm.tsv, and which of them get covered by at least one
+    // -in file below. Anything left uncovered after the loop is a silent-drop hazard -- those
+    // psm.tsv rows would otherwise vanish from every output with no trace, so it is checked
+    // and reported explicitly rather than left implicit.
+    std::set<String> psm_run_stems;
+    for (const PsmEntry& p : all_psms) psm_run_stems.insert(p.run_stem);
+    std::set<String> matched_run_stems;
+    std::vector<String> files_zero_match;
+    std::vector<String> files_failed_open;
+
     for (const String& in : in_files)
     {
     const String file_run_stem = mzmlBasenameStem_(in);
     std::vector<PsmEntry> psms;
     for (const PsmEntry& p : all_psms)
-      if (runStemsMatch_(file_run_stem, p.run_stem)) psms.push_back(p);
+      if (runStemsMatch_(file_run_stem, p.run_stem)) { psms.push_back(p); matched_run_stems.insert(p.run_stem); }
 
     OPENMS_LOG_INFO << "\n[diaWeaverIonAccount] === File: " << in << " (run stem '" << file_run_stem
                     << "') -- " << psms.size() << " / " << all_psms.size() << " psm.tsv rows matched ===\n";
     if (psms.empty())
     {
-      OPENMS_LOG_WARN << "[diaWeaverIonAccount] No psm.tsv rows matched this file's run stem. Skipping.\n";
+      OPENMS_LOG_WARN << "[diaWeaverIonAccount] WARNING: -in file '" << in << "' (run stem '" << file_run_stem
+                       << "') matched NO psm.tsv rows. It will be skipped entirely -- if psm.tsv was meant to "
+                          "contain identifications for it, check that its run stem is a boundary-prefix of (or "
+                          "prefixed by) this file's basename.\n";
+      files_zero_match.push_back(in);
       continue;
     }
     total_psms_seen += psms.size();
@@ -836,7 +851,9 @@ protected:
     OnDiscMSExperiment on_disc;
     if (!on_disc.openFile(in))
     {
-      OPENMS_LOG_ERROR << "[diaWeaverIonAccount] Failed to open as indexed mzML: " << in << ". Skipping file.\n";
+      OPENMS_LOG_ERROR << "[diaWeaverIonAccount] WARNING: failed to open '" << in << "' as indexed mzML -- "
+                        << psms.size() << " matching psm.tsv row(s) will NOT be processed. Skipping file.\n";
+      files_failed_open.push_back(in);
       continue;
     }
     const Size n_spec = on_disc.getNrSpectra();
@@ -1311,8 +1328,32 @@ protected:
     total_claimed += registry.claimedCount();
     } // end for (const String& in : in_files)
 
+    // ---- Cross-check: any psm.tsv run stem not covered by ANY -in file? ----
+    // This is the reverse direction of the per-file "matched NO psm.tsv rows" warning above:
+    // a run stem present in psm.tsv but never matched by any -in file means those PSMs are
+    // dropped from every output with no other trace, so it must be surfaced explicitly.
+    std::vector<String> unmatched_stems;
+    Size n_unmatched_psms = 0;
+    for (const String& stem : psm_run_stems)
+    {
+      if (matched_run_stems.count(stem)) continue;
+      unmatched_stems.push_back(stem);
+      for (const PsmEntry& p : all_psms) if (p.run_stem == stem) ++n_unmatched_psms;
+    }
+    if (!unmatched_stems.empty())
+    {
+      OPENMS_LOG_WARN << "\n[diaWeaverIonAccount] WARNING: " << n_unmatched_psms << " psm.tsv row(s) belong to "
+                       << unmatched_stems.size() << " run stem(s) not covered by ANY -in file -- these PSMs were "
+                          "NOT processed and do not appear in any output:\n";
+      for (const String& stem : unmatched_stems) OPENMS_LOG_WARN << "    '" << stem << "'\n";
+      OPENMS_LOG_WARN << "  If these belong to mzML files you intended to include, pass them via -in.\n";
+    }
+
     OPENMS_LOG_INFO << "\n[diaWeaverIonAccount] === Summary across " << in_files.size() << " file(s) ===\n"
                     << "  psm.tsv rows matched to a file  : " << total_psms_seen << " / " << all_psms.size() << "\n"
+                    << "  psm.tsv run stems uncovered      : " << unmatched_stems.size() << " (" << n_unmatched_psms << " row(s))\n"
+                    << "  -in files matching 0 psm.tsv rows: " << files_zero_match.size() << "\n"
+                    << "  -in files that failed to open    : " << files_failed_open.size() << "\n"
                     << "  PSMs resolved to a spectrum     : " << total_resolved << "\n"
                     << "  fragment ions claimed            : " << total_claimed << "\n"
                     << "  unique_fragment_ion              : " << total_unique << "\n"
