@@ -109,6 +109,24 @@ owner (competitors) -- regardless of whether a competitor's match was later cred
 its own score via the peptidoform exemption. Intended for downstream use in building a
 spectral library from unambiguous fragments for peptide quantification.
 
+<B>Multiple input files (-in).</B> MSFragger/FragPipe can search several mzML files in one
+combined run, producing a single psm.tsv whose "Spectrum" field embeds the source run's
+name (e.g. "0p5_msfragger-format.02345.02345.2"). Each "-in" file is matched to its own
+subset of psm.tsv rows by a boundary-aware prefix comparison between the mzML's basename
+(minus extension) and that embedded run stem: one is accepted as a match for the other if
+it is a prefix of it and the very next character (if any) is non-alphanumeric. This makes
+the match agnostic to whatever suffix a given naming convention appends when handing files
+to MSFragger (e.g. a diaWeaver output "pseudo_spectra.mzML" matches a psm.tsv run stem of
+"pseudo_spectra_msfragger" or "pseudo_spectra_msfragger-format" alike) while still
+rejecting an unrelated file whose name happens to share only a partial prefix (e.g.
+"cell1" does not match "cell10_msfragger"). A file whose run stem matches no psm.tsv rows,
+or that cannot be opened as indexed mzML, is logged and skipped rather than aborting the
+whole invocation. Fragment claiming is scoped independently per file -- a PSM from one
+file never competes with a PSM from another, since (window_id, fragment_id) numbering is
+local to each acquisition and not guaranteed unique across separate files. Every output
+row across all files carries a leading "source_file" column (the exact "-in" path) so
+downstream analysis can still separate or recombine files as needed.
+
 <B>The command line parameters of this tool are:</B>
 @verbinclude TOPP_diaWeaverIonAccount.cli
 <B>INI file documentation of this tool:</B>
@@ -122,6 +140,7 @@ spectral library from unambiguous fragments for peptide quantification.
 #include <OpenMS/CONCEPT/Exception.h>
 #include <OpenMS/KERNEL/MSSpectrum.h>
 #include <OpenMS/KERNEL/OnDiscMSExperiment.h>
+#include <OpenMS/SYSTEM/File.h>
 
 #include <algorithm>
 #include <cctype>
@@ -166,6 +185,7 @@ protected:
     double hyperscore = 0.0;             // "Hyperscore" column, MSFragger's original value, untouched by Percolator/MSBooster
     int psm_scan = -1;                   // 0-based scan number parsed from "Spectrum"
     String spectrum_field;
+    String run_stem;                     // "Spectrum" field with the trailing .scan.scan.charge stripped
 
     bool isModified() const { return !mods.empty(); }
   };
@@ -454,7 +474,9 @@ protected:
   // e.g. "0p5_pseudo_spectra_msfragger.00001.00001.2" -> 1.
   // Returns -1 on any parse failure or if the two scan tokens disagree.
   // -------------------------------------------------------------------------
-  static int parseScanFromSpectrumField_(const String& spectrum_field)
+  // Parses "{run_stem}.{scan}.{scan}.{charge}" -> 0-based scan number, and writes the
+  // run_stem (everything before the three trailing dot-segments) to out_run_stem.
+  static int parseScanFromSpectrumField_(const String& spectrum_field, String& out_run_stem)
   {
     String rest = spectrum_field;
     String tail[3];
@@ -465,6 +487,7 @@ protected:
       tail[i] = rest.substr(dot + 1);
       rest = rest.prefix(dot);
     }
+    out_run_stem = rest;
     try
     {
       const int scan1 = tail[0].toInt();
@@ -473,6 +496,30 @@ protected:
       return scan1;
     }
     catch (const Exception::BaseException&) { return -1; }
+  }
+
+  // True if `shorter` is a prefix of `longer` AND the character immediately following that
+  // prefix in `longer` is not alphanumeric (end-of-string counts as a boundary too). This is
+  // how an mzML's own basename ("pseudo_spectra") is matched against the run stem embedded
+  // in psm.tsv's Spectrum column, which names the file MSFragger actually searched and can
+  // carry an arbitrary appended suffix ("pseudo_spectra_msfragger",
+  // "pseudo_spectra_msfragger-format", ...) rather than one specific hardcoded string.
+  // The boundary check exists so "cell1" does not falsely prefix-match "cell10_msfragger".
+  static bool isPrefixAtBoundary_(const String& shorter, const String& longer)
+  {
+    if (!longer.hasPrefix(shorter)) return false;
+    if (longer.size() == shorter.size()) return true;
+    const unsigned char next = static_cast<unsigned char>(longer[shorter.size()]);
+    return !isalnum(next);
+  }
+
+  // Two run stems are considered the same run if either is a boundary-prefix of the other --
+  // covers both "mzML basename is a prefix of the psm.tsv run stem" (the common case) and the
+  // reverse, in case a future naming convention flips which side carries the extra suffix.
+  static bool runStemsMatch_(const String& a, const String& b)
+  {
+    if (a == b) return true;
+    return isPrefixAtBoundary_(a, b) || isPrefixAtBoundary_(b, a);
   }
 
   // -------------------------------------------------------------------------
@@ -581,7 +628,7 @@ protected:
 
         e.spectrum_field = f.at(static_cast<Size>(c_spectrum));
         e.spectrum_field.trim();
-        e.psm_scan = parseScanFromSpectrumField_(e.spectrum_field);
+        e.psm_scan = parseScanFromSpectrumField_(e.spectrum_field, e.run_stem);
 
         try
         {
@@ -619,9 +666,17 @@ protected:
   // -------------------------------------------------------------------------
   void registerOptionsAndFlags_() override
   {
-    registerInputFile_("in", "<file>", "", "Original diaWeaver pseudo spectra mzML (must retain "
-                       "fragment_trace_id/fragment_window_id data arrays and 'scan=N' native IDs -- "
-                       "NOT the MSFragger-stripped search-input copy).", true);
+    registerInputFileList_("in", "<file>...", StringList(), "One or more original diaWeaver pseudo "
+                       "spectra mzML files (must retain fragment_trace_id/fragment_window_id data "
+                       "arrays and 'scan=N' native IDs -- NOT the MSFragger-stripped search-input "
+                       "copy). Each file is matched to its own subset of psm.tsv by comparing the "
+                       "file's basename against the run stem embedded in psm.tsv's Spectrum column "
+                       "(a boundary-aware prefix match, so an arbitrary MSFragger-added suffix such "
+                       "as '_msfragger' or '_msfragger-format' is tolerated without needing to name "
+                       "it explicitly). Claiming is scoped independently per file -- a PSM from one "
+                       "file never competes with a PSM from another, since fragment_trace_id/"
+                       "fragment_window_id numbering is local to each file and not guaranteed unique "
+                       "across separate acquisitions.", true);
     setValidFormats_("in", {"mzML"});
 
     registerInputFile_("in_ids", "<file>", "", "MSFragger/FragPipe psm.tsv (already FDR-filtered).", true);
@@ -687,9 +742,18 @@ protected:
   // -------------------------------------------------------------------------
   // main_
   // -------------------------------------------------------------------------
+  // Basename minus a trailing .mzML/.mzml extension, for run-stem comparison against psm.tsv.
+  static String mzmlBasenameStem_(const String& path)
+  {
+    String stem = File::basename(path);
+    for (const char* ext : {".mzML", ".mzml"})
+      if (stem.hasSuffix(ext)) { stem = stem.prefix(stem.size() - strlen(ext)); break; }
+    return stem;
+  }
+
   ExitCodes main_(int, const char**) override
   {
-    const String in = getStringOption_("in");
+    const StringList in_files = getStringList_("in");
     const String in_ids = getStringOption_("in_ids");
     const String out_psm_accounting = getStringOption_("out_psm_accounting");
     const String out_fragment_usage = getStringOption_("out_fragment_usage");
@@ -700,21 +764,80 @@ protected:
     const bool allow_peptidoform_sharing = (getStringOption_("allow_peptidoform_fragment_sharing") == "true");
     const bool neutral_losses = getFlag_("neutral_losses");
 
-    // ---- Step 1: parse psm.tsv ----
-    const std::vector<PsmEntry> psms = parsePsmTsv_(in_ids);
-    if (psms.empty())
+    // ---- Step 1: parse psm.tsv (once; rows are routed to their matching mzML per file below) ----
+    const std::vector<PsmEntry> all_psms = parsePsmTsv_(in_ids);
+    if (all_psms.empty())
     {
       OPENMS_LOG_ERROR << "[diaWeaverIonAccount] No PSMs parsed from " << in_ids << ". Aborting.\n";
       return INCOMPATIBLE_INPUT_DATA;
     }
+
+    // ---- Theoretical ion generator: identical for every file, built once ----
+    TheoreticalSpectrumGenerator tsg;
+    {
+      Param p = tsg.getDefaults();
+      p.setValue("add_metainfo", "true");
+      p.setValue("add_b_ions", "true");
+      p.setValue("add_y_ions", "true");
+      p.setValue("add_a_ions", "false");
+      p.setValue("add_c_ions", "false");
+      p.setValue("add_x_ions", "false");
+      p.setValue("add_z_ions", "false");
+      p.setValue("add_losses", neutral_losses ? "true" : "false");
+      p.setValue("add_term_losses", neutral_losses ? "true" : "false");
+      tsg.setParameters(p);
+    }
+
+    // ---- Open output streams once; headers written once; rows appended per file below ----
+    std::ofstream out_acc_stream(out_psm_accounting.c_str());
+    if (!out_acc_stream.is_open())
+    {
+      OPENMS_LOG_ERROR << "[diaWeaverIonAccount] Cannot write output TSV: " << out_psm_accounting << "\n";
+      return CANNOT_WRITE_OUTPUT_FILE;
+    }
+    out_acc_stream << "source_file\tnative_scan\tsequence\tcharge\tprecursor_mz\tretention_time\tion_mobility\t"
+                      "original_hyperscore\tInternal Initial Hyperscore\trecomputed_hyperscore\t"
+                      "Retained Fragments\tLost Fragments\n";
+
+    std::ofstream out_usage_stream;
+    if (!out_fragment_usage.empty())
+    {
+      out_usage_stream.open(out_fragment_usage.c_str());
+      if (!out_usage_stream.is_open())
+      {
+        OPENMS_LOG_ERROR << "[diaWeaverIonAccount] Cannot write output TSV: " << out_fragment_usage << "\n";
+        return CANNOT_WRITE_OUTPUT_FILE;
+      }
+      out_usage_stream << "source_file\twindow_id\tfragment_id\tmz\tintensity\tcategory\tWinning PSM\t"
+                           "Winning Fragment Ion Annotation\tCompeting PSMs\tCompeting Fragment Ion Annotation\n";
+    }
+
+    Size total_resolved = 0, total_psms_seen = 0, total_claimed = 0;
+    Size total_unique = 0, total_peptidoform = 0, total_shared = 0;
+
+    for (const String& in : in_files)
+    {
+    const String file_run_stem = mzmlBasenameStem_(in);
+    std::vector<PsmEntry> psms;
+    for (const PsmEntry& p : all_psms)
+      if (runStemsMatch_(file_run_stem, p.run_stem)) psms.push_back(p);
+
+    OPENMS_LOG_INFO << "\n[diaWeaverIonAccount] === File: " << in << " (run stem '" << file_run_stem
+                    << "') -- " << psms.size() << " / " << all_psms.size() << " psm.tsv rows matched ===\n";
+    if (psms.empty())
+    {
+      OPENMS_LOG_WARN << "[diaWeaverIonAccount] No psm.tsv rows matched this file's run stem. Skipping.\n";
+      continue;
+    }
+    total_psms_seen += psms.size();
 
     // ---- Step 2: open mzML ----
     OPENMS_LOG_INFO << "[diaWeaverIonAccount] Opening: " << in << "\n";
     OnDiscMSExperiment on_disc;
     if (!on_disc.openFile(in))
     {
-      OPENMS_LOG_ERROR << "[diaWeaverIonAccount] Failed to open as indexed mzML: " << in << "\n";
-      return INPUT_FILE_NOT_FOUND;
+      OPENMS_LOG_ERROR << "[diaWeaverIonAccount] Failed to open as indexed mzML: " << in << ". Skipping file.\n";
+      continue;
     }
     const Size n_spec = on_disc.getNrSpectra();
 
@@ -835,9 +958,10 @@ protected:
 
     if (resolved.empty())
     {
-      OPENMS_LOG_ERROR << "[diaWeaverIonAccount] No PSMs resolved to spectra. Aborting.\n";
-      return INCOMPATIBLE_INPUT_DATA;
+      OPENMS_LOG_WARN << "[diaWeaverIonAccount] No PSMs resolved to spectra for this file. Skipping.\n";
+      continue;
     }
+    total_resolved += resolved.size();
 
     // ---- Step 4: sort by original Hyperscore desc, precursor intensity desc, row asc ----
     std::stable_sort(resolved.begin(), resolved.end(),
@@ -850,25 +974,10 @@ protected:
 
     // Sequence identity lookup: openms_sequence -> one PsmEntry with that sequence (any instance
     // works, since identical openms_sequence strings imply identical bare_sequence/mods).
+    // Scoped per file: claiming and peptidoform comparisons never reach across files.
     std::unordered_map<String, const PsmEntry*> seq_registry;
     seq_registry.reserve(resolved.size());
     for (const ResolvedPsm& rp : resolved) seq_registry.emplace(rp.psm->openms_sequence, rp.psm);
-
-    // ---- Step 5: theoretical ion generator ----
-    TheoreticalSpectrumGenerator tsg;
-    {
-      Param p = tsg.getDefaults();
-      p.setValue("add_metainfo", "true");
-      p.setValue("add_b_ions", "true");
-      p.setValue("add_y_ions", "true");
-      p.setValue("add_a_ions", "false");
-      p.setValue("add_c_ions", "false");
-      p.setValue("add_x_ions", "false");
-      p.setValue("add_z_ions", "false");
-      p.setValue("add_losses", neutral_losses ? "true" : "false");
-      p.setValue("add_term_losses", neutral_losses ? "true" : "false");
-      tsg.setParameters(p);
-    }
 
     // ---- Step 6: greedy claiming pass (PASS 1) ----
     // Determines, for each PSM in priority order, which of its matches are retained
@@ -1086,16 +1195,6 @@ protected:
 
     // ---- Step 7: write per-PSM accounting TSV (PASS 2: resolve Retained/Lost Fragments text) ----
     {
-      std::ofstream f(out_psm_accounting.c_str());
-      if (!f.is_open())
-      {
-        OPENMS_LOG_ERROR << "[diaWeaverIonAccount] Cannot write output TSV: " << out_psm_accounting << "\n";
-        return CANNOT_WRITE_OUTPUT_FILE;
-      }
-      f << "native_scan\tsequence\tcharge\tprecursor_mz\tretention_time\tion_mobility\t"
-           "original_hyperscore\tInternal Initial Hyperscore\trecomputed_hyperscore\t"
-           "Retained Fragments\tLost Fragments\n";
-
       for (const PsmAccounting& acc : accounting)
       {
         String retained_str;
@@ -1117,26 +1216,17 @@ protected:
           lost_str += "[" + my_subseq + ":" + mo.ion_label + "; " + winners_str + "]";
         }
 
-        f << acc.native_scan << "\t" << acc.psm->openms_sequence << "\t" << acc.psm->charge << "\t"
+        out_acc_stream << in << "\t" << acc.native_scan << "\t" << acc.psm->openms_sequence << "\t" << acc.psm->charge << "\t"
           << acc.precursor_mz << "\t" << acc.rt << "\t" << acc.im << "\t"
           << acc.original_hyperscore << "\t" << acc.internal_initial_hyperscore << "\t" << acc.recomputed_hyperscore << "\t"
           << retained_str << "\t" << lost_str << "\n";
       }
-      OPENMS_LOG_INFO << "[diaWeaverIonAccount] Wrote: " << out_psm_accounting << "\n";
+      OPENMS_LOG_INFO << "[diaWeaverIonAccount] Wrote " << accounting.size() << " rows to: " << out_psm_accounting << "\n";
     }
 
     // ---- Step 8: write fragment usage registry TSV ----
     if (!out_fragment_usage.empty())
     {
-      std::ofstream f(out_fragment_usage.c_str());
-      if (!f.is_open())
-      {
-        OPENMS_LOG_ERROR << "[diaWeaverIonAccount] Cannot write output TSV: " << out_fragment_usage << "\n";
-        return CANNOT_WRITE_OUTPUT_FILE;
-      }
-      f << "window_id\tfragment_id\tmz\tintensity\tcategory\tWinning PSM\tWinning Fragment Ion Annotation\t"
-           "Competing PSMs\tCompeting Fragment Ion Annotation\n";
-
       Size n_unique = 0, n_peptidoform = 0, n_shared = 0;
       for (const auto& [key, touches] : usage)
       {
@@ -1204,16 +1294,30 @@ protected:
         else if (any_genuine_collision) { category = "shared_fragments"; ++n_shared; }
         else { category = "peptidoform_shared_fragments"; ++n_peptidoform; }
 
-        f << window_id << "\t" << fragment_id << "\t" << frag_mz << "\t" << frag_intensity << "\t"
+        out_usage_stream << in << "\t" << window_id << "\t" << fragment_id << "\t" << frag_mz << "\t" << frag_intensity << "\t"
           << category << "\t" << owner_scan << "\t"
           << winner_annotation << "\t" << competing_psms << "\t" << competing_annotation << "\n";
       }
-      OPENMS_LOG_INFO << "[diaWeaverIonAccount] Wrote: " << out_fragment_usage << "\n"
-                      << "  Fragments touched              : " << usage.size() << "\n"
+      OPENMS_LOG_INFO << "[diaWeaverIonAccount] Wrote " << usage.size() << " rows to: " << out_fragment_usage << "\n"
                       << "  unique_fragment_ion             : " << n_unique << "\n"
                       << "  peptidoform_shared_fragments    : " << n_peptidoform << "\n"
                       << "  shared_fragments                : " << n_shared << "\n";
+
+      total_unique += n_unique;
+      total_peptidoform += n_peptidoform;
+      total_shared += n_shared;
     }
+
+    total_claimed += registry.claimedCount();
+    } // end for (const String& in : in_files)
+
+    OPENMS_LOG_INFO << "\n[diaWeaverIonAccount] === Summary across " << in_files.size() << " file(s) ===\n"
+                    << "  psm.tsv rows matched to a file  : " << total_psms_seen << " / " << all_psms.size() << "\n"
+                    << "  PSMs resolved to a spectrum     : " << total_resolved << "\n"
+                    << "  fragment ions claimed            : " << total_claimed << "\n"
+                    << "  unique_fragment_ion              : " << total_unique << "\n"
+                    << "  peptidoform_shared_fragments     : " << total_peptidoform << "\n"
+                    << "  shared_fragments                 : " << total_shared << "\n";
 
     return EXECUTION_OK;
   }
