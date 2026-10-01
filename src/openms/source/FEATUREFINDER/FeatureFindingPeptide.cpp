@@ -53,6 +53,8 @@ namespace OpenMS
 
     defaults_.setValue("report_convex_hulls", "false", "Augment each reported feature with the convex hull of the underlying mass traces (increases featureXML file size considerably).");
     defaults_.setValidStrings("report_convex_hulls", {"false","true"});
+    defaults_.setValue("report_feature_details", "true", "Annotate each reported feature with per-trace and scoring details (meta values max_height, num_of_masstraces, score_rt/mz/int/overlap, masstrace_intensity, masstrace_centroid_rt/mz, isotope_distances). The label and masstrace_centroid_im are always reported.", {"advanced"});
+    defaults_.setValidStrings("report_feature_details", {"false","true"});
 
     defaults_.setValue("report_chromatograms", "false", "Adds Chromatogram for each reported feature (Output in mzml).");
     defaults_.setValidStrings("report_chromatograms", {"false","true"});
@@ -110,6 +112,7 @@ namespace OpenMS
     report_smoothed_intensities_ = report_smoothed;
 
     report_convex_hulls_ = param_.getValue("report_convex_hulls").toBool();
+    report_feature_details_ = param_.getValue("report_feature_details").toBool();
     report_chromatograms_ = param_.getValue("report_chromatograms").toBool();
 
     remove_single_traces_ = param_.getValue("remove_single_traces").toBool();
@@ -681,25 +684,40 @@ namespace OpenMS
 
       f.setWidth(feat_hypos[hypo_idx].getFWHM());
       f.setCharge(feat_hypos[hypo_idx].getCharge());
+      // label and masstrace_centroid_im are always reported: the final sort below uses them as
+      // tie-breaks, and downstream clustering (ClusterMassTracesByPrecursor) reads them
       f.setMetaValue(3, feat_hypos[hypo_idx].getLabel());
-      //f.setMetaValue("max_height", feat_hypos[hypo_idx].getMaxIntensity(report_smoothed_intensities_));
-      f.setMetaValue("max_height", feat_hypos[hypo_idx].getMaxIntensity(use_smoothed_intensities_));
+      if (report_feature_details_)
+      {
+        //f.setMetaValue("max_height", feat_hypos[hypo_idx].getMaxIntensity(report_smoothed_intensities_));
+        f.setMetaValue("max_height", feat_hypos[hypo_idx].getMaxIntensity(use_smoothed_intensities_));
+      }
 
       // store isotope intensities
       //std::vector<double> all_ints(feat_hypos[hypo_idx].getAllIntensities(report_smoothed_intensities_));
-      std::vector<double> all_ints(feat_hypos[hypo_idx].getAllIntensities(use_smoothed_intensities_));
-      f.setMetaValue(Constants::UserParam::NUM_OF_MASSTRACES, all_ints.size());
+      std::vector<double> all_ints;
+      if (report_feature_details_)
+      {
+        all_ints = feat_hypos[hypo_idx].getAllIntensities(use_smoothed_intensities_);
+        f.setMetaValue(Constants::UserParam::NUM_OF_MASSTRACES, all_ints.size());
+      }
       if (report_convex_hulls_) f.setConvexHulls(feat_hypos[hypo_idx].getConvexHulls());
       f.setOverallQuality(feat_hypos[hypo_idx].getScore());
-      f.setMetaValue("score_rt", feat_hypos[hypo_idx].getScoreRT());
-      f.setMetaValue("score_mz", feat_hypos[hypo_idx].getScoreMZ());
-      f.setMetaValue("score_int", feat_hypos[hypo_idx].getScoreInt());
-      f.setMetaValue("score_overlap", feat_hypos[hypo_idx].getScoreOverlap());
-      f.setMetaValue("masstrace_intensity", all_ints);
-      f.setMetaValue("masstrace_centroid_rt", feat_hypos[hypo_idx].getAllCentroidRT());
-      f.setMetaValue("masstrace_centroid_mz", feat_hypos[hypo_idx].getAllCentroidMZ());
+      if (report_feature_details_)
+      {
+        f.setMetaValue("score_rt", feat_hypos[hypo_idx].getScoreRT());
+        f.setMetaValue("score_mz", feat_hypos[hypo_idx].getScoreMZ());
+        f.setMetaValue("score_int", feat_hypos[hypo_idx].getScoreInt());
+        f.setMetaValue("score_overlap", feat_hypos[hypo_idx].getScoreOverlap());
+        f.setMetaValue("masstrace_intensity", all_ints);
+        f.setMetaValue("masstrace_centroid_rt", feat_hypos[hypo_idx].getAllCentroidRT());
+        f.setMetaValue("masstrace_centroid_mz", feat_hypos[hypo_idx].getAllCentroidMZ());
+      }
       f.setMetaValue("masstrace_centroid_im", feat_hypos[hypo_idx].getAllCentroidIM());
-      f.setMetaValue("isotope_distances", feat_hypos[hypo_idx].getIsotopeDistances());
+      if (report_feature_details_)
+      {
+        f.setMetaValue("isotope_distances", feat_hypos[hypo_idx].getIsotopeDistances());
+      }
       f.applyMemberFunction(&UniqueIdInterface::setUniqueId);
       output_featmap.push_back(std::move(f));
       const Feature& added = output_featmap.back();

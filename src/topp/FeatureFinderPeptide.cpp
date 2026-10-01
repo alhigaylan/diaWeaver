@@ -250,6 +250,7 @@ protected:
     Param p_ffp = FeatureFindingPeptide().getDefaults();
     p_ffp.remove("chrom_fwhm");
     p_ffp.remove("report_chromatograms");
+    p_ffp.remove("report_feature_details"); // only for diaWeaver; this tool needs the details (num_of_masstraces)
     combined.insert("ffp:", p_ffp);
     combined.setSectionDescription("ffp", "FeatureFinder parameters (assembling mass traces to charged features)");
 

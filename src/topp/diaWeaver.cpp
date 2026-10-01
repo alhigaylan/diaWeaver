@@ -354,6 +354,7 @@ protected:
 
       p_ffp.remove("chrom_fwhm");
       p_ffp.remove("report_chromatograms");
+      p_ffp.remove("report_feature_details"); // hidden: set to false in runFeatureFinderPeptide_
       combined.insert("ffp:", p_ffp);
       combined.setSectionDescription("ffp", "FeatureFindingPeptide parameters (assembling mass traces to charged features)");
 
@@ -458,6 +459,7 @@ protected:
       p_ffp.setValue("minimum_isotopes_nr", 3, "Minimum isotopic traces required for MS2 fragment ion features.");
       p_ffp.remove("chrom_fwhm");
       p_ffp.remove("report_chromatograms");
+      p_ffp.remove("report_feature_details"); // hidden: set to false in runFeatureFinderPeptide_
       combined.insert("ffp:", p_ffp);
       combined.setSectionDescription("ffp", "FeatureFindingPeptide parameters");
 
@@ -581,6 +583,9 @@ protected:
     ffp_param.remove("noise_threshold_int");
     ffp_param.remove("chrom_peak_snr");
     ffp_param.setValue("report_chromatograms", "false");
+    // diaWeaver does not output features; clustering only reads label and masstrace_centroid_im,
+    // which are always reported
+    ffp_param.setValue("report_feature_details", "false");
 
     std::vector<std::vector<MSChromatogram>> feat_chromatograms;
     FeatureFindingPeptide ffpep;

@@ -205,6 +205,7 @@ private:
     bool report_smoothed_intensities_;
 
     bool report_convex_hulls_;
+    bool report_feature_details_;
     bool report_chromatograms_;
 
     bool remove_single_traces_;
