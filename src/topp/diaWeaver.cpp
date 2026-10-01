@@ -1363,7 +1363,22 @@ protected:
     MzMLFile mzml;
     mzml.load(output_filepath, pseudo_exp);
 
-    pseudo_exp.sortSpectra(false);  // Sort by RT
+    // Sort by RT. Windows are processed in parallel and their spectra are written in completion
+    // order, and many pseudo spectra share an RT (their precursor feature's RT), so RT alone would
+    // leave the output order -- and the scan numbers below -- varying between runs. Break RT ties
+    // by precursor m/z, then precursor intensity.
+    auto precursor_key = [](const MSSpectrum& s) -> std::pair<double, double>
+    {
+      if (s.getPrecursors().empty()) return {0.0, 0.0};
+      const Precursor& p = s.getPrecursors()[0];
+      return {p.getMZ(), p.getIntensity()};
+    };
+    std::sort(pseudo_exp.getSpectra().begin(), pseudo_exp.getSpectra().end(),
+      [&precursor_key](const MSSpectrum& a, const MSSpectrum& b)
+      {
+        if (a.getRT() != b.getRT()) return a.getRT() < b.getRT();
+        return precursor_key(a) < precursor_key(b);
+      });
 
     // Re-assign native IDs after sorting; also set MSn spectrum type and positive polarity
     // so downstream tools (e.g. FragPipe/MSFragger) recognise these as valid MS2 spectra.
