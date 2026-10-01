@@ -697,11 +697,12 @@ namespace OpenMS
       f.setMetaValue("masstrace_centroid_im", feat_hypos[hypo_idx].getAllCentroidIM());
       f.setMetaValue("isotope_distances", feat_hypos[hypo_idx].getIsotopeDistances());
       f.applyMemberFunction(&UniqueIdInterface::setUniqueId);
-      output_featmap.push_back(f);
+      output_featmap.push_back(std::move(f));
+      const Feature& added = output_featmap.back();
 
-      if (report_chromatograms_ && f.getIntensity() != 0)
+      if (report_chromatograms_ && added.getIntensity() != 0)
       {
-        output_chromatograms.push_back(feat_hypos[hypo_idx].getChromatograms(f.getUniqueId()));
+        output_chromatograms.push_back(feat_hypos[hypo_idx].getChromatograms(added.getUniqueId()));
       }
 
 
