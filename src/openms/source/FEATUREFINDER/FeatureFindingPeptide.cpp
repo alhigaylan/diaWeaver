@@ -26,6 +26,7 @@
 
 // #define FFM_DEBUG
 
+#include <numeric>
 #include <optional>
 
 namespace OpenMS
@@ -715,22 +716,46 @@ namespace OpenMS
     // std::sort has no tie-break, so its result for m/z-tied features depends on
     // whatever order they arrived in beforehand, which can vary run to run when
     // feat_hypos above was built by concurrent worker threads.
-    std::sort(output_featmap.begin(), output_featmap.end(),
-      [](const Feature& a, const Feature& b)
+    // The tie-break keys are read from meta values, so compute them once per feature instead of
+    // in every comparison; sort feature indices by the keys, then reorder the features.
+    struct SortKey
+    {
+      double mz;
+      double im;
+      double intensity;
+      String label;
+    };
+    std::vector<SortKey> keys;
+    keys.reserve(output_featmap.size());
+    for (const Feature& f : output_featmap)
+    {
+      std::vector<double> ims = f.getMetaValue("masstrace_centroid_im");
+      keys.push_back({f.getMZ(), ims.empty() ? 0.0 : ims[0], f.getIntensity(), String(f.getMetaValue("label"))});
+    }
+
+    std::vector<Size> order(output_featmap.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(),
+      [&keys](Size ia, Size ib)
       {
-        if (a.getMZ() != b.getMZ()) return a.getMZ() < b.getMZ();
-
-        auto im = [](const Feature& f) -> double
-        {
-          std::vector<double> ims = f.getMetaValue("masstrace_centroid_im");
-          return ims.empty() ? 0.0 : ims[0];
-        };
-        if (im(a) != im(b)) return im(a) < im(b);
-
-        if (a.getIntensity() != b.getIntensity()) return a.getIntensity() < b.getIntensity();
-
-        return String(a.getMetaValue("label")) < String(b.getMetaValue("label"));
+        const SortKey& a = keys[ia];
+        const SortKey& b = keys[ib];
+        if (a.mz != b.mz) return a.mz < b.mz;
+        if (a.im != b.im) return a.im < b.im;
+        if (a.intensity != b.intensity) return a.intensity < b.intensity;
+        return a.label < b.label;
       });
+
+    std::vector<Feature> sorted_features;
+    sorted_features.reserve(output_featmap.size());
+    for (Size idx : order)
+    {
+      sorted_features.push_back(std::move(output_featmap[idx]));
+    }
+    for (Size i = 0; i < sorted_features.size(); ++i)
+    {
+      output_featmap[i] = std::move(sorted_features[i]);
+    }
   } // end of FeatureFindingPeptide::run
 
 }
