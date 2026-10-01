@@ -202,15 +202,19 @@ namespace OpenMS
     /**
       @brief Extract MS1 spectra for each window (on-disk version)
 
-      Loads MS1 spectra on-demand from disk, processing one at a time.
+      Loads each MS1 spectrum from disk once (in parallel, one file handle per thread)
+      and splits it into all windows. Produces, per window, the same spectra as
+      extractSingleMS1Window(), but without re-decoding every MS1 spectrum per window.
 
       @param raw Input OnDiscMSExperiment containing DIA data
       @param window_map Map of windows (used for window definitions)
+      @param im_info Pre-computed ion mobility info (from determineIMInfo)
       @param out_ms1 Output map of DIAWindow to filtered MS1 MSExperiment
     */
     static void extractMS1Windows(
       OnDiscMSExperiment& raw,
       const WindowMap& window_map,
+      const IMInfo& im_info,
       WindowedExperiments& out_ms1);
 
     // ========================================================================

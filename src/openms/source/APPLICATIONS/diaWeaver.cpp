@@ -733,12 +733,10 @@ void DiaWeaver::extractMS2Windows(
 void DiaWeaver::extractMS1Windows(
   OnDiscMSExperiment& raw,
   const WindowMap& window_map,
+  const IMInfo& im_info,
   DiaWeaver::WindowedExperiments& out_ms1)
 {
   out_ms1.clear();
-
-  // Determine ion mobility availability once for the entire dataset
-  const IMInfo im_info = determineIMInfo(raw, window_map);
 
   // Get metadata for MS level checking
   auto meta = raw.getMetaData();
@@ -748,26 +746,31 @@ void DiaWeaver::extractMS1Windows(
     return;
   }
 
+  std::vector<const DIAWindow*> windows;
   for (const auto& it : window_map)
   {
-    const DIAWindow& window = it.first;
-    MSExperiment exp;
+    windows.push_back(&it.first);
+  }
 
-    for (Size i = 0; i < meta->size(); ++i)
+  std::vector<Size> ms1_indices;
+  for (Size i = 0; i < meta->size(); ++i)
+  {
+    if ((*meta)[i].getMSLevel() == 1) ms1_indices.push_back(i);
+  }
+
+  // Decode each MS1 spectrum only once (decoding dominates the cost) and split it into every
+  // window. slices[k][w] is the part of the k-th MS1 spectrum that falls into window w.
+  std::vector<std::vector<MSSpectrum>> slices(ms1_indices.size(), std::vector<MSSpectrum>(windows.size()));
+
+#pragma omp parallel
+  {
+    OnDiscMSExperiment local_raw = raw; // each thread gets its own file handle
+
+#pragma omp for schedule(dynamic)
+    for (SignedSize k = 0; k < static_cast<SignedSize>(ms1_indices.size()); ++k)
     {
-      if ((*meta)[i].getMSLevel() != 1) continue;
-
       // Load MS1 spectrum from disk
-      MSSpectrum spec = raw.getSpectrum(i);
-
-      MSSpectrum new_spec;
-      new_spec.setRT(spec.getRT());
-
-      MSSpectrum::FloatDataArray im_fda;
-      if (im_info.available)
-      {
-        im_fda.setName(im_info.getIMArrayName());
-      }
+      MSSpectrum spec = local_raw.getSpectrum(ms1_indices[k]);
 
       const MSSpectrum::FloatDataArray* im_array = nullptr;
       if (im_info.available && spec.getFloatDataArrays().size() > im_info.ms1_im_index)
@@ -775,49 +778,76 @@ void DiaWeaver::extractMS1Windows(
         im_array = &spec.getFloatDataArrays()[im_info.ms1_im_index];
       }
 
-      for (Size j = 0; j < spec.size(); ++j)
+      for (Size w = 0; w < windows.size(); ++w)
       {
-        const double mz = spec[j].getMZ();
+        const DIAWindow& window = *windows[w];
 
-        // Always filter by m/z
-        if (mz < window.lower_mz || mz > window.upper_mz)
+        MSSpectrum new_spec;
+        new_spec.setRT(spec.getRT());
+
+        MSSpectrum::FloatDataArray im_fda;
+        if (im_info.available)
         {
-          continue;
+          im_fda.setName(im_info.getIMArrayName());
         }
 
-        // Filter by ion mobility only if window has IM bounds
-        if (im_array && window.hasIonMobility())
+        for (Size j = 0; j < spec.size(); ++j)
         {
-          const double im = (*im_array)[j];
-          if (im < window.lower_im || im > window.upper_im)
+          const double mz = spec[j].getMZ();
+
+          // Always filter by m/z
+          if (mz < window.lower_mz || mz > window.upper_mz)
           {
             continue;
           }
+
+          // Filter by ion mobility only if window has IM bounds
+          if (im_array && window.hasIonMobility())
+          {
+            const double im = (*im_array)[j];
+            if (im < window.lower_im || im > window.upper_im)
+            {
+              continue;
+            }
+          }
+
+          // Add peak and corresponding IM value (if available)
+          new_spec.push_back(spec[j]);
+          if (im_array)
+          {
+            im_fda.push_back((*im_array)[j]);
+          }
         }
 
-        // Add peak and corresponding IM value (if available)
-        new_spec.push_back(spec[j]);
+        if (new_spec.empty()) continue;
+
         if (im_array)
         {
-          im_fda.push_back((*im_array)[j]);
+          new_spec.getFloatDataArrays().push_back(std::move(im_fda));
         }
+        new_spec.sortByPosition();
+
+        slices[k][w] = std::move(new_spec);
       }
+    }
+  }
 
-      if (new_spec.empty()) continue;
-
-      if (im_array)
+  // Assemble each window in MS1 spectrum order
+  for (Size w = 0; w < windows.size(); ++w)
+  {
+    MSExperiment exp;
+    for (auto& spectrum_slices : slices)
+    {
+      if (!spectrum_slices[w].empty())
       {
-        new_spec.getFloatDataArrays().push_back(std::move(im_fda));
+        exp.addSpectrum(std::move(spectrum_slices[w]));
       }
-      new_spec.sortByPosition();
-
-      exp.addSpectrum(new_spec);
     }
 
     if (!exp.empty())
     {
       exp.sortSpectra();
-      out_ms1.emplace(window, std::move(exp));
+      out_ms1.emplace(*windows[w], std::move(exp));
     }
   }
 }

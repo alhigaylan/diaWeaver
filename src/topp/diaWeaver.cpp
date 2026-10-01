@@ -770,6 +770,7 @@ protected:
 #endif
 
     OnDiscMSExperiment on_disc;
+    DiaWeaver::WindowedExperiments mzml_ms1_windows; // per-window MS1 for the mzML path
     if (!is_bruker)
     {
       // ------------------------------
@@ -786,6 +787,10 @@ protected:
 
       DiaWeaver::determineWindows(on_disc, windows);
       im_info = DiaWeaver::determineIMInfo(on_disc, windows);
+
+      // Split MS1 into all windows up front: every window needs the full MS1 run, and decoding
+      // each MS1 spectrum once is much cheaper than re-decoding all of them for every window.
+      DiaWeaver::extractMS1Windows(on_disc, windows, im_info, mzml_ms1_windows);
     }
 
     // Convert map to vector for OpenMP indexed access
@@ -1174,10 +1179,14 @@ protected:
         }
       }
 
-      // MS1 already loaded for Bruker path; for mzML, extract on-demand from disk
+      // MS1 already loaded for Bruker path; for mzML, take this window's pre-extracted MS1
       if (!is_bruker)
       {
-        DiaWeaver::extractSingleMS1Window(on_disc, w, im_info, ms1_exp);
+#pragma omp critical (mzml_ms1_window_access)
+        {
+          auto it_ms1 = mzml_ms1_windows.find(w);
+          if (it_ms1 != mzml_ms1_windows.end()) ms1_exp = std::move(it_ms1->second);
+        }
       }
 
       // Apply peak picking to MS1 spectra
