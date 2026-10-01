@@ -109,6 +109,16 @@ owner (competitors) -- regardless of whether a competitor's match was later cred
 its own score via the peptidoform exemption. Intended for downstream use in building a
 spectral library from unambiguous fragments for peptide quantification.
 
+<B>Target/decoy type column.</B> Both output TSVs carry a "type" column ("target" or
+"decoy"), read directly from psm.tsv's own "Is Decoy" column -- this tool never
+re-derives decoy status itself. In psm_accounting.tsv it is the row's own PSM. In
+fragment_usage.tsv it is the officially winning PSM's status (the FragmentClaimRegistry
+owner), not any competitor's. By default FragPipe/Philosopher's report step
+(phi-report.print-decoys) strips decoys from psm.tsv even when some pass the configured
+FDR threshold during filtering, so this column will show "target" for every row unless
+that FragPipe setting was enabled for the search that produced psm.tsv; if psm.tsv has no
+"Is Decoy" column at all, every PSM is reported as "target" and a warning is logged once.
+
 <B>Multiple input files (-in).</B> MSFragger/FragPipe can search several mzML files in one
 combined run, producing a single psm.tsv whose "Spectrum" field embeds the source run's
 name (e.g. "0p5_msfragger-format.02345.02345.2"). Each "-in" file is matched to its own
@@ -187,6 +197,7 @@ protected:
     int psm_scan = -1;                   // 0-based scan number parsed from "Spectrum"
     String spectrum_field;
     String run_stem;                     // "Spectrum" field with the trailing .scan.scan.charge stripped
+    bool is_decoy = false;               // "Is Decoy" column; false (target) if column absent
 
     bool isModified() const { return !mods.empty(); }
   };
@@ -526,8 +537,8 @@ protected:
   // -------------------------------------------------------------------------
   // Parse psm.tsv: required columns are Spectrum, Peptide, Charge, Retention,
   // Assigned Modifications, Hyperscore, and Observed M/Z (or Calibrated
-  // Observed M/Z). Ion Mobility is read if present, optional otherwise.
-  // Every row's translated sequence is validated against
+  // Observed M/Z). Ion Mobility and Is Decoy are read if present, optional
+  // otherwise. Every row's translated sequence is validated against
   // AASequence::fromString immediately; rows that fail are logged and
   // dropped rather than silently carried forward with a broken sequence.
   // -------------------------------------------------------------------------
@@ -569,6 +580,7 @@ protected:
     int c_mz = find_col("Observed M/Z");
     if (c_mz < 0) c_mz = find_col("Calibrated Observed M/Z");
     const int c_im = find_col("Ion Mobility");
+    const int c_decoy = find_col("Is Decoy");
 
     std::vector<String> missing;
     if (c_spectrum < 0) missing.push_back("Spectrum");
@@ -589,6 +601,10 @@ protected:
     if (c_im < 0)
     {
       OPENMS_LOG_WARN << "[diaWeaverIonAccount] psm.tsv has no 'Ion Mobility' column. Proceeding without it.\n";
+    }
+    if (c_decoy < 0)
+    {
+      OPENMS_LOG_WARN << "[diaWeaverIonAccount] psm.tsv has no 'Is Decoy' column. All PSMs will be reported as 'target'.\n";
     }
 
     std::string raw_line;
@@ -625,6 +641,12 @@ protected:
         {
           String im_str = f.at(static_cast<Size>(c_im)); im_str.trim();
           e.im = im_str.toDouble();
+        }
+
+        if (c_decoy >= 0 && static_cast<Size>(c_decoy) < f.size())
+        {
+          String decoy_str = f.at(static_cast<Size>(c_decoy)); decoy_str.trim().toLower();
+          e.is_decoy = (decoy_str == "true");
         }
 
         e.spectrum_field = f.at(static_cast<Size>(c_spectrum));
@@ -796,7 +818,7 @@ protected:
       OPENMS_LOG_ERROR << "[diaWeaverIonAccount] Cannot write output TSV: " << out_psm_accounting << "\n";
       return CANNOT_WRITE_OUTPUT_FILE;
     }
-    out_acc_stream << "source_file\tnative_scan\tsequence\tcharge\tprecursor_mz\tretention_time\tion_mobility\t"
+    out_acc_stream << "source_file\tnative_scan\tsequence\ttype\tcharge\tprecursor_mz\tretention_time\tion_mobility\t"
                       "original_hyperscore\tInternal Initial Hyperscore\trecomputed_hyperscore\t"
                       "Retained Fragments\tLost Fragments\n";
 
@@ -809,7 +831,7 @@ protected:
         OPENMS_LOG_ERROR << "[diaWeaverIonAccount] Cannot write output TSV: " << out_fragment_usage << "\n";
         return CANNOT_WRITE_OUTPUT_FILE;
       }
-      out_usage_stream << "source_file\twindow_id\tfragment_id\tmz\tintensity\tcategory\tWinning PSM\t"
+      out_usage_stream << "source_file\twindow_id\tfragment_id\tmz\tintensity\tcategory\tWinning PSM\ttype\t"
                            "Winning Fragment Ion Annotation\tCompeting PSMs\tCompeting Fragment Ion Annotation\n";
     }
 
@@ -1233,7 +1255,8 @@ protected:
           lost_str += "[" + my_subseq + ":" + mo.ion_label + "; " + winners_str + "]";
         }
 
-        out_acc_stream << in << "\t" << acc.native_scan << "\t" << acc.psm->openms_sequence << "\t" << acc.psm->charge << "\t"
+        out_acc_stream << in << "\t" << acc.native_scan << "\t" << acc.psm->openms_sequence << "\t"
+          << (acc.psm->is_decoy ? "decoy" : "target") << "\t" << acc.psm->charge << "\t"
           << acc.precursor_mz << "\t" << acc.rt << "\t" << acc.im << "\t"
           << acc.original_hyperscore << "\t" << acc.internal_initial_hyperscore << "\t" << acc.recomputed_hyperscore << "\t"
           << retained_str << "\t" << lost_str << "\n";
@@ -1312,7 +1335,7 @@ protected:
         else { category = "peptidoform_shared_fragments"; ++n_peptidoform; }
 
         out_usage_stream << in << "\t" << window_id << "\t" << fragment_id << "\t" << frag_mz << "\t" << frag_intensity << "\t"
-          << category << "\t" << owner_scan << "\t"
+          << category << "\t" << owner_scan << "\t" << ((owner != nullptr && owner->is_decoy) ? "decoy" : "target") << "\t"
           << winner_annotation << "\t" << competing_psms << "\t" << competing_annotation << "\n";
       }
       OPENMS_LOG_INFO << "[diaWeaverIonAccount] Wrote " << usage.size() << " rows to: " << out_fragment_usage << "\n"
