@@ -26,6 +26,8 @@
 
 // #define FFM_DEBUG
 
+#include <optional>
+
 namespace OpenMS
 {
   FeatureFindingPeptide::FeatureFindingPeptide() :
@@ -389,6 +391,10 @@ namespace OpenMS
 
     output_hypotheses.push_back(tmp_hypo);
 
+    // scoreRT_ only depends on the trace pair (not on charge or isotope position) and is costly,
+    // so compute it at most once per candidate
+    std::vector<std::optional<std::pair<double, double>>> rt_scores(candidates.size());
+
     for (Size charge = charge_lower_bound_; charge <= charge_upper_bound_; ++charge)
     {
       // Reject this charge hypothesis immediately if the neutral mass falls outside
@@ -427,8 +433,12 @@ namespace OpenMS
           std::cout << "scoring " << candidates[0]->getLabel() << " " << candidates[0]->getCentroidMZ() <<
             " with " << candidates[mt_idx]->getLabel() << " " << candidates[mt_idx]->getCentroidMZ() << '\n';
 #endif
-          const auto [rt_score, overlap_score] = scoreRT_(*candidates[0], *candidates[mt_idx]);
           double mz_score(scoreMZ_(*candidates[0], *candidates[mt_idx], iso_pos, charge));
+          // a pair with mz_score 0 has total_pair_score 0, so it can never become the best match
+          if (mz_score <= 0.0) continue;
+
+          if (!rt_scores[mt_idx]) rt_scores[mt_idx] = scoreRT_(*candidates[0], *candidates[mt_idx]);
+          const auto [rt_score, overlap_score] = *rt_scores[mt_idx];
 
           // initialize int score
           double int_score(0.0);
