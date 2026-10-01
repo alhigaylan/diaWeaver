@@ -28,6 +28,7 @@
 
 #include <numeric>
 #include <optional>
+#include <unordered_set>
 
 namespace OpenMS
 {
@@ -631,17 +632,19 @@ namespace OpenMS
     // *********************************************************** //
 
     // A trace claimed by an already-accepted hypothesis may not be reused by a later,
-    // lower-scoring one.
-    std::set<String> claimed_traces;
+    // lower-scoring one. Traces are identified by address (they all live in input_mtraces, which
+    // is not modified from here on); this matches identifying them by label, as trace labels from
+    // MassTraceDetection/ElutionPeakDetection are unique.
+    std::unordered_set<const MassTrace*> claimed_traces;
 
     for (Size hypo_idx = 0; hypo_idx < feat_hypos.size(); ++hypo_idx)
     {
-      const std::vector<String>& labels = feat_hypos[hypo_idx].getLabels();
+      const std::vector<const MassTrace*>& traces = feat_hypos[hypo_idx].getMassTraces();
 
       bool collision = false;
-      for (const auto& lab : labels)
+      for (const MassTrace* trace : traces)
       {
-        if (claimed_traces.count(lab))
+        if (claimed_traces.count(trace))
         {
           collision = true;
           break;
@@ -649,7 +652,7 @@ namespace OpenMS
       }
       if (collision) continue;
 
-      for (const auto& lab : labels) claimed_traces.insert(lab);
+      for (const MassTrace* trace : traces) claimed_traces.insert(trace);
 
       // filter out single traces if option is set
       if (remove_single_traces_ && feat_hypos[hypo_idx].getCharge() == 0)

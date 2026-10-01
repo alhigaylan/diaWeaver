@@ -52,6 +52,12 @@ public:
 
     std::vector<String> getLabels() const;
 
+    /// The mass traces of this hypothesis (pointers into the traces the hypothesis was built from)
+    const std::vector<const MassTrace*>& getMassTraces() const
+    {
+      return iso_pattern_;
+    }
+
     double getScore() const;
 
     void setScore(const double& score);
