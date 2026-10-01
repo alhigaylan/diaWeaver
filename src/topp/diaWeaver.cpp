@@ -849,6 +849,29 @@ protected:
     exp_settings.setSourceFiles({source_file});
     consumer.setExperimentalSettings(exp_settings);
 
+    // Carry the DIA window into its pseudo spectra, encoded like the input DIA spectra:
+    // - m/z: precursor isolation window = the DIA window (target = window center, offsets to the
+    //   window bounds). This replaces the offsets ClusterMassTracesByPrecursor sets relative to
+    //   each precursor's m/z. The precursor m/z itself stays the feature m/z ("selected ion m/z").
+    // - ion mobility: spectrum meta values, as read by DiaWeaver::determineWindows.
+    auto annotateWindow = [](MSExperiment& spectra, const DiaWeaver::DIAWindow& window)
+    {
+      for (auto& spectrum : spectra)
+      {
+        for (auto& precursor : spectrum.getPrecursors())
+        {
+          precursor.setMetaValue("isolation window target m/z", window.center_mz);
+          precursor.setIsolationWindowLowerOffset(window.center_mz - window.lower_mz);
+          precursor.setIsolationWindowUpperOffset(window.upper_mz - window.center_mz);
+        }
+        if (window.hasIonMobility())
+        {
+          spectrum.setMetaValue("ion mobility lower limit", window.lower_im);
+          spectrum.setMetaValue("ion mobility upper limit", window.upper_im);
+        }
+      }
+    };
+
     // Shared counter for unique spectrum native IDs (protected by critical section)
     Size spectrum_index = 0;
 
@@ -1167,6 +1190,7 @@ protected:
 
           if (!pseudo_spectra.empty())
           {
+            annotateWindow(pseudo_spectra, w);
 #pragma omp critical (write_spectra)
             {
               for (auto& spectrum : pseudo_spectra)
@@ -1314,6 +1338,7 @@ protected:
 
           if (!pseudo_spectra.empty())
           {
+            annotateWindow(pseudo_spectra, w);
             // Write pseudo spectra to output file (thread-safe via critical section)
 #pragma omp critical (write_spectra)
             {
