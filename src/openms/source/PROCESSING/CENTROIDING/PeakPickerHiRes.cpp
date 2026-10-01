@@ -17,6 +17,7 @@
 #include <OpenMS/MATH/MISC/CubicSpline2d.h>
 #include <OpenMS/KERNEL/SpectrumHelper.h>
 
+#include <optional>
 
 using namespace std;
 
@@ -154,13 +155,14 @@ namespace OpenMS
       check_spacings = false;
     }
 
-    // signal-to-noise estimation
-    SignalToNoiseEstimatorMedian< ContainerType > snt;
-    snt.setParameters(param_.copy("SignalToNoise:", true));
-
+    // signal-to-noise estimation (only constructed when used: construction alone is costly
+    // relative to picking a short container such as a mobilogram)
+    std::optional<SignalToNoiseEstimatorMedian< ContainerType >> snt;
     if (signal_to_noise_ > 0.0)
     {
-      snt.init(input);
+      snt.emplace();
+      snt->setParameters(param_.copy("SignalToNoise:", true));
+      snt->init(input);
     }
 
     // find local maxima in profile data
@@ -195,9 +197,9 @@ namespace OpenMS
       double act_snt = 0.0, act_snt_l1 = 0.0, act_snt_r1 = 0.0;
       if (signal_to_noise_ > 0.0)
       {
-        act_snt = snt.getSignalToNoise(i);
-        act_snt_l1 = snt.getSignalToNoise(i - 1);
-        act_snt_r1 = snt.getSignalToNoise(i + 1);
+        act_snt = snt->getSignalToNoise(i);
+        act_snt_l1 = snt->getSignalToNoise(i - 1);
+        act_snt_r1 = snt->getSignalToNoise(i + 1);
       }
 
       // look for peak cores meeting MZ and intensity/SNT criteria
@@ -220,8 +222,8 @@ namespace OpenMS
 
         if (signal_to_noise_ > 0.0)
         {
-          act_snt_l2 = snt.getSignalToNoise(i - 2);
-          act_snt_r2 = snt.getSignalToNoise(i + 2);
+          act_snt_l2 = snt->getSignalToNoise(i - 2);
+          act_snt_r2 = snt->getSignalToNoise(i + 2);
         }
 
         // checking signal-to-noise?
@@ -278,7 +280,7 @@ namespace OpenMS
 
           if (signal_to_noise_ > 0.0)
           {
-            act_snt_lk = snt.getSignalToNoise(i - k);
+            act_snt_lk = snt->getSignalToNoise(i - k);
           }
 
           if ((act_snt_lk >= signal_to_noise_) && 
@@ -321,7 +323,7 @@ namespace OpenMS
 
           if (signal_to_noise_ > 0.0)
           {
-            act_snt_rk = snt.getSignalToNoise(i + k);
+            act_snt_rk = snt->getSignalToNoise(i + k);
           }
 
           if ((act_snt_rk >= signal_to_noise_) && 
