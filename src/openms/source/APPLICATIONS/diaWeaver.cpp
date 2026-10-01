@@ -10,6 +10,9 @@
 #include <OpenMS/CONCEPT/Constants.h>
 #include <OpenMS/CONCEPT/LogStream.h>
 
+#include <algorithm>
+#include <numeric>
+
 using namespace OpenMS;
 
 // ----------------------------------------------------------------------
@@ -758,6 +761,21 @@ void DiaWeaver::extractMS1Windows(
     if ((*meta)[i].getMSLevel() == 1) ms1_indices.push_back(i);
   }
 
+  // Windows ordered by lower m/z bound, so each peak is only tested against the windows that can
+  // contain it (instead of against every window). max_upper[r] is the largest upper bound among
+  // by_lower[0..r]; it handles windows that overlap in m/z.
+  std::vector<Size> by_lower(windows.size());
+  std::iota(by_lower.begin(), by_lower.end(), 0);
+  std::stable_sort(by_lower.begin(), by_lower.end(),
+    [&windows](Size a, Size b) { return windows[a]->lower_mz < windows[b]->lower_mz; });
+  std::vector<double> lower_mz(windows.size());
+  std::vector<double> max_upper(windows.size());
+  for (Size r = 0; r < by_lower.size(); ++r)
+  {
+    lower_mz[r] = windows[by_lower[r]]->lower_mz;
+    max_upper[r] = std::max(windows[by_lower[r]]->upper_mz, r > 0 ? max_upper[r - 1] : windows[by_lower[r]]->upper_mz);
+  }
+
   // Decode each MS1 spectrum only once (decoding dominates the cost) and split it into every
   // window. slices[k][w] is the part of the k-th MS1 spectrum that falls into window w.
   std::vector<std::vector<MSSpectrum>> slices(ms1_indices.size(), std::vector<MSSpectrum>(windows.size()));
@@ -778,25 +796,32 @@ void DiaWeaver::extractMS1Windows(
         im_array = &spec.getFloatDataArrays()[im_info.ms1_im_index];
       }
 
+      // Per-window slices of this spectrum, filled in a single pass over its peaks
+      std::vector<MSSpectrum> new_specs(windows.size());
+      std::vector<MSSpectrum::FloatDataArray> im_fdas(windows.size());
       for (Size w = 0; w < windows.size(); ++w)
       {
-        const DIAWindow& window = *windows[w];
-
-        MSSpectrum new_spec;
-        new_spec.setRT(spec.getRT());
-
-        MSSpectrum::FloatDataArray im_fda;
+        new_specs[w].setRT(spec.getRT());
         if (im_info.available)
         {
-          im_fda.setName(im_info.getIMArrayName());
+          im_fdas[w].setName(im_info.getIMArrayName());
         }
+      }
 
-        for (Size j = 0; j < spec.size(); ++j)
+      for (Size j = 0; j < spec.size(); ++j)
+      {
+        const double mz = spec[j].getMZ();
+
+        // Windows whose lower bound is <= mz are by_lower[0, n). Walk back from the last of them;
+        // once max_upper drops below mz, no earlier window can contain the peak either.
+        const Size n = std::upper_bound(lower_mz.begin(), lower_mz.end(), mz) - lower_mz.begin();
+        for (Size r = n; r > 0 && max_upper[r - 1] >= mz; --r)
         {
-          const double mz = spec[j].getMZ();
+          const Size w = by_lower[r - 1];
+          const DIAWindow& window = *windows[w];
 
           // Always filter by m/z
-          if (mz < window.lower_mz || mz > window.upper_mz)
+          if (mz > window.upper_mz)
           {
             continue;
           }
@@ -812,18 +837,22 @@ void DiaWeaver::extractMS1Windows(
           }
 
           // Add peak and corresponding IM value (if available)
-          new_spec.push_back(spec[j]);
+          new_specs[w].push_back(spec[j]);
           if (im_array)
           {
-            im_fda.push_back((*im_array)[j]);
+            im_fdas[w].push_back((*im_array)[j]);
           }
         }
+      }
 
+      for (Size w = 0; w < windows.size(); ++w)
+      {
+        MSSpectrum& new_spec = new_specs[w];
         if (new_spec.empty()) continue;
 
         if (im_array)
         {
-          new_spec.getFloatDataArrays().push_back(std::move(im_fda));
+          new_spec.getFloatDataArrays().push_back(std::move(im_fdas[w]));
         }
         new_spec.sortByPosition();
 
