@@ -286,7 +286,7 @@ namespace OpenMS
           }
 
           // Clear the spectrum for reuse
-          raw_peaks_within_bounds.clear(true);
+          raw_peaks_within_bounds.clear(false);
 
           // --- Expand Left ---
           SignedSize left_idx = center_idx;
@@ -339,7 +339,7 @@ namespace OpenMS
           raw_peaks_within_bounds.sortByPosition();
 
           // Clear the spectrum for reuse
-          raw_mz_peaks.clear(true);
+          raw_mz_peaks.clear(false);
           sumFrame_(raw_peaks_within_bounds, raw_mz_peaks, sum_tolerance_mz_, true);
           if (raw_mz_peaks.empty())
           {
