@@ -1121,6 +1121,16 @@ namespace OpenMS
                                        const std::vector<double>& weights,
                                        MSSpectrum& aggregated_spectrum) const
     {
+      std::vector<const MSSpectrum*> spectrum_ptrs;
+      spectrum_ptrs.reserve(spectra.size());
+      for (const MSSpectrum& spec : spectra) spectrum_ptrs.push_back(&spec);
+      aggregateScans(spectrum_ptrs, weights, aggregated_spectrum);
+    }
+
+    void PeakPickerIM::aggregateScans(const std::vector<const MSSpectrum*>& spectra,
+                                       const std::vector<double>& weights,
+                                       MSSpectrum& aggregated_spectrum) const
+    {
       aggregated_spectrum.clear(true);
 
       if (spectra.empty())
@@ -1135,97 +1145,99 @@ namespace OpenMS
         return;
       }
 
-      // Estimate total number of peaks for reservation
-      Size total_peaks = 0;
-      for (const auto& spec : spectra)
+      // Collect the non-empty input spectra with their IM arrays (empty spectra contribute no peaks)
+      struct Input
       {
-        total_peaks += spec.size();
-      }
+        const MSSpectrum* spec;
+        const MSSpectrum::FloatDataArray* im;
+        double weight;
+      };
+      std::vector<Input> inputs;
+      Size total_peaks = 0;
 
-      // Reserve space for efficiency
-      aggregated_spectrum.reserve(total_peaks);
+      // m/z-sorted copies of inputs that are not sorted (reserved up front so pointers stay valid)
+      std::vector<MSSpectrum> sorted_copies;
+      sorted_copies.reserve(spectra.size());
 
-      // Create ion mobility float data array
       MSSpectrum::FloatDataArray aggregated_im_array;
-      aggregated_im_array.reserve(total_peaks);
 
       for (Size spec_idx = 0; spec_idx < spectra.size(); ++spec_idx)
       {
-        const auto& spec = spectra[spec_idx];
-        double weight = weights[spec_idx];
+        const MSSpectrum* spec_ptr = spectra[spec_idx];
+        if (spec_ptr->empty()) continue;
 
-        if (spec.empty()) continue;
+        const Size im_data_index = spec_ptr->getIMData().first;
 
-        Size im_data_index = spec.getIMData().first;
+        // Verify IM array size matches spectrum size
+        if (spec_ptr->getFloatDataArrays()[im_data_index].size() != spec_ptr->size())
+        {
+          throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+              "Ion mobility array size (" + String(spec_ptr->getFloatDataArrays()[im_data_index].size()) +
+              ") does not match spectrum size (" + String(spec_ptr->size()) + ") at RT " + String(spec_ptr->getRT()),
+              String(spec_ptr->getFloatDataArrays()[im_data_index].size()) + " != " + String(spec_ptr->size()));
+        }
+
+        // The merge below requires m/z-sorted inputs: sort a copy of an unsorted input
+        if (!spec_ptr->isSorted())
+        {
+          sorted_copies.push_back(*spec_ptr);
+          sorted_copies.back().sortByPosition();
+          spec_ptr = &sorted_copies.back();
+        }
+        const MSSpectrum& spec = *spec_ptr;
+
         const auto& im_array = spec.getFloatDataArrays()[im_data_index];
         aggregated_im_array.setName(im_array.getName());
 
-        // Verify IM array size matches spectrum size
-        if (im_array.size() != spec.size())
-        {
-          throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-              "Ion mobility array size (" + String(im_array.size()) + ") does not match spectrum size ("
-              + String(spec.size()) + ") at RT " + String(spec.getRT()),
-              String(im_array.size()) + " != " + String(spec.size()));
-        }
-
-        // Add all peaks with weighted intensities and their IM values
-        for (Size i = 0; i < spec.size(); ++i)
-        {
-          Peak1D weighted_peak;
-          weighted_peak.setMZ(spec[i].getMZ());
-          weighted_peak.setIntensity(spec[i].getIntensity() * weight);
-          aggregated_spectrum.push_back(weighted_peak);
-          aggregated_im_array.push_back(im_array[i]);
-        }
+        inputs.push_back({&spec, &im_array, weights[spec_idx]});
+        total_peaks += spec.size();
       }
 
-      if (aggregated_spectrum.empty())
+      if (total_peaks == 0)
       {
         OPENMS_LOG_WARN << "aggregateScans: No peaks collected after aggregation.\n";
         return;
       }
 
+      aggregated_spectrum.reserve(total_peaks);
+      aggregated_im_array.reserve(total_peaks);
+
+      // k-way merge of the sorted inputs. On equal m/z the earlier input wins, which reproduces the
+      // order of a stable sort of the concatenated inputs.
+      std::vector<Size> pos(inputs.size(), 0);
+      for (Size n = 0; n < total_peaks; ++n)
+      {
+        Size best = inputs.size();
+        for (Size k = 0; k < inputs.size(); ++k)
+        {
+          if (pos[k] == inputs[k].spec->size()) continue; // this input is exhausted
+          if (best == inputs.size() ||
+              (*inputs[k].spec)[pos[k]].getMZ() < (*inputs[best].spec)[pos[best]].getMZ())
+          {
+            best = k;
+          }
+        }
+        const Input& in = inputs[best];
+        const Size i = pos[best]++;
+
+        Peak1D weighted_peak;
+        weighted_peak.setMZ((*in.spec)[i].getMZ());
+        weighted_peak.setIntensity((*in.spec)[i].getIntensity() * in.weight);
+        aggregated_spectrum.push_back(weighted_peak);
+        aggregated_im_array.push_back((*in.im)[i]);
+      }
+
       // Attach the ion mobility array
       aggregated_spectrum.getFloatDataArrays().push_back(std::move(aggregated_im_array));
 
-      // Sort by m/z position (keeping float arrays aligned)
-      aggregated_spectrum.sortByPosition();
-
-      // Verify sorting was successful
-      if (!aggregated_spectrum.isSorted())
-      {
-        throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-            "Aggregated spectrum is not sorted by m/z after sortByPosition()",
-            "isSorted() returned false");
-      }
-
-      // Verify IM array size matches spectrum size after sorting
-      if (aggregated_spectrum.getFloatDataArrays()[0].size() != aggregated_spectrum.size())
-      {
-        throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-            "IM array size (" + String(aggregated_spectrum.getFloatDataArrays()[0].size()) +
-            ") does not match spectrum size (" + String(aggregated_spectrum.size()) + ") after sorting",
-            String(aggregated_spectrum.getFloatDataArrays()[0].size()) + " != " + String(aggregated_spectrum.size()));
-      }
-
       // Set metadata from the center spectrum (index 0)
-      const MSSpectrum& center_spec = spectra[0];
+      const MSSpectrum& center_spec = *spectra[0];
       static_cast<SpectrumSettings&>(aggregated_spectrum) = static_cast<const SpectrumSettings&>(center_spec);
       aggregated_spectrum.setMSLevel(center_spec.getMSLevel());
       aggregated_spectrum.setName(center_spec.getName());
       aggregated_spectrum.setRT(center_spec.getRT());
       aggregated_spectrum.setIMFormat(center_spec.getIMFormat());
       aggregated_spectrum.setDriftTimeUnit(center_spec.getDriftTimeUnit());
-
-      // Verify all peaks were aggregated
-      if (aggregated_spectrum.size() != total_peaks)
-      {
-        throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-            "Aggregated spectrum size (" + String(aggregated_spectrum.size()) +
-            ") does not match expected total peaks (" + String(total_peaks) + ")",
-            String(aggregated_spectrum.size()) + " != " + String(total_peaks));
-      }
     }
 
     void PeakPickerIM::pickExperimentWithAggregation(MSExperiment& exp)

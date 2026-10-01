@@ -127,6 +127,17 @@ namespace OpenMS
                         MSSpectrum& aggregated_spectrum) const;
 
     /**
+     * @brief Same as above, but reads the spectra in place (no copies) and merges them instead of
+     * concatenating and sorting.
+     *
+     * Inputs that are not sorted by m/z are sorted (as a copy) first. The merge gives the same peak
+     * order as a stable sort of the concatenated inputs (peaks with equal m/z keep input order).
+     */
+    void aggregateScans(const std::vector<const MSSpectrum*>& spectra,
+                        const std::vector<double>& weights,
+                        MSSpectrum& aggregated_spectrum) const;
+
+    /**
      * @brief Aggregates adjacent scans in an experiment using Gaussian-weighted signal boosting.
      *
      * For each MS1 spectrum in the experiment, this method aggregates adjacent scans using

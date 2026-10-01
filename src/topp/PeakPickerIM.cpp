@@ -96,7 +96,7 @@ protected:
     double center_rt = exp[center_idx].getRT();
     int center_ms_level = exp[center_idx].getMSLevel();
 
-    std::vector<MSSpectrum> spectra_to_aggregate;
+    std::vector<const MSSpectrum*> spectra_to_aggregate; // read in place, no copies
     std::vector<double> weights;
 
     // Search forward (including center), same MS level only
@@ -106,7 +106,7 @@ protected:
       double rt_diff = exp[j].getRT() - center_rt;
       double weight = std::exp(factor * rt_diff * rt_diff);
       if (weight < cutoff && j != center_idx) break;
-      spectra_to_aggregate.push_back(exp[j]);
+      spectra_to_aggregate.push_back(&exp[j]);
       weights.push_back(weight);
     }
 
@@ -117,7 +117,7 @@ protected:
       double rt_diff = exp[j].getRT() - center_rt;
       double weight = std::exp(factor * rt_diff * rt_diff);
       if (weight < cutoff) break;
-      spectra_to_aggregate.push_back(exp[j]);
+      spectra_to_aggregate.push_back(&exp[j]);
       weights.push_back(weight);
     }
 
