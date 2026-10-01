@@ -71,6 +71,13 @@ public:
     /// Assignment operator
     MassTrace & operator=(const MassTrace &) = default;
 
+    /// Move constructor (the user-declared destructor and copy operations above would otherwise
+    /// suppress it, turning every move -- e.g. in std::sort or vector growth -- into a full copy)
+    MassTrace(MassTrace &&) noexcept = default;
+
+    /// Move assignment operator
+    MassTrace & operator=(MassTrace &&) noexcept = default;
+
     /// Random access operator
     PeakType& operator[](const Size & mt_idx);
     const PeakType& operator[](const Size & mt_idx) const;
