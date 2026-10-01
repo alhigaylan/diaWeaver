@@ -562,6 +562,37 @@ namespace OpenMS
       sgolay_frame_length_   = (int)param_.getValue("pickIMTraces:sgolay_frame_length");
       sgolay_polynomial_order_= (int)param_.getValue("pickIMTraces:sgolay_polynomial_order");
 
+      Param gauss_params;
+      gauss_params.setValue("ppm_tolerance", gauss_ppm_tolerance_);
+      gauss_params.setValue("use_ppm_tolerance", "true");
+      gauss_filter_.setParameters(gauss_params);
+
+      Param picker_mz_p;
+      picker_mz_p.setValue("signal_to_noise", 0.0);
+      picker_mz_p.setValue("report_FWHM", "true");
+      picker_mz_p.setValue("report_FWHM_unit", "relative");
+      picker_mz_p.setValue("allow_missing_flank", "true");
+      picker_mz_.setParameters(picker_mz_p);
+
+      Param resampler_param;
+      resampler_param.setValue("spacing", mobilogram_sampling_grid_);
+      resampler_param.setValue("ppm", "false");
+      lin_resampler_.setParameters(resampler_param);
+
+      Param sgolay_params;
+      sgolay_params.setValue("frame_length", sgolay_frame_length_);
+      sgolay_params.setValue("polynomial_order", sgolay_polynomial_order_);
+      sgolay_filter_.setParameters(sgolay_params);
+
+      Param picker_im_p;
+      picker_im_p.setValue("signal_to_noise", 0.0);
+      picker_im_p.setValue("spacing_difference_gap", 0.0);
+      picker_im_p.setValue("spacing_difference", 0.0);
+      picker_im_p.setValue("missing", 0);
+      picker_im_p.setValue("report_FWHM", "true");
+      picker_im_p.setValue("report_FWHM_unit", "absolute");
+      picker_im_.setParameters(picker_im_p);
+
 #if 0
       ppm_tolerance_cluster_ = (double)param_.getValue("pickIMCluster:ppm_tolerance_cluster");
       im_tolerance_cluster_ = (double)param_.getValue("pickIMCluster:im_tolerance_cluster");
@@ -643,25 +674,13 @@ namespace OpenMS
       // ------------------------------------------ step 2a: smooth ------------------------------------------
       // Apply gaussian smoothing to the peaks projected into the m/z axis. This facilitates peak picking
       // in the m/z dimension and subseqent mobilogram extraction for each picked m/z peak.
-      GaussFilter gauss_filter;
-      Param gauss_params;
-      gauss_params.setValue("ppm_tolerance", gauss_ppm_tolerance_);
-      gauss_params.setValue("use_ppm_tolerance", "true");
-      gauss_filter.setParameters(gauss_params);
-      gauss_filter.filter(summed_spectrum);
+      gauss_filter_.filter(summed_spectrum);
 
       // ------------------------------------------ step 3a: m/z Peak Picking ------------------------------------------
       // Pick peaks in the m/z axis and toggle reporting peak width at half max (FWHM)
       // we will use the FWHM of each picked m/z peak to extract mobilograms.
-      PeakPickerHiRes picker_mz;
-      Param picker_mz_p;
-      picker_mz_p.setValue("signal_to_noise", 0.0);
-      picker_mz_p.setValue("report_FWHM", "true");
-      picker_mz_p.setValue("report_FWHM_unit", "relative");
-      picker_mz_p.setValue("allow_missing_flank", "true");
-      picker_mz.setParameters(picker_mz_p);
       MSSpectrum picked_spectrum;
-      picker_mz.pick(summed_spectrum, picked_spectrum);
+      picker_mz_.pick(summed_spectrum, picked_spectrum);
       if (picked_spectrum.empty())
       {
         OPENMS_LOG_WARN << "No m/z peaks picked. Returning empty spectrum.\n";
@@ -693,10 +712,6 @@ namespace OpenMS
 
       auto mobilogram_traces = PeakPickerIM::extractIonMobilityTraces(picked_spectrum, spectrum);
 
-      Param resampler_param;
-      resampler_param.setValue("spacing", mobilogram_sampling_grid_);
-      resampler_param.setValue("ppm", "false");
-
       // ************************************************* PART II *****************************************************
       // ------------------------------------------ Ion mobility peak picking ------------------------------------------
 
@@ -708,31 +723,12 @@ namespace OpenMS
                    [](const auto& trace) { return trace.empty(); }),
         mobilogram_traces.end());
 
-      LinearResamplerAlign lin_resampler;
-      lin_resampler.setParameters(resampler_param);
-
-      SavitzkyGolayFilter sgolay_filter;
-      Param sgolay_params;
-      sgolay_params.setValue("frame_length", sgolay_frame_length_);
-      sgolay_params.setValue("polynomial_order", sgolay_polynomial_order_);
-      sgolay_filter.setParameters(sgolay_params);
-
       // apply PeakPickerHiRes to pick ion mobility peaks.
       // PeakPickerHiRes can be applied to chromatograms. We reasoned the same set of parameters ideal for
       // chromatograms is also applicable for mobilograms.
       // Each raw mobilogram contains a float data array with raw m/z values.
       // We will use the ion mobility peak FWHM to define min/max ion mobility boundary
       // and recompute the m/z center based on the ion mobility peak.
-      PeakPickerHiRes picker_im;
-      Param picker_im_p;
-      picker_im_p.setValue("signal_to_noise", 0.0);
-      picker_im_p.setValue("spacing_difference_gap", 0.0);
-      picker_im_p.setValue("spacing_difference", 0.0);
-      picker_im_p.setValue("missing", 0);
-      picker_im_p.setValue("report_FWHM", "true");
-      picker_im_p.setValue("report_FWHM_unit", "absolute");
-      picker_im.setParameters(picker_im_p);
-
       for (const Mobilogram& trace : mobilogram_traces)
       {
         // ------------------------------------------ part 2b: smooth and resample --------------------------------
@@ -753,13 +749,13 @@ namespace OpenMS
 
         // Linear resample onto uniform grid; LinearResamplerAlign handles duplicate
         // IM positions in the raw trace correctly (distributes intensity to bracketing nodes).
-        lin_resampler.raster(padded_trace);
+        lin_resampler_.raster(padded_trace);
         // SGolay smooth prior to peak picking
-        sgolay_filter.filter(padded_trace);
+        sgolay_filter_.filter(padded_trace);
 
         Mobilogram picked_trace;
         std::vector<PeakPickerHiRes::PeakBoundary> boundaries;
-        picker_im.pick(padded_trace, picked_trace, boundaries, true);
+        picker_im_.pick(padded_trace, picked_trace, boundaries, true);
         picked_traces.push_back(std::move(picked_trace));
       }
 

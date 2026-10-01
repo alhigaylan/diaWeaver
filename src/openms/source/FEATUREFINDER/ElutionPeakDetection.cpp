@@ -19,6 +19,8 @@
 #include <omp.h>
 #endif
 
+#include <map>
+
 // #define DEBUG_EPD
 
 namespace OpenMS
@@ -611,12 +613,22 @@ namespace OpenMS
       spectrum.push_back(Peak1D(mt[i].getRT(), mt[i].getIntensity()));
     }
 
-    SavitzkyGolayFilter sg;
-    Param param;
-    param.setValue("polynomial_order", 2);
-    param.setValue("frame_length", std::max(3, win_size)); // frame length must be at least polynomial_order+1, otherwise SG will fail
-    sg.setParameters(param);
-    sg.filter(spectrum);
+    // The frame length only depends on the trace's scan rate, so the filter (whose coefficients
+    // cost an SVD per setup) is reused across traces. thread_local, since this function runs
+    // concurrently on many traces.
+    const int frame_length = std::max(3, win_size); // frame length must be at least polynomial_order+1, otherwise SG will fail
+    thread_local std::map<int, SavitzkyGolayFilter> sg_cache;
+    auto sg_it = sg_cache.find(frame_length);
+    if (sg_it == sg_cache.end())
+    {
+      Param param;
+      param.setValue("polynomial_order", 2);
+      param.setValue("frame_length", frame_length);
+      SavitzkyGolayFilter sg;
+      sg.setParameters(param);
+      sg_it = sg_cache.emplace(frame_length, std::move(sg)).first;
+    }
+    sg_it->second.filter(spectrum);
     MSSpectrum::iterator iter = spectrum.begin();
     std::vector<double> smoothed_intensities;
     for (; iter != spectrum.end(); ++iter)

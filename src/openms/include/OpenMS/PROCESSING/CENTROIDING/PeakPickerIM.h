@@ -12,6 +12,10 @@
 #include <OpenMS/KERNEL/MSSpectrum.h>
 #include <OpenMS/DATASTRUCTURES/Param.h>
 #include <OpenMS/DATASTRUCTURES/DefaultParamHandler.h>
+#include <OpenMS/PROCESSING/CENTROIDING/PeakPickerHiRes.h>
+#include <OpenMS/PROCESSING/RESAMPLING/LinearResamplerAlign.h>
+#include <OpenMS/PROCESSING/SMOOTHING/GaussFilter.h>
+#include <OpenMS/PROCESSING/SMOOTHING/SavitzkyGolayFilter.h>
 
 #include <map>
 #include <vector>
@@ -176,6 +180,14 @@ namespace OpenMS
     double mobilogram_sampling_grid_{0.01};
     int sgolay_frame_length_{5};
     int sgolay_polynomial_order_{3};
+
+    /// Filters and pickers used by pickIMTraces(), configured once in updateMembers_()
+    /// instead of per spectrum (their construction and parameter setup dominated runtime)
+    GaussFilter gauss_filter_;               ///< m/z smoothing of the summed frame
+    PeakPickerHiRes picker_mz_;              ///< m/z peak picking (reports FWHM in ppm)
+    LinearResamplerAlign lin_resampler_;     ///< mobilogram resampling onto a uniform grid
+    SavitzkyGolayFilter sgolay_filter_;      ///< mobilogram smoothing
+    PeakPickerHiRes picker_im_;              ///< ion mobility peak picking (reports absolute FWHM)
 
 #if 0
     double ppm_tolerance_cluster_{50.0};
