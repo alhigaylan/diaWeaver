@@ -109,17 +109,15 @@ owner (competitors) -- regardless of whether a competitor's match was later cred
 its own score via the peptidoform exemption. Intended for downstream use in building a
 spectral library from unambiguous fragments for peptide quantification.
 
-<B>Target/decoy type column (decoy_prefix, default "rev_").</B> Both output TSVs carry a
-"type" column ("target" or "decoy"). This is determined independently for every row from
-psm.tsv's own "Protein" column (decoy if it starts with decoy_prefix) -- psm.tsv's
-separate pre-computed "Is Decoy" column is never read, so the result does not depend on
-FragPipe/Philosopher report-generation settings (e.g. phi-report.print-decoys, which by
-default strips decoy rows from psm.tsv entirely even when some pass the configured FDR
-threshold during filtering). decoy_prefix must match whatever prefix the search itself
-used (fragger.params' decoy_prefix, Percolator's --protein-decoy-pattern) -- the default
-"rev_" matches MSFragger's and Percolator's own default. In psm_accounting.tsv it is the
-row's own PSM. In fragment_usage.tsv it is the officially winning PSM's status (the
-FragmentClaimRegistry owner), not any competitor's.
+<B>Target/decoy type column.</B> Both output TSVs carry a "type" column ("target" or
+"decoy"), read directly from psm.tsv's own "Is Decoy" column -- this tool never
+re-derives decoy status itself. In psm_accounting.tsv it is the row's own PSM. In
+fragment_usage.tsv it is the officially winning PSM's status (the FragmentClaimRegistry
+owner), not any competitor's. By default FragPipe/Philosopher's report step
+(phi-report.print-decoys) strips decoys from psm.tsv even when some pass the configured
+FDR threshold during filtering, so this column will show "target" for every row unless
+that FragPipe setting was enabled for the search that produced psm.tsv; if psm.tsv has no
+"Is Decoy" column at all, every PSM is reported as "target" and a warning is logged once.
 
 <B>Multiple input files (-in).</B> MSFragger/FragPipe can search several mzML files in one
 combined run, producing a single psm.tsv whose "Spectrum" field embeds the source run's
@@ -199,7 +197,7 @@ protected:
     int psm_scan = -1;                   // 0-based scan number parsed from "Spectrum"
     String spectrum_field;
     String run_stem;                     // "Spectrum" field with the trailing .scan.scan.charge stripped
-    bool is_decoy = false;               // derived from "Protein" vs. decoy_prefix, not psm.tsv's own "Is Decoy" column
+    bool is_decoy = false;               // "Is Decoy" column; false (target) if column absent
 
     bool isModified() const { return !mods.empty(); }
   };
@@ -538,20 +536,13 @@ protected:
 
   // -------------------------------------------------------------------------
   // Parse psm.tsv: required columns are Spectrum, Peptide, Charge, Retention,
-  // Assigned Modifications, Hyperscore, Protein, and Observed M/Z (or
-  // Calibrated Observed M/Z). Ion Mobility is read if present, optional
-  // otherwise. Target/decoy status is never read from a pre-computed column
-  // (psm.tsv's own "Is Decoy" is not used) -- it is determined independently
-  // for every row by checking whether "Protein" starts with decoy_prefix, the
-  // same convention MSFragger/Percolator themselves use (fragger.params'
-  // decoy_prefix, Percolator's --protein-decoy-pattern). This makes the
-  // result self-contained and independent of whatever FragPipe/Philosopher
-  // report-generation settings happened to be in effect. Every row's
-  // translated sequence is validated against AASequence::fromString
-  // immediately; rows that fail are logged and dropped rather than silently
-  // carried forward with a broken sequence.
+  // Assigned Modifications, Hyperscore, and Observed M/Z (or Calibrated
+  // Observed M/Z). Ion Mobility and Is Decoy are read if present, optional
+  // otherwise. Every row's translated sequence is validated against
+  // AASequence::fromString immediately; rows that fail are logged and
+  // dropped rather than silently carried forward with a broken sequence.
   // -------------------------------------------------------------------------
-  std::vector<PsmEntry> parsePsmTsv_(const String& filename, const String& decoy_prefix) const
+  std::vector<PsmEntry> parsePsmTsv_(const String& filename) const
   {
     std::vector<PsmEntry> entries;
     std::ifstream file(filename.c_str());
@@ -589,7 +580,7 @@ protected:
     int c_mz = find_col("Observed M/Z");
     if (c_mz < 0) c_mz = find_col("Calibrated Observed M/Z");
     const int c_im = find_col("Ion Mobility");
-    const int c_protein = find_col("Protein");
+    const int c_decoy = find_col("Is Decoy");
 
     std::vector<String> missing;
     if (c_spectrum < 0) missing.push_back("Spectrum");
@@ -599,7 +590,6 @@ protected:
     if (c_assigned < 0) missing.push_back("Assigned Modifications");
     if (c_hyper    < 0) missing.push_back("Hyperscore");
     if (c_mz       < 0) missing.push_back("Observed M/Z / Calibrated Observed M/Z");
-    if (c_protein  < 0) missing.push_back("Protein");
 
     if (!missing.empty())
     {
@@ -611,6 +601,10 @@ protected:
     if (c_im < 0)
     {
       OPENMS_LOG_WARN << "[diaWeaverIonAccount] psm.tsv has no 'Ion Mobility' column. Proceeding without it.\n";
+    }
+    if (c_decoy < 0)
+    {
+      OPENMS_LOG_WARN << "[diaWeaverIonAccount] psm.tsv has no 'Is Decoy' column. All PSMs will be reported as 'target'.\n";
     }
 
     std::string raw_line;
@@ -649,8 +643,11 @@ protected:
           e.im = im_str.toDouble();
         }
 
-        String protein_str = f.at(static_cast<Size>(c_protein)); protein_str.trim();
-        e.is_decoy = protein_str.hasPrefix(decoy_prefix);
+        if (c_decoy >= 0 && static_cast<Size>(c_decoy) < f.size())
+        {
+          String decoy_str = f.at(static_cast<Size>(c_decoy)); decoy_str.trim().toLower();
+          e.is_decoy = (decoy_str == "true");
+        }
 
         e.spectrum_field = f.at(static_cast<Size>(c_spectrum));
         e.spectrum_field.trim();
@@ -754,15 +751,6 @@ protected:
 
     registerFlag_("neutral_losses",
                   "If set, include neutral loss ions (-H2O/-NH3) when generating theoretical b/y ions.");
-
-    registerStringOption_("decoy_prefix", "<prefix>", "rev_",
-                          "Prefix identifying decoy protein entries in psm.tsv's 'Protein' column. Used to "
-                          "populate the 'type' (target/decoy) column in both outputs. This is determined "
-                          "independently per row from 'Protein' -- never read from psm.tsv's own pre-computed "
-                          "'Is Decoy' column -- so the result does not depend on FragPipe/Philosopher report "
-                          "settings (e.g. phi-report.print-decoys). Must match the decoy prefix actually used "
-                          "for the search (fragger.params' decoy_prefix / Percolator's --protein-decoy-pattern).",
-                          false);
   }
 
   // Exact copy of OpenMS::HyperScore's private logfactorial_ (ProSE's own scoring helper,
@@ -798,10 +786,9 @@ protected:
     const int max_fragment_charge = getIntOption_("max_fragment_charge");
     const bool allow_peptidoform_sharing = (getStringOption_("allow_peptidoform_fragment_sharing") == "true");
     const bool neutral_losses = getFlag_("neutral_losses");
-    const String decoy_prefix = getStringOption_("decoy_prefix");
 
     // ---- Step 1: parse psm.tsv (once; rows are routed to their matching mzML per file below) ----
-    const std::vector<PsmEntry> all_psms = parsePsmTsv_(in_ids, decoy_prefix);
+    const std::vector<PsmEntry> all_psms = parsePsmTsv_(in_ids);
     if (all_psms.empty())
     {
       OPENMS_LOG_ERROR << "[diaWeaverIonAccount] No PSMs parsed from " << in_ids << ". Aborting.\n";
