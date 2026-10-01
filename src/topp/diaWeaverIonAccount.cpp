@@ -111,13 +111,13 @@ spectral library from unambiguous fragments for peptide quantification.
 
 <B>Target/decoy type column.</B> Both output TSVs carry a "type" column ("target" or
 "decoy"), read directly from psm.tsv's own "Is Decoy" column -- this tool never
-re-derives decoy status itself. In psm_accounting.tsv it is the row's own PSM. In
-fragment_usage.tsv it is the officially winning PSM's status (the FragmentClaimRegistry
-owner), not any competitor's. By default FragPipe/Philosopher's report step
-(phi-report.print-decoys) strips decoys from psm.tsv even when some pass the configured
-FDR threshold during filtering, so this column will show "target" for every row unless
-that FragPipe setting was enabled for the search that produced psm.tsv; if psm.tsv has no
-"Is Decoy" column at all, every PSM is reported as "target" and a warning is logged once.
+re-derives decoy status itself. "Is Decoy" is a required column; psm.tsv missing it
+aborts the run with an error, same as any other required column. In psm_accounting.tsv
+it is the row's own PSM. In fragment_usage.tsv it is the officially winning PSM's status
+(the FragmentClaimRegistry owner), not any competitor's. By default FragPipe/Philosopher's
+report step (phi-report.print-decoys) strips decoys from psm.tsv even when some pass the
+configured FDR threshold during filtering, so this column will show "target" for every
+row unless that FragPipe setting was enabled for the search that produced psm.tsv.
 
 <B>Multiple input files (-in).</B> MSFragger/FragPipe can search several mzML files in one
 combined run, producing a single psm.tsv whose "Spectrum" field embeds the source run's
@@ -197,7 +197,7 @@ protected:
     int psm_scan = -1;                   // 0-based scan number parsed from "Spectrum"
     String spectrum_field;
     String run_stem;                     // "Spectrum" field with the trailing .scan.scan.charge stripped
-    bool is_decoy = false;               // "Is Decoy" column; false (target) if column absent
+    bool is_decoy = false;               // "Is Decoy" column (required)
 
     bool isModified() const { return !mods.empty(); }
   };
@@ -537,7 +537,7 @@ protected:
   // -------------------------------------------------------------------------
   // Parse psm.tsv: required columns are Spectrum, Peptide, Charge, Retention,
   // Assigned Modifications, Hyperscore, and Observed M/Z (or Calibrated
-  // Observed M/Z). Ion Mobility and Is Decoy are read if present, optional
+  // Observed M/Z), and Is Decoy. Ion Mobility is read if present, optional
   // otherwise. Every row's translated sequence is validated against
   // AASequence::fromString immediately; rows that fail are logged and
   // dropped rather than silently carried forward with a broken sequence.
@@ -590,6 +590,7 @@ protected:
     if (c_assigned < 0) missing.push_back("Assigned Modifications");
     if (c_hyper    < 0) missing.push_back("Hyperscore");
     if (c_mz       < 0) missing.push_back("Observed M/Z / Calibrated Observed M/Z");
+    if (c_decoy    < 0) missing.push_back("Is Decoy");
 
     if (!missing.empty())
     {
@@ -601,10 +602,6 @@ protected:
     if (c_im < 0)
     {
       OPENMS_LOG_WARN << "[diaWeaverIonAccount] psm.tsv has no 'Ion Mobility' column. Proceeding without it.\n";
-    }
-    if (c_decoy < 0)
-    {
-      OPENMS_LOG_WARN << "[diaWeaverIonAccount] psm.tsv has no 'Is Decoy' column. All PSMs will be reported as 'target'.\n";
     }
 
     std::string raw_line;
@@ -643,11 +640,8 @@ protected:
           e.im = im_str.toDouble();
         }
 
-        if (c_decoy >= 0 && static_cast<Size>(c_decoy) < f.size())
-        {
-          String decoy_str = f.at(static_cast<Size>(c_decoy)); decoy_str.trim().toLower();
-          e.is_decoy = (decoy_str == "true");
-        }
+        String decoy_str = f.at(static_cast<Size>(c_decoy)); decoy_str.trim().toLower();
+        e.is_decoy = (decoy_str == "true");
 
         e.spectrum_field = f.at(static_cast<Size>(c_spectrum));
         e.spectrum_field.trim();
