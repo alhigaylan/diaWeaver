@@ -538,9 +538,6 @@ namespace OpenMS
       defaults_.setValue("pickIMTraces:sum_tolerance_mz",          1.0,  "Tolerance for summing adjacent m/z peaks (ppm)");
       defaults_.setValue("pickIMTraces:mobilogram_sampling_grid", 0.01, "Grid spacing for linear resampling of mobilograms (in 1/K0 units).");
       defaults_.setValue("pickIMTraces:gauss_ppm_tolerance",      5.0,  "Gaussian smoothing m/z tolerance in ppm");
-      defaults_.setMinFloat("pickIMTraces:gauss_ppm_tolerance", 0.01);
-      defaults_.setValue("pickIMTraces:gauss_exact_kernel",       "false", "Use the exact Gaussian kernel (weighted average, GaussFilter use_exact_kernel) for m/z smoothing. With the default tabulated kernel, gauss_ppm_tolerance values below ~20-40 ppm have no effect.");
-      defaults_.setValidStrings("pickIMTraces:gauss_exact_kernel", {"true","false"});
       defaults_.setValue("pickIMTraces:sgolay_frame_length",     5,     "Savitzky-Golay smoothing frame length");
       defaults_.setValue("pickIMTraces:sgolay_polynomial_order", 3,     "Savitzky-Golay smoothing polynomial order");
 #if 0
@@ -562,14 +559,12 @@ namespace OpenMS
       sum_tolerance_mz_         = (double)param_.getValue("pickIMTraces:sum_tolerance_mz");
       mobilogram_sampling_grid_ = (double)param_.getValue("pickIMTraces:mobilogram_sampling_grid");
       gauss_ppm_tolerance_      = (double)param_.getValue("pickIMTraces:gauss_ppm_tolerance");
-      gauss_exact_kernel_       = param_.getValue("pickIMTraces:gauss_exact_kernel").toBool();
       sgolay_frame_length_   = (int)param_.getValue("pickIMTraces:sgolay_frame_length");
       sgolay_polynomial_order_= (int)param_.getValue("pickIMTraces:sgolay_polynomial_order");
 
       Param gauss_params;
       gauss_params.setValue("ppm_tolerance", gauss_ppm_tolerance_);
       gauss_params.setValue("use_ppm_tolerance", "true");
-      gauss_params.setValue("use_exact_kernel", gauss_exact_kernel_ ? "true" : "false");
       gauss_filter_.setParameters(gauss_params);
 
       Param picker_mz_p;

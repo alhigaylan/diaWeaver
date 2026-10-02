@@ -26,19 +26,13 @@ namespace OpenMS
     defaults_.setValue("gaussian_width", 0.2, "Use a gaussian filter width which has approximately the same width as your mass peaks (FWHM in m/z).");
     defaults_.setMinFloat("gaussian_width", 0.0);
     defaults_.setValue("ppm_tolerance", 10.0, "Gaussian width, depending on the m/z position.\nThe higher the value, the wider the peak and therefore the wider the gaussian.");
-    defaults_.setMinFloat("ppm_tolerance", 0.01);
+    defaults_.setMinFloat("ppm_tolerance", 0.0);
     defaults_.setValue("use_ppm_tolerance", "false",
                        "If true, instead of the gaussian_width value, the ppm_tolerance is used. The gaussian is calculated in each step anew, so "
                        "this is much slower.");
     defaults_.setValidStrings("use_ppm_tolerance", {"true","false"});
     defaults_.setValue("write_log_messages", "false", "true: Warn if no signal was found by the Gauss filter algorithm.");
     defaults_.setValidStrings("write_log_messages", {"true","false"});
-    defaults_.setValue("use_exact_kernel", "false",
-                       "If true, each point is replaced by the Gaussian-weighted average of all points within +/- 4 sigma "
-                       "(sigma = width / 8), with the kernel evaluated exactly. If false, the kernel is read from a table "
-                       "with 0.01 spacing, so widths below ~0.02 (e.g. small ppm_tolerance values) are not honored and a point "
-                       "without neighbors within that range is set to zero.");
-    defaults_.setValidStrings("use_exact_kernel", {"true","false"});
     defaultsToParam_();
   }
 
@@ -51,7 +45,6 @@ namespace OpenMS
       param_.getValue("use_ppm_tolerance").toBool());
 
     write_log_messages_ = param_.getValue("write_log_messages").toBool();
-    use_exact_kernel_ = param_.getValue("use_exact_kernel").toBool();
   }
 
   void GaussFilter::filter(MSSpectrum & spectrum)
@@ -72,9 +65,7 @@ namespace OpenMS
     // apply filter
     auto mz_out_it = mz_out.begin();
     auto int_out_it = int_out.begin();
-    found_signal = use_exact_kernel_
-      ? gauss_algo_.filterExact(mz_in.begin(), mz_in.end(), int_in.begin(), mz_out_it, int_out_it)
-      : gauss_algo_.filter(mz_in.begin(), mz_in.end(), int_in.begin(), mz_out_it, int_out_it);
+    found_signal = gauss_algo_.filter(mz_in.begin(), mz_in.end(), int_in.begin(), mz_out_it, int_out_it);
 
     // If all intensities are zero in the scan and the scan has a reasonable size, throw an exception.
     // This is the case if the Gaussian filter is smaller than the spacing of raw data
@@ -123,9 +114,7 @@ namespace OpenMS
     // apply filter
     auto mz_out_it = rt_out.begin();
     auto int_out_it = int_out.begin();
-    found_signal = use_exact_kernel_
-      ? gauss_algo_.filterExact(rt_in.begin(), rt_in.end(), int_in.begin(), mz_out_it, int_out_it)
-      : gauss_algo_.filter(rt_in.begin(), rt_in.end(), int_in.begin(), mz_out_it, int_out_it);
+    found_signal = gauss_algo_.filter(rt_in.begin(), rt_in.end(), int_in.begin(), mz_out_it, int_out_it);
 
     // If all intensities are zero in the scan and the scan has a reasonable size, throw an exception.
     // This is the case if the Gaussian filter is smaller than the spacing of raw data
@@ -174,9 +163,7 @@ namespace OpenMS
     // apply filter
     auto im_out_it = im_out.begin();
     auto int_out_it = int_out.begin();
-    found_signal = use_exact_kernel_
-      ? gauss_algo_.filterExact(im_in.begin(), im_in.end(), int_in.begin(), im_out_it, int_out_it)
-      : gauss_algo_.filter(im_in.begin(), im_in.end(), int_in.begin(), im_out_it, int_out_it);
+    found_signal = gauss_algo_.filter(im_in.begin(), im_in.end(), int_in.begin(), im_out_it, int_out_it);
 
     // If all intensities are zero in the scan and the scan has a reasonable size, throw an exception.
     // This is the case if the Gaussian filter is smaller than the spacing of raw data

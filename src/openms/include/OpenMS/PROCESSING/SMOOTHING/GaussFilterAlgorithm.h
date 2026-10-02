@@ -139,65 +139,6 @@ public:
       return found_signal;
     }
 
-    /**
-      @brief Smoothes two data arrays with an exactly evaluated Gaussian kernel (weighted average).
-
-      Each output intensity is the Gaussian-weighted average of all input points within
-      +/- 4 sigma of it, the point itself included:
-      \f[ I'(x) = \frac{\sum_j k(x_j - x) I_j}{\sum_j k(x_j - x)}, \quad k(d) = e^{-d^2 / (2\sigma^2)} \f]
-      with sigma = width / 8 (width = @p gaussian_width, or the ppm tolerance converted to m/z at x).
-
-      Unlike filter(), the kernel is evaluated exactly instead of being read from a table with a
-      fixed spacing, so narrow (e.g. ppm-based) widths are honored, and a point without neighbors
-      within +/- 4 sigma keeps its own intensity.
-
-      @note The data must be sorted according to ascending position.
-    */
-    template <typename ConstIterT, typename IterT>
-    bool filterExact(
-        ConstIterT mz_in_start,
-        ConstIterT mz_in_end,
-        ConstIterT int_in_start,
-        IterT mz_out,
-        IterT int_out) const
-    {
-      bool found_signal = false;
-      const Size n = static_cast<Size>(std::distance(mz_in_start, mz_in_end));
-
-      // [lo, hi) is the window of points within +/- 4 sigma of the current point. Both window bounds
-      // only move forward along the sorted input (for ppm widths too, since x - 4 sigma(x) grows with x).
-      Size lo = 0, hi = 0;
-      for (Size i = 0; i < n; ++i)
-      {
-        const double x = mz_in_start[i];
-        const double sigma = use_ppm_tolerance_ ? Math::ppmToMass(ppm_tolerance_, x) / 8.0 : sigma_;
-        const double half_range = 4.0 * sigma;
-
-        while (mz_in_start[lo] < x - half_range) ++lo;
-        if (hi < i + 1) hi = i + 1;
-        while (hi < n && mz_in_start[hi] <= x + half_range) ++hi;
-
-        double v = 0.0;
-        double norm = 0.0;
-        for (Size j = lo; j < hi; ++j)
-        {
-          const double d = (mz_in_start[j] - x) / sigma;
-          const double w = std::exp(-0.5 * d * d);
-          v += w * int_in_start[j];
-          norm += w;
-        }
-        const double new_int = v / norm;
-
-        *mz_out = x;
-        *int_out = new_int;
-        ++mz_out;
-        ++int_out;
-
-        if (std::fabs(new_int) > 0) found_signal = true;
-      }
-      return found_signal;
-    }
-
     void initialize(double gaussian_width, double spacing, double ppm_tolerance, bool use_ppm_tolerance);
 
 protected:
