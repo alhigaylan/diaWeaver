@@ -617,7 +617,7 @@ protected:
 
       Param p_ffp = FeatureFindingPeptide().getDefaults();
       p_ffp.setValue("local_rt_range", 5.0, "RT range where to look for coeluting mass traces");
-      p_ffp.setValue("local_mz_range", 3.0, "MZ range where to look for isotopic mass traces");
+      p_ffp.setValue("maximum_isotopes_nr", 4, "Maximum number of isotopic mass traces in a feature hypothesis (monoisotopic trace included).");
       p_ffp.setValue("local_im_range", 0.02, "IM range where to look for isotopic mass traces");
       p_ffp.setValue("charge_lower_bound", 2, "Lowest charge state to consider");
       p_ffp.setValue("charge_upper_bound", 4, "Highest charge state to consider");
@@ -713,7 +713,7 @@ protected:
 
       Param p_ffp = FeatureFindingPeptide().getDefaults();
       p_ffp.setValue("local_rt_range", 5.0, "RT range where to look for coeluting mass traces");
-      p_ffp.setValue("local_mz_range", 3.0, "MZ range where to look for isotopic mass traces");
+      p_ffp.setValue("maximum_isotopes_nr", 4, "Maximum number of isotopic mass traces in a feature hypothesis (monoisotopic trace included).");
       p_ffp.setValue("local_im_range", 0.02, "IM range where to look for isotopic mass traces");
       p_ffp.setValue("charge_lower_bound", 2, "Lowest charge state to consider");
       p_ffp.setValue("charge_upper_bound", 3, "Highest charge state to consider for fragment ions");

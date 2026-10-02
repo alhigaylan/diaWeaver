@@ -171,13 +171,16 @@ protected:
     ffpep.setParameters(ffp_param);
     ffpep.run(m_traces_final, feat_map, feat_chromatograms);
 
-    Size trace_count(0);
-    for (Size i = 0; i < feat_map.size(); ++i)
+    // count distinct traces (with allow_trace_sharing, a trace can belong to several features);
+    // the feature label is the '_'-joined list of its trace labels
+    std::set<String> traces_in_features;
+    for (const Feature& f : feat_map)
     {
-      OPENMS_PRECONDITION(feat_map[i].metaValueExists(Constants::UserParam::NUM_OF_MASSTRACES),
-          "MetaValue 'num_of_masstraces' missing from FFPeptide output!");
-      trace_count += (Size) feat_map[i].getMetaValue(Constants::UserParam::NUM_OF_MASSTRACES);
+      StringList trace_labels;
+      String(f.getMetaValue("label")).split('_', trace_labels);
+      traces_in_features.insert(trace_labels.begin(), trace_labels.end());
     }
+    const Size trace_count = traces_in_features.size();
 
     if (trace_count != m_traces_final.size())
     {

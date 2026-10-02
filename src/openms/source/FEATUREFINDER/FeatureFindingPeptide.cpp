@@ -28,6 +28,7 @@
 
 #include <numeric>
 #include <optional>
+#include <set>
 #include <unordered_set>
 
 namespace OpenMS
@@ -37,7 +38,6 @@ namespace OpenMS
   {
     defaults_.setValue("local_rt_range", 5.0, "RT range where to look for coeluting mass traces", {"advanced"});
     defaults_.setValue("local_im_range", 0.02, "IM range where to look for coeluting mass traces", {"advanced"});
-    defaults_.setValue("local_mz_range", 3.0, "MZ range where to look for isotopic mass traces", {"advanced"});
     defaults_.setValue("charge_lower_bound", 1, "Lowest charge state to consider");
     defaults_.setValue("charge_upper_bound", 4, "Highest charge state to consider");
     defaults_.setValue("chrom_fwhm", 5.0, "Expected chromatographic peak width (in seconds).");
@@ -81,6 +81,12 @@ namespace OpenMS
     defaults_.setValue("minimum_isotopes_nr", 2, "Minimum number of isotopic mass traces required for a feature hypothesis to be reported. Must be at least 2 (monoisotopic + one isotope trace).");
     defaults_.setMinInt("minimum_isotopes_nr", 2);
 
+    defaults_.setValue("maximum_isotopes_nr", 4, "Maximum number of isotopic mass traces in a feature hypothesis (monoisotopic trace included). A hypothesis is extended isotope by isotope until no matching trace is found or this number is reached.");
+    defaults_.setMinInt("maximum_isotopes_nr", 2);
+
+    defaults_.setValue("allow_trace_sharing", "false", "If false, hypotheses are accepted in order of decreasing score and a mass trace can belong to only one feature. If true, a mass trace can belong to several features: hypotheses are processed in order of increasing monoisotopic m/z; a hypothesis is dropped if its monoisotopic trace is an isotope trace of an already accepted feature of the same charge, otherwise it is accepted and marks its isotope traces for that charge. Features of different charges never block each other.");
+    defaults_.setValidStrings("allow_trace_sharing", {"false","true"});
+
     defaultsToParam_();
 
     this->setLogType(CMD);
@@ -92,7 +98,6 @@ namespace OpenMS
   {
     local_rt_range_ = (double)param_.getValue("local_rt_range");
     local_im_range_ = (double)param_.getValue("local_im_range");
-    local_mz_range_ = (double)param_.getValue("local_mz_range");
     chrom_fwhm_ = (double)param_.getValue("chrom_fwhm");
 
     charge_lower_bound_ = (Size)param_.getValue("charge_lower_bound");
@@ -123,6 +128,13 @@ namespace OpenMS
     enable_mass_defect_filtering_ = param_.getValue("mass_defect_filtering").toBool();
     mass_defect_offset_ = (double)param_.getValue("mass_defect_offset");
     minimum_isotopes_nr_ = static_cast<Size>((int)param_.getValue("minimum_isotopes_nr"));
+    maximum_isotopes_nr_ = static_cast<Size>((int)param_.getValue("maximum_isotopes_nr"));
+    if (maximum_isotopes_nr_ < minimum_isotopes_nr_)
+    {
+      throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+        "maximum_isotopes_nr (" + String(maximum_isotopes_nr_) + ") must not be smaller than minimum_isotopes_nr (" + String(minimum_isotopes_nr_) + ")");
+    }
+    allow_trace_sharing_ = param_.getValue("allow_trace_sharing").toBool();
   }
 
 
@@ -417,7 +429,7 @@ namespace OpenMS
       fh_tmp.addMassTrace(*candidates[0]);
 
       Size last_iso_idx(0);
-      Size iso_pos_max(static_cast<Size>(std::floor(charge * local_mz_range_)));
+      const Size iso_pos_max = maximum_isotopes_nr_ - 1;
 
       // Accumulators for mean individual scores across all accepted iso_pos pairs.
       double acc_rt(0.0), acc_mz(0.0), acc_int(0.0), acc_overlap(0.0), acc_pair(0.0);
@@ -498,14 +510,18 @@ namespace OpenMS
           fh_tmp.setScoreOverlap(acc_overlap / acc_count);
           fh_tmp.setCharge(charge);
           last_iso_idx = best_idx;
-
-          output_hypotheses.push_back(fh_tmp);
         }
         else
         {
           break;
         }
       } // end for iso_pos
+
+      // one hypothesis per (monoisotopic trace, charge): the full extension
+      if (fh_tmp.getSize() > 1)
+      {
+        output_hypotheses.push_back(fh_tmp);
+      }
 
 #ifdef FFM_DEBUG
       std::cout << "best found for ch " << charge << ":" << fh_tmp.getLabel() << " score: " << fh_tmp.getScore() << '\n';
@@ -540,6 +556,10 @@ namespace OpenMS
     // whose order otherwise follows thread completion timing.
     std::vector<std::vector<FeatureHypothesis>> hypos_per_trace(input_mtraces.size());
 
+    // isotope traces of a hypothesis lie at most (maximum_isotopes_nr - 1) isotope spacings above its
+    // monoisotopic trace; one extra spacing of margin covers the m/z score tolerance
+    const double local_mz_range = maximum_isotopes_nr_ * Constants::C13C12_MASSDIFF_U / charge_lower_bound_;
+
     auto process_trace = [&](Size i)
     {
       std::vector<const MassTrace*> local_traces;
@@ -553,7 +573,7 @@ namespace OpenMS
       {
         // traces are sorted by m/z, so we can break when we leave the allowed window
         double diff_mz = std::fabs(input_mtraces[ext_idx].getCentroidMZ() - ref_trace_mz);
-        if (diff_mz > local_mz_range_)
+        if (diff_mz > local_mz_range)
         {
           break;
         }
@@ -603,9 +623,6 @@ namespace OpenMS
       for (auto& fh : local_hypos) feat_hypos.push_back(std::move(fh));
     }
 
-    // sort feature candidates by their score (descending)
-    std::sort(feat_hypos.begin(), feat_hypos.end(), CmpHypothesesByScore());
-
     // Remove hypotheses that don't meet the minimum isotope trace count.
     // Single-trace (charge-0) hypotheses are exempted when remove_single_traces_ is false:
     // minimum_isotopes_nr_ is a quality gate for assembled multi-isotope features, not for
@@ -618,105 +635,59 @@ namespace OpenMS
         }),
       feat_hypos.end());
 
-#ifdef FFM_DEBUG
-    std::cout << "size of hypotheses: " << feat_hypos.size() << '\n';
-    // output all hypotheses:
-    for (Size hypo_idx = 0; hypo_idx < feat_hypos.size(); ++ hypo_idx)
+    // Builds the output feature for an accepted hypothesis
+    auto add_feature = [&](const FeatureHypothesis& hypo)
     {
-      std::cout << feat_hypos[hypo_idx].getLabel() << " ch: " << feat_hypos[hypo_idx].getCharge() <<
-        " score: " << feat_hypos[hypo_idx].getScore() << '\n';
-    }
-#endif
-
-    // *********************************************************** //
-    // Step 3 Iterate through all hypotheses, starting with the highest
-    // scoring one. Accept them if they do not contain traces that have
-    // already been used by a higher scoring hypothesis.
-    // *********************************************************** //
-
-    // A trace claimed by an already-accepted hypothesis may not be reused by a later,
-    // lower-scoring one. Traces are identified by address (they all live in input_mtraces, which
-    // is not modified from here on); this matches identifying them by label, as trace labels from
-    // MassTraceDetection/ElutionPeakDetection are unique.
-    std::unordered_set<const MassTrace*> claimed_traces;
-
-    for (Size hypo_idx = 0; hypo_idx < feat_hypos.size(); ++hypo_idx)
-    {
-      const std::vector<const MassTrace*>& traces = feat_hypos[hypo_idx].getMassTraces();
-
-      bool collision = false;
-      for (const MassTrace* trace : traces)
-      {
-        if (claimed_traces.count(trace))
-        {
-          collision = true;
-          break;
-        }
-      }
-      if (collision) continue;
-
-      for (const MassTrace* trace : traces) claimed_traces.insert(trace);
-
-      // filter out single traces if option is set
-      if (remove_single_traces_ && feat_hypos[hypo_idx].getCharge() == 0)
-      {
-        continue;
-      }
-
-      //
-      // Now accept hypothesis
-      //
-
       Feature f;
-      f.setRT(feat_hypos[hypo_idx].getCentroidRT());
-      f.setMZ(feat_hypos[hypo_idx].getCentroidMZ());
+      f.setRT(hypo.getCentroidRT());
+      f.setMZ(hypo.getCentroidMZ());
 
       if (report_summed_ints_)
       {
-        // f.setIntensity(feat_hypos[hypo_idx].getSummedFeatureIntensity(report_smoothed_intensities_));
-        f.setIntensity(feat_hypos[hypo_idx].getSummedFeatureIntensity(use_smoothed_intensities_));
+        // f.setIntensity(hypo.getSummedFeatureIntensity(report_smoothed_intensities_));
+        f.setIntensity(hypo.getSummedFeatureIntensity(use_smoothed_intensities_));
       }
       else
       {
-        //f.setIntensity(feat_hypos[hypo_idx].getMonoisotopicFeatureIntensity(report_smoothed_intensities_));
-        f.setIntensity(feat_hypos[hypo_idx].getMonoisotopicFeatureIntensity(use_smoothed_intensities_));
+        //f.setIntensity(hypo.getMonoisotopicFeatureIntensity(report_smoothed_intensities_));
+        f.setIntensity(hypo.getMonoisotopicFeatureIntensity(use_smoothed_intensities_));
       }
 
-      f.setWidth(feat_hypos[hypo_idx].getFWHM());
-      f.setCharge(feat_hypos[hypo_idx].getCharge());
+      f.setWidth(hypo.getFWHM());
+      f.setCharge(hypo.getCharge());
       // label and masstrace_centroid_im are always reported: the final sort below uses them as
       // tie-breaks, and downstream clustering (ClusterMassTracesByPrecursor) reads them
-      f.setMetaValue(3, feat_hypos[hypo_idx].getLabel());
+      f.setMetaValue(3, hypo.getLabel());
       if (report_feature_details_)
       {
-        //f.setMetaValue("max_height", feat_hypos[hypo_idx].getMaxIntensity(report_smoothed_intensities_));
-        f.setMetaValue("max_height", feat_hypos[hypo_idx].getMaxIntensity(use_smoothed_intensities_));
+        //f.setMetaValue("max_height", hypo.getMaxIntensity(report_smoothed_intensities_));
+        f.setMetaValue("max_height", hypo.getMaxIntensity(use_smoothed_intensities_));
       }
 
       // store isotope intensities
-      //std::vector<double> all_ints(feat_hypos[hypo_idx].getAllIntensities(report_smoothed_intensities_));
+      //std::vector<double> all_ints(hypo.getAllIntensities(report_smoothed_intensities_));
       std::vector<double> all_ints;
       if (report_feature_details_)
       {
-        all_ints = feat_hypos[hypo_idx].getAllIntensities(use_smoothed_intensities_);
+        all_ints = hypo.getAllIntensities(use_smoothed_intensities_);
         f.setMetaValue(Constants::UserParam::NUM_OF_MASSTRACES, all_ints.size());
       }
-      if (report_convex_hulls_) f.setConvexHulls(feat_hypos[hypo_idx].getConvexHulls());
-      f.setOverallQuality(feat_hypos[hypo_idx].getScore());
+      if (report_convex_hulls_) f.setConvexHulls(hypo.getConvexHulls());
+      f.setOverallQuality(hypo.getScore());
       if (report_feature_details_)
       {
-        f.setMetaValue("score_rt", feat_hypos[hypo_idx].getScoreRT());
-        f.setMetaValue("score_mz", feat_hypos[hypo_idx].getScoreMZ());
-        f.setMetaValue("score_int", feat_hypos[hypo_idx].getScoreInt());
-        f.setMetaValue("score_overlap", feat_hypos[hypo_idx].getScoreOverlap());
+        f.setMetaValue("score_rt", hypo.getScoreRT());
+        f.setMetaValue("score_mz", hypo.getScoreMZ());
+        f.setMetaValue("score_int", hypo.getScoreInt());
+        f.setMetaValue("score_overlap", hypo.getScoreOverlap());
         f.setMetaValue("masstrace_intensity", all_ints);
-        f.setMetaValue("masstrace_centroid_rt", feat_hypos[hypo_idx].getAllCentroidRT());
-        f.setMetaValue("masstrace_centroid_mz", feat_hypos[hypo_idx].getAllCentroidMZ());
+        f.setMetaValue("masstrace_centroid_rt", hypo.getAllCentroidRT());
+        f.setMetaValue("masstrace_centroid_mz", hypo.getAllCentroidMZ());
       }
-      f.setMetaValue("masstrace_centroid_im", feat_hypos[hypo_idx].getAllCentroidIM());
+      f.setMetaValue("masstrace_centroid_im", hypo.getAllCentroidIM());
       if (report_feature_details_)
       {
-        f.setMetaValue("isotope_distances", feat_hypos[hypo_idx].getIsotopeDistances());
+        f.setMetaValue("isotope_distances", hypo.getIsotopeDistances());
       }
       f.applyMemberFunction(&UniqueIdInterface::setUniqueId);
       output_featmap.push_back(std::move(f));
@@ -724,11 +695,95 @@ namespace OpenMS
 
       if (report_chromatograms_ && added.getIntensity() != 0)
       {
-        output_chromatograms.push_back(feat_hypos[hypo_idx].getChromatograms(added.getUniqueId()));
+        output_chromatograms.push_back(hypo.getChromatograms(added.getUniqueId()));
+      }
+    };
+
+    // *********************************************************** //
+    // Step 3 Accept hypotheses
+    // *********************************************************** //
+    // Traces are identified by address (they all live in input_mtraces, which is not modified
+    // from here on); this matches identifying them by label, as trace labels from
+    // MassTraceDetection/ElutionPeakDetection are unique.
+    if (!allow_trace_sharing_)
+    {
+      // Starting with the highest scoring hypothesis, accept a hypothesis if none of its traces
+      // has been used by an already accepted (higher scoring) one.
+      std::sort(feat_hypos.begin(), feat_hypos.end(), CmpHypothesesByScore());
+
+#ifdef FFM_DEBUG
+      std::cout << "size of hypotheses: " << feat_hypos.size() << '\n';
+      for (Size hypo_idx = 0; hypo_idx < feat_hypos.size(); ++ hypo_idx)
+      {
+        std::cout << feat_hypos[hypo_idx].getLabel() << " ch: " << feat_hypos[hypo_idx].getCharge() <<
+          " score: " << feat_hypos[hypo_idx].getScore() << '\n';
+      }
+#endif
+
+      std::unordered_set<const MassTrace*> claimed_traces;
+      for (const FeatureHypothesis& hypo : feat_hypos)
+      {
+        const std::vector<const MassTrace*>& traces = hypo.getMassTraces();
+
+        bool collision = false;
+        for (const MassTrace* trace : traces)
+        {
+          if (claimed_traces.count(trace))
+          {
+            collision = true;
+            break;
+          }
+        }
+        if (collision) continue;
+
+        for (const MassTrace* trace : traces) claimed_traces.insert(trace);
+
+        // filter out single traces if option is set
+        if (remove_single_traces_ && hypo.getCharge() == 0)
+        {
+          continue;
+        }
+
+        add_feature(hypo);
+      }
+    }
+    else
+    {
+      // feat_hypos is in order of increasing monoisotopic m/z (input traces are sorted by m/z and
+      // their hypotheses were concatenated in that order). An isotope trace always lies above its
+      // monoisotopic trace, so a hypothesis can only be blocked by one processed before it.
+      // A hypothesis is dropped if its monoisotopic trace is an isotope trace of an accepted feature
+      // of the same charge; otherwise it is accepted and marks its own isotope traces for its charge.
+      // Only accepted features mark. Features of different charges never block each other.
+      std::set<std::pair<const MassTrace*, SignedSize>> isotope_marks; // (isotope trace, charge)
+      std::unordered_set<const MassTrace*> traces_in_features;
+      std::vector<const FeatureHypothesis*> single_traces;
+
+      for (const FeatureHypothesis& hypo : feat_hypos)
+      {
+        const std::vector<const MassTrace*>& traces = hypo.getMassTraces();
+        if (hypo.getCharge() == 0)
+        {
+          single_traces.push_back(&hypo); // decided after all multi-trace features are known
+          continue;
+        }
+        if (isotope_marks.count({traces[0], hypo.getCharge()})) continue;
+
+        for (Size i = 1; i < traces.size(); ++i) isotope_marks.insert({traces[i], hypo.getCharge()});
+        for (const MassTrace* trace : traces) traces_in_features.insert(trace);
+        add_feature(hypo);
       }
 
-
+      // A single trace is reported as its own feature only if it is not part of any accepted feature
+      if (!remove_single_traces_)
+      {
+        for (const FeatureHypothesis* hypo : single_traces)
+        {
+          if (!traces_in_features.count(hypo->getMassTraces()[0])) add_feature(*hypo);
+        }
+      }
     }
+
     output_featmap.setUniqueId(UniqueIdGenerator::getUniqueId());
 
     // Sort by m/z, same as FeatureMap::sortByMZ(), but with an explicit, deterministic

@@ -194,7 +194,6 @@ private:
     /// parameter stuff
     double local_rt_range_;
     double local_im_range_;
-    double local_mz_range_;
     Size charge_lower_bound_;
     Size charge_upper_bound_;
     double chrom_fwhm_;
@@ -213,6 +212,8 @@ private:
     bool enable_mass_defect_filtering_;
     double mass_defect_offset_;
     Size minimum_isotopes_nr_;
+    Size maximum_isotopes_nr_;
+    bool allow_trace_sharing_;
 
     double rt_peak_overlap_threshold_;
     double rt_min_pearson_correlation_;
