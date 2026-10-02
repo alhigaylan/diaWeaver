@@ -81,6 +81,9 @@ protected:
 
     bool write_log_messages_ = false;
 
+    /// Use GaussFilterAlgorithm::filterExact (exact kernel, weighted average) instead of filter()
+    bool use_exact_kernel_ = false;
+
     // Docu in base class
     void updateMembers_() override;
   };
