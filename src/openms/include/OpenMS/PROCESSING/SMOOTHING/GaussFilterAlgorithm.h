@@ -139,6 +139,46 @@ public:
       return found_signal;
     }
 
+    /**
+      @brief Same as filter(), but with the Gaussian kernel evaluated exactly.
+
+      filter() reads the kernel from a table with a fixed spacing (0.01 for GaussFilter) and
+      interpolates linearly, so kernels narrower than ~2x that spacing (e.g. small ppm tolerances on
+      high-resolution data) all collapse to the same triangle and the width is not honored. Here the
+      kernel is evaluated at the exact distance, over +/- 4 sigma (sigma = width / 8, or the ppm
+      tolerance converted to m/z at each position). Everything else is as in filter(): trapezoid
+      integration of kernel x signal between neighboring points, normalized by the integrated kernel
+      (so a point without neighbors within +/- 4 sigma becomes zero).
+    */
+    template <typename ConstIterT, typename IterT>
+    bool filterExact(
+        ConstIterT mz_in_start,
+        ConstIterT mz_in_end,
+        ConstIterT int_in_start,
+        IterT mz_out,
+        IterT int_out) const
+    {
+      bool found_signal = false;
+
+      ConstIterT mz_it = mz_in_start;
+      ConstIterT int_it = int_in_start;
+      for (; mz_it != mz_in_end; mz_it++, int_it++)
+      {
+        const double sigma = use_ppm_tolerance_ ? Math::ppmToMass(ppm_tolerance_, *mz_it) / 8.0 : sigma_;
+
+        double new_int = integrateExact_(mz_it, int_it, mz_in_start, mz_in_end, sigma);
+
+        // store new intensity and m/z into output iterator
+        *mz_out = *mz_it;
+        *int_out = new_int;
+        ++mz_out;
+        ++int_out;
+
+        if (fabs(new_int) > 0) found_signal = true;
+      }
+      return found_signal;
+    }
+
     void initialize(double gaussian_width, double spacing, double ppm_tolerance, bool use_ppm_tolerance);
 
 protected:
@@ -342,6 +382,61 @@ protected:
                   << "* " << coeffs_right
                   << std::endl;
 #endif
+        norm += fabs((*help_x) - (*(help_x + 1)) ) / 2. * (coeffs_left + coeffs_right);
+
+        v += fabs((*help_x) - (*(help_x + 1)) ) / 2. * ((*help_y) * coeffs_left + (*(help_y + 1)) * coeffs_right);
+        ++help_x;
+        ++help_y;
+      }
+
+      if (v > 0)
+      {
+        return v / norm;
+      }
+      else
+      {
+        return 0;
+      }
+    }
+
+    /// Same as integrate_(), but with the kernel exp(-d^2 / (2 sigma^2)) evaluated exactly over +/- 4 sigma
+    /// (its constant factor cancels in v / norm)
+    template <typename InputPeakIterator>
+    double integrateExact_(InputPeakIterator x /* mz */, InputPeakIterator y /* int */, InputPeakIterator first, InputPeakIterator last, double sigma) const
+    {
+      double v = 0.;
+      // norm the gaussian kernel area to one
+      double norm = 0.;
+      const double range = 4.0 * sigma;
+      auto kernel = [sigma](double distance) { const double d = distance / sigma; return std::exp(-0.5 * d * d); };
+
+      double start_pos = (( (*x) - range) > (*first)) ? ((*x) - range) : (*first);
+      double end_pos = (( (*x) + range) < (*(last - 1))) ? ((*x) + range) : (*(last - 1));
+
+      InputPeakIterator help_x = x;
+      InputPeakIterator help_y = y;
+
+      //integrate from middle to start_pos
+      while ((help_x != first) && (*(help_x - 1) > start_pos))
+      {
+        const double coeffs_right = kernel(fabs(*x - *help_x));
+        const double coeffs_left = kernel(fabs((*x) - (*(help_x - 1))));
+
+        norm += fabs((*(help_x - 1)) - (*help_x)) / 2. * (coeffs_left + coeffs_right);
+
+        v += fabs((*(help_x - 1)) - (*help_x)) / 2. * (*(help_y - 1) * coeffs_left + (*help_y) * coeffs_right);
+        --help_x;
+        --help_y;
+      }
+
+      //integrate from middle to end_pos
+      help_x = x;
+      help_y = y;
+      while ((help_x != (last - 1)) && (*(help_x + 1) < end_pos))
+      {
+        const double coeffs_left = kernel(fabs((*x) - (*help_x)));
+        const double coeffs_right = kernel(fabs((*x) - (*(help_x + 1))));
+
         norm += fabs((*help_x) - (*(help_x + 1)) ) / 2. * (coeffs_left + coeffs_right);
 
         v += fabs((*help_x) - (*(help_x + 1)) ) / 2. * ((*help_y) * coeffs_left + (*(help_y + 1)) * coeffs_right);
