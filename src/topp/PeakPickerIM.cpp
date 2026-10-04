@@ -94,7 +94,7 @@ protected:
     double factor = -4.0 * std::log(2.0) / (fwhm * fwhm);
 
     double center_rt = exp[center_idx].getRT();
-    int center_ms_level = exp[center_idx].getMSLevel();
+    UInt center_ms_level = exp[center_idx].getMSLevel();
 
     std::vector<const MSSpectrum*> spectra_to_aggregate; // read in place, no copies
     std::vector<double> weights;
