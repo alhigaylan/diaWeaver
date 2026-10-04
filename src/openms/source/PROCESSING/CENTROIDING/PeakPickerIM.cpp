@@ -314,6 +314,12 @@ namespace OpenMS
           }
 
 
+          // Peaks supported by too few raw peaks are not reported
+          if (raw_peaks_within_bounds.size() < min_raw_peaks_)
+          {
+            continue;
+          }
+
           // If we only retrieved one raw peak, pass it over to centroided_frame as is
           // Resampling and smoothing the raw data distorts the intensity values.
           // We recompute the m/z peak maxima and intensity using spline
@@ -543,6 +549,8 @@ namespace OpenMS
       defaults_.setValidStrings("pickIMTraces:gauss_exact_kernel", {"true","false"});
       defaults_.setValue("pickIMTraces:sgolay_frame_length",     5,     "Savitzky-Golay smoothing frame length");
       defaults_.setValue("pickIMTraces:sgolay_polynomial_order", 3,     "Savitzky-Golay smoothing polynomial order");
+      defaults_.setValue("pickIMTraces:min_raw_peaks", 1, "Minimum number of raw peaks within the m/z and ion mobility bounds of a picked peak for it to be reported. 1 = report all picked peaks.");
+      defaults_.setMinInt("pickIMTraces:min_raw_peaks", 1);
 #if 0
       // --- PickIMCluster parameters ---
       defaults_.setValue("pickIMCluster:ppm_tolerance_cluster", 50.0, "m/z tolerance in ppm for clustering");
@@ -565,6 +573,7 @@ namespace OpenMS
       gauss_exact_kernel_       = param_.getValue("pickIMTraces:gauss_exact_kernel").toBool();
       sgolay_frame_length_   = (int)param_.getValue("pickIMTraces:sgolay_frame_length");
       sgolay_polynomial_order_= (int)param_.getValue("pickIMTraces:sgolay_polynomial_order");
+      min_raw_peaks_ = static_cast<Size>((int)param_.getValue("pickIMTraces:min_raw_peaks"));
 
       Param gauss_params;
       gauss_params.setValue("ppm_tolerance", gauss_ppm_tolerance_);

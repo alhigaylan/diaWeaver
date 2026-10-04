@@ -187,7 +187,8 @@ protected:
       "If set, aggregate signal across neighboring scans using Gaussian weighting before peak picking. "
       "This can improve signal-to-noise for low-intensity peaks (requires IM data).", false);
 
-    registerSubsection_("PeakPickerIM", "Parameters for ion mobility peak picking (used when input has IM data)");
+    registerSubsection_("PeakPickerIM", "Parameters for ion mobility peak picking of MS1 spectra (used when input has IM data)");
+    registerSubsection_("PeakPickerIMMS2", "Parameters for ion mobility peak picking of MS2 spectra (fragments and unfragmented precursors; used when input has IM data)");
 
     registerSubsection_("PeakPickerHiRes", "Parameters for high-resolution peak picking (used when input has no IM data)");
 
@@ -284,7 +285,7 @@ protected:
 
   Param getSubsectionDefaults_(const String& name) const override
   {
-    if (name == "PeakPickerIM")
+    if (name == "PeakPickerIM" || name == "PeakPickerIMMS2")
     {
       PeakPickerIM ppim;
       return ppim.getDefaults();
@@ -691,7 +692,8 @@ protected:
     const bool save_precursors = getFlag_("save_unfragmented_precursors");
     const bool keep_ms1 = getFlag_("keep_ms1");
     const bool aggregate_scans = getFlag_("aggregate_across_scans");
-    const Param ppim_params = getParam_().copy("PeakPickerIM:", true);
+    const Param ppim_params = getParam_().copy("PeakPickerIM:", true);         // MS1
+    const Param ppim_ms2_params = getParam_().copy("PeakPickerIMMS2:", true);  // MS2 frames: fragments and unfragmented precursors
     const Param pphr_params = getParam_().copy("PeakPickerHiRes:", true);
 
     // FeatureFinderPeptide parameters (for MS1 and precursor data)
@@ -976,10 +978,10 @@ protected:
         // sharing until all workers have joined below, at which point the move is safe.
         OpenMS::parallelForWithState(
           ms2_exp.size(), static_cast<Size>(inner_threads),
-          [&ppim_params]()
+          [&ppim_ms2_params]()
           {
             PeakPickerIM picker_im;
-            picker_im.setParameters(ppim_params);
+            picker_im.setParameters(ppim_ms2_params);
             return picker_im;
           },
           [&](PeakPickerIM& picker_im, Size s)
@@ -1010,7 +1012,7 @@ protected:
             Pickers pickers;
             if (im_info.available)
             {
-              pickers.im.setParameters(ppim_params);
+              pickers.im.setParameters(ppim_ms2_params);
             }
             else
             {
@@ -1108,10 +1110,10 @@ protected:
 
           OpenMS::parallelForWithState(
             precursor_exp.size(), static_cast<Size>(inner_threads),
-            [&ppim_params]()
+            [&ppim_ms2_params]()
             {
               PeakPickerIM picker_im;
-              picker_im.setParameters(ppim_params);
+              picker_im.setParameters(ppim_ms2_params);
               return picker_im;
             },
             [&](PeakPickerIM& picker_im, Size s)
@@ -1142,7 +1144,7 @@ protected:
               Pickers pickers;
               if (im_info.available)
               {
-                pickers.im.setParameters(ppim_params);
+                pickers.im.setParameters(ppim_ms2_params);
               }
               else
               {

@@ -192,6 +192,7 @@ namespace OpenMS
     double mobilogram_sampling_grid_{0.01};
     int sgolay_frame_length_{5};
     int sgolay_polynomial_order_{3};
+    Size min_raw_peaks_{1};
 
     /// Filters and pickers used by pickIMTraces(), configured once in updateMembers_()
     /// instead of per spectrum (their construction and parameter setup dominated runtime)
