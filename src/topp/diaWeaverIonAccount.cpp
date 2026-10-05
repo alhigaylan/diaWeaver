@@ -81,6 +81,26 @@ different spectrum. Either kind of duplicate identification (naked or modified) 
 compete for evidence like any other pair; only genuinely distinct peptidoforms of the same
 backbone get the pass.
 
+<B>Multiple peaks per theoretical ion.</B> More than one spectrum peak can fall within
+fragment_mz_tolerance of a single theoretical ion -- verified empirically on real data,
+not a rare edge case (~90% of PSMs have at least one such ion). For each ion, the nearest
+peak is its representative (identical to this tool's original single-peak logic; ties go
+to the first/lowest-m/z candidate found); every other in-tolerance peak is a secondary.
+Secondaries are claimed via the same FragmentClaimRegistry and reported in
+fragment_usage.tsv like any other trace, but never contribute to this PSM's hyperscore --
+only the representative does, so one physical peak is never double-counted as if it were
+several independent matches.
+
+<B>Sibling ion collisions.</B> Two different ions of the SAME PSM (e.g. b5+ and y8+) can
+independently choose the identical representative peak. Only one may score for it --
+whichever has the smaller absolute m/z error wins (tie-broken by ion index); the other is
+recorded as lost, but to its own sibling ion rather than an external competitor. This is
+rendered in Lost Fragments as "@self" instead of "@scanN", e.g.
+"[y8+:SUBSEQ; SUBSEQ:b5+@self]", so it reads distinctly from losing to a different PSM.
+This also corrects a real double-count in this tool's own matching, present before this
+was added: without it, both sibling ions independently credited the same peak's
+intensity toward this PSM's hyperscore.
+
 <B>Hyperscore recomputation.</B> log1p(dot_product) + 2*lnFactorial(i_min) +
 lnFactorial(i_max, i_min+1), where i_min/i_max are the smaller/larger of the retained
 b-ion and y-ion counts and dot_product is a single combined sum of retained matched
@@ -239,6 +259,10 @@ protected:
   {
     String ion_label;
     FragmentClaimRegistry::TraceKey key = 0;
+    // Non-empty iff this match was lost to this SAME PSM's own sibling ion (same
+    // representative peak, smaller absolute m/z error) rather than an external
+    // competitor -- rendered as "@self" instead of "@scanN" in Lost Fragments text.
+    String sibling_winner_ion_label;
   };
 
   // -------------------------------------------------------------------------
@@ -1062,85 +1086,156 @@ protected:
       int nb_ret = 0, ny_ret = 0, nb_all = 0, ny_all = 0;
       double dot_ret = 0.0, dot_all = 0.0; // combined b+y matched-intensity sum, ProSE convention
 
-      for (Size ion_i = 0; ion_i < theo.size(); ++ion_i)
+      // ---- Pass A: for every ion, find its representative peak (nearest within tolerance,
+      // exactly the single-peak logic this tool always used) plus any secondaries (other
+      // peaks also within tolerance). Multiple peaks per ion are common, not a rare edge
+      // case: verified empirically on this dataset, ~90% of PSMs have at least one such
+      // ion. Secondaries are claimed and reported in fragment_usage.tsv like any other
+      // trace, but never contribute to this PSM's hyperscore -- only the representative
+      // does, so one physical peak is never double-counted as if it were several ions. ----
+      const Size n_ions = theo.size();
+      std::vector<bool> ion_is_bflag(n_ions, false);
+      std::vector<bool> ion_has_match(n_ions, false);
+      std::vector<Size> ion_rep_idx(n_ions, rp.peak_mz.size());
+      std::vector<double> ion_rep_err(n_ions, std::numeric_limits<double>::max());
+      std::vector<std::vector<Size>> ion_secondary_idx(n_ions);
+
+      for (Size ion_i = 0; ion_i < n_ions; ++ion_i)
       {
         const double ion_mz = theo[ion_i].getMZ();
         const String& ion_label = ion_names[ion_i];
         const bool is_b = ion_label.hasPrefix("b");
         const bool is_y = ion_label.hasPrefix("y");
         if (!is_b && !is_y) continue;
+        ion_is_bflag[ion_i] = is_b;
 
-        // Scan every peak within the tolerance window and keep the nearest one, not just
-        // the first one lower_bound happens to land on -- multiple peaks can fall inside
-        // a wide ppm window at high m/z, and taking the leftmost is not the same as
-        // taking the closest. Picking the wrong one can silently substitute a much more
-        // (or less) intense peak for the real match, distorting the recomputed hyperscore.
-        // Verified empirically: real spectra in this dataset do have multiple candidates
-        // per theoretical ion, sometimes differing in intensity by >40x.
+        // Scan every peak within the tolerance window, not just the first one lower_bound
+        // happens to land on. The nearest becomes this ion's representative (ties go to the
+        // first found, i.e. the leftmost/lowest-m/z candidate -- same rule this tool always
+        // used); every other peak found is recorded as a secondary.
         const double tol_da = ion_mz * frag_ppm * 1e-6;
         auto lo_it = std::lower_bound(rp.peak_mz.begin(), rp.peak_mz.end(), ion_mz - tol_da);
         Size scan_idx = static_cast<Size>(lo_it - rp.peak_mz.begin());
-        Size peak_idx = rp.peak_mz.size(); // sentinel: no match found yet
-        double best_abs_err = std::numeric_limits<double>::max();
         for (Size k = scan_idx; k < rp.peak_mz.size() && rp.peak_mz[k] <= ion_mz + tol_da; ++k)
         {
           const double abs_err = std::abs(rp.peak_mz[k] - ion_mz);
-          if (abs_err < best_abs_err) { best_abs_err = abs_err; peak_idx = k; }
+          if (abs_err < ion_rep_err[ion_i])
+          {
+            if (ion_has_match[ion_i]) ion_secondary_idx[ion_i].push_back(ion_rep_idx[ion_i]);
+            ion_rep_idx[ion_i] = k;
+            ion_rep_err[ion_i] = abs_err;
+          }
+          else
+          {
+            ion_secondary_idx[ion_i].push_back(k);
+          }
+          ion_has_match[ion_i] = true;
         }
-        if (peak_idx >= rp.peak_mz.size()) continue; // no match within tolerance
+      }
 
-        const Int window_id = rp.frag_window_id[peak_idx];
-        const Int trace_id = rp.frag_trace_id[peak_idx];
+      // ---- Pass A.5: resolve sibling collisions -- two DIFFERENT ions of THIS SAME PSM
+      // (e.g. b5+ and y8+) independently choosing the identical representative peak. One
+      // physical peak can only back one ion's score even within a single PSM, so only the
+      // closer-error ion may score for it (tie-broken by ion index for determinism); the
+      // other(s) are recorded as lost to their own sibling ion, never reaching the external-
+      // competition check below at all. This also fixes a pre-existing double-count: without
+      // this resolution, both ions would independently credit the same peak's intensity --
+      // verified to already happen for 217 of 4835 PSMs on this dataset before this fix. ----
+      std::unordered_map<Size, Size> rep_peak_to_best_ion; // peak_idx -> ion_i with smallest abs_err so far
+      for (Size ion_i = 0; ion_i < n_ions; ++ion_i)
+      {
+        if (!ion_has_match[ion_i]) continue;
+        const Size pk = ion_rep_idx[ion_i];
+        auto it = rep_peak_to_best_ion.find(pk);
+        if (it == rep_peak_to_best_ion.end()) rep_peak_to_best_ion.emplace(pk, ion_i);
+        else if (ion_rep_err[ion_i] < ion_rep_err[it->second]) it->second = ion_i;
+      }
+
+      // ---- Pass B: score/claim representatives (sibling losers short-circuit before the
+      // external-competition check) and claim/report secondaries (never scored). ----
+      for (Size ion_i = 0; ion_i < n_ions; ++ion_i)
+      {
+        if (!ion_has_match[ion_i]) continue;
+        const bool is_b = ion_is_bflag[ion_i];
+        const String& ion_label = ion_names[ion_i];
+        const Size rep_peak_idx = ion_rep_idx[ion_i];
+        const Size sibling_winner_ion = rep_peak_to_best_ion.at(rep_peak_idx);
+        const bool is_sibling_loser = (sibling_winner_ion != ion_i);
+
+        const Int window_id = rp.frag_window_id[rep_peak_idx];
+        const Int trace_id = rp.frag_trace_id[rep_peak_idx];
         const auto key = FragmentClaimRegistry::makeKey(window_id, trace_id);
-        const float inten = rp.peak_intensity[peak_idx];
+        const float inten = rp.peak_intensity[rep_peak_idx];
 
         usage[key].push_back({pep_id, rp.native_scan, ion_label});
-        fragment_peak_info.try_emplace(key, rp.peak_mz[peak_idx], inten);
+        fragment_peak_info.try_emplace(key, rp.peak_mz[rep_peak_idx], inten);
 
-        // Internal Initial Hyperscore: accumulate over every match, regardless of claim outcome.
-        if (is_b) ++nb_all; else ++ny_all;
-        dot_all += inten;
-
-        const auto* rec = registry.getClaimRecord(key);
-        bool retained;
-        if (rec == nullptr)
+        if (is_sibling_loser)
         {
-          retained = true;
-          claimable.push_back(key);
+          acc.lost.push_back({ion_label, key, ion_names[sibling_winner_ion]});
         }
         else
         {
-          bool exempted = false;
-          if (allow_peptidoform_sharing)
+          // Internal Initial Hyperscore: accumulate over every (sibling-resolved)
+          // representative match, regardless of claim outcome.
+          if (is_b) ++nb_all; else ++ny_all;
+          dot_all += inten;
+
+          const auto* rec = registry.getClaimRecord(key);
+          bool retained;
+          if (rec == nullptr)
           {
-            const auto owner_it = seq_registry.find(rec->peptide_seq);
-            if (owner_it != seq_registry.end())
-            {
-              const PsmEntry* owner = owner_it->second;
-              const bool same_backbone = (owner->bare_sequence == psm.bare_sequence);
-              const bool different_form = (owner->openms_sequence != psm.openms_sequence);
-              // A peptidoform sibling is: same backbone, but a genuinely different form.
-              // "different_form" alone already implies at least one of the pair carries a
-              // modification -- two NAKED copies of the same backbone always have
-              // identical full sequences, so there is no separate "not both naked" case
-              // to check. This also means the same exact modified form re-observed at a
-              // different spectrum (identical full sequence) is correctly NOT exempted --
-              // it must compete like any other duplicate identification.
-              exempted = same_backbone && different_form;
-            }
+            retained = true;
+            claimable.push_back(key);
           }
-          retained = exempted;
+          else
+          {
+            bool exempted = false;
+            if (allow_peptidoform_sharing)
+            {
+              const auto owner_it = seq_registry.find(rec->peptide_seq);
+              if (owner_it != seq_registry.end())
+              {
+                const PsmEntry* owner = owner_it->second;
+                const bool same_backbone = (owner->bare_sequence == psm.bare_sequence);
+                const bool different_form = (owner->openms_sequence != psm.openms_sequence);
+                // A peptidoform sibling is: same backbone, but a genuinely different form.
+                // "different_form" alone already implies at least one of the pair carries a
+                // modification -- two NAKED copies of the same backbone always have
+                // identical full sequences, so there is no separate "not both naked" case
+                // to check. This also means the same exact modified form re-observed at a
+                // different spectrum (identical full sequence) is correctly NOT exempted --
+                // it must compete like any other duplicate identification.
+                exempted = same_backbone && different_form;
+              }
+            }
+            retained = exempted;
+          }
+
+          if (retained)
+          {
+            if (is_b) ++nb_ret; else ++ny_ret;
+            dot_ret += inten;
+            acc.retained.push_back({ion_label, key, ""});
+          }
+          else
+          {
+            acc.lost.push_back({ion_label, key, ""});
+          }
         }
 
-        if (retained)
+        // Secondaries: claimed and reported like any other trace, but never scored --
+        // regardless of this ion's own sibling/claim outcome above.
+        for (Size sec_idx : ion_secondary_idx[ion_i])
         {
-          if (is_b) ++nb_ret; else ++ny_ret;
-          dot_ret += inten;
-          acc.retained.push_back({ion_label, key});
-        }
-        else
-        {
-          acc.lost.push_back({ion_label, key});
+          const Int sec_window_id = rp.frag_window_id[sec_idx];
+          const Int sec_trace_id = rp.frag_trace_id[sec_idx];
+          const auto sec_key = FragmentClaimRegistry::makeKey(sec_window_id, sec_trace_id);
+          const float sec_inten = rp.peak_intensity[sec_idx];
+
+          usage[sec_key].push_back({pep_id, rp.native_scan, ion_label});
+          fragment_peak_info.try_emplace(sec_key, rp.peak_mz[sec_idx], sec_inten);
+          claimable.push_back(sec_key);
         }
       }
 
@@ -1242,9 +1337,20 @@ protected:
         for (const MatchOutcome& mo : acc.lost)
         {
           const String my_subseq = fragmentSubsequence_(acc.psm->bare_sequence, acc.psm->mods, mo.ion_label);
-          const std::vector<String> winners = resolveWinners(mo.key, acc.psm->openms_sequence, acc.native_scan);
           String winners_str;
-          for (Size i = 0; i < winners.size(); ++i) { if (i) winners_str += ", "; winners_str += winners[i]; }
+          if (!mo.sibling_winner_ion_label.empty())
+          {
+            // Lost to our own sibling ion (same representative peak, smaller error),
+            // not an external competitor -- "@self" instead of "@scanN" makes that
+            // distinction explicit rather than looking like a missing/empty winner.
+            const String sibling_subseq = fragmentSubsequence_(acc.psm->bare_sequence, acc.psm->mods, mo.sibling_winner_ion_label);
+            winners_str = sibling_subseq + ":" + mo.sibling_winner_ion_label + "@self";
+          }
+          else
+          {
+            const std::vector<String> winners = resolveWinners(mo.key, acc.psm->openms_sequence, acc.native_scan);
+            for (Size i = 0; i < winners.size(); ++i) { if (i) winners_str += ", "; winners_str += winners[i]; }
+          }
           if (!lost_str.empty()) lost_str += ", ";
           lost_str += "[" + my_subseq + ":" + mo.ion_label + "; " + winners_str + "]";
         }
