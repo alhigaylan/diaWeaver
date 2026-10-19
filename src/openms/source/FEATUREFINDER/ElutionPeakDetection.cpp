@@ -510,6 +510,7 @@ namespace OpenMS
         // *********************************************************************
         std::vector<PeakType> tmp_mt;
         std::vector<double> smoothed_tmp;
+        const Size slice_begin = last_idx;
         while (last_idx <= mins[min_idx])
         {
           tmp_mt.push_back(*cp_it);
@@ -525,6 +526,11 @@ namespace OpenMS
         if (mt.containsIMData()) new_mt.setCentroidIM(mt.getCentroidIM());
         new_mt.fwhm_mz_avg = mt.fwhm_mz_avg;
         new_mt.fwhm_im_avg = mt.fwhm_im_avg;
+        // per-peak ion density values of the sub-trace's peaks
+        if (mt.peak_density.size() == mt.getSize() && last_idx <= mt.peak_density.size())
+        {
+          new_mt.peak_density.assign(mt.peak_density.begin() + slice_begin, mt.peak_density.begin() + last_idx);
+        }
 
         // check filter criteria
         bool pw_ok = true;

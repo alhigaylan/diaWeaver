@@ -21,6 +21,7 @@
 #include <OpenMS/IONMOBILITY/IMTypes.h>
 
 #include <ctime>
+#include <limits>
 #include <random>
 
 namespace OpenMS
@@ -147,6 +148,24 @@ namespace OpenMS
       validate_meta_array(Constants::UserParam::FWHM_MZ_ppm, fwhm_meta_idx);
       validate_meta_array(Constants::UserParam::ION_MOBILITY_CENTROID, im_idx);
       validate_meta_array(Constants::UserParam::FWHM_IM, im_fwhm_idx);
+    }
+
+    std::array<float, 7> MassTraceDetection::readDensity_(const MSSpectrum& spectrum, Size peak_idx) const
+    {
+      std::array<float, 7> v;
+      v.fill(std::numeric_limits<float>::quiet_NaN());
+      if (!has_density_) return v;
+      const auto& fda = spectrum.getFloatDataArrays();
+      for (Size d = 0; d < v.size(); ++d)
+      {
+        const int idx = density_idx_[d];
+        if (idx >= 0 && idx < static_cast<int>(fda.size()) && fda[idx].getName() == MassTrace::DENSITY_NAMES[d]
+            && peak_idx < fda[idx].size())
+        {
+          v[d] = fda[idx][peak_idx];
+        }
+      }
+      return v;
     }
 
     void MassTraceDetection::run(PeakMap::ConstAreaIterator& begin,
@@ -391,6 +410,7 @@ namespace OpenMS
         const PeakCandidate& candidate,
         const MSSpectrum& spectrum,
         std::list<PeakType>& current_trace,
+        std::list<std::array<float, 7>>& current_density,
         std::vector<std::pair<Size, Size>>& gathered_idx,
         std::vector<double>& fwhms_mz,
         std::vector<double>& fwhms_im,
@@ -411,13 +431,16 @@ namespace OpenMS
       next_peak.setIntensity(candidate.intensity);
 
       // Add peak to the growing mass trace
+      const std::array<float, 7> density = readDensity_(spectrum, candidate.idx);
       if (is_upward_extension)
       {
         current_trace.push_back(next_peak);
+        if (has_density_) current_density.push_back(density);
       }
       else
       {
         current_trace.push_front(next_peak);
+        if (has_density_) current_density.push_front(density);
       }
 
       // Update trace centroid m/z with intensity-weighted average
@@ -490,6 +513,25 @@ namespace OpenMS
                     ion_mobility_idx_, has_centroid_im_,
                     im_fwhm_idx_, has_fwhm_im_);
 
+      // locate the per-peak ion density arrays (optional, written by PeakPickerIM)
+      has_density_ = false;
+      density_idx_.fill(-1);
+      for (const auto& spec : work_exp)
+      {
+        const auto& fda = spec.getFloatDataArrays();
+        auto it = getDataArrayByName(fda, MassTrace::DENSITY_NAMES[0]);
+        if (it == fda.end()) continue;
+        bool all = true;
+        for (Size d = 0; d < MassTrace::DENSITY_NAMES.size(); ++d)
+        {
+          auto itd = getDataArrayByName(fda, MassTrace::DENSITY_NAMES[d]);
+          if (itd == fda.end()) { all = false; break; }
+          density_idx_[d] = static_cast<int>(std::distance(fda.begin(), itd));
+        }
+        has_density_ = all;
+        break;
+      }
+
       this->startProgress(0, total_peak_count, "mass trace detection");
       Size peaks_detected(0);
 
@@ -507,6 +549,8 @@ namespace OpenMS
 
         std::list<PeakType> current_trace;
         current_trace.push_back(apex_peak);
+        std::list<std::array<float, 7>> current_density; // per-peak ion density, parallel to current_trace
+        if (has_density_) current_density.push_back(readDensity_(work_exp[apex_scan_idx], apex_peak_idx));
         std::vector<double> fwhms_mz; // peak-FWHM meta values of collected peaks
         std::vector<double> fwhms_im; // peak-FWHM ion mobility peak FWHM of collected peaks
 
@@ -559,7 +603,7 @@ namespace OpenMS
               
               if (isPeakAcceptable_(candidate, centroid_mz, ftl_sd, centroid_im, trace_down_idx - 1, spec_offsets, peak_visited))
               {
-                processPeak_(candidate, spec_trace_down, current_trace, gathered_idx,
+                processPeak_(candidate, spec_trace_down, current_trace, current_density, gathered_idx,
                             fwhms_mz, fwhms_im, centroid_mz, centroid_im,
                             prev_counter, prev_denom, prev_counter_im, prev_denom_im,
                             ftl_sd, intensity_so_far, trace_down_idx - 1, false);
@@ -576,6 +620,7 @@ namespace OpenMS
                   zero_peak.setMZ(centroid_mz);
                   zero_peak.setIntensity(0.0);
                   current_trace.push_front(zero_peak);
+                  if (has_density_) { std::array<float, 7> nan_density; nan_density.fill(std::numeric_limits<float>::quiet_NaN()); current_density.push_front(nan_density); }
                 }
               }
             }
@@ -620,7 +665,7 @@ namespace OpenMS
               
               if (isPeakAcceptable_(candidate, centroid_mz, ftl_sd, centroid_im, trace_up_idx + 1, spec_offsets, peak_visited))
               {
-                processPeak_(candidate, spec_trace_up, current_trace, gathered_idx,
+                processPeak_(candidate, spec_trace_up, current_trace, current_density, gathered_idx,
                             fwhms_mz, fwhms_im, centroid_mz, centroid_im,
                             prev_counter, prev_denom, prev_counter_im, prev_denom_im,
                             ftl_sd, intensity_so_far, trace_up_idx + 1, true);
@@ -637,6 +682,7 @@ namespace OpenMS
                   zero_peak.setMZ(centroid_mz);
                   zero_peak.setIntensity(0.0);
                   current_trace.push_back(zero_peak);
+                  if (has_density_) { std::array<float, 7> nan_density; nan_density.fill(std::numeric_limits<float>::quiet_NaN()); current_density.push_back(nan_density); }
                 }
               }
             }
@@ -683,6 +729,10 @@ namespace OpenMS
 
           // create new MassTrace object and store collected peaks from list current_trace
           MassTrace new_trace(current_trace);
+          if (has_density_ && current_density.size() == current_trace.size())
+          {
+            new_trace.peak_density.assign(current_density.begin(), current_density.end());
+          }
           new_trace.updateWeightedMeanRT();
           new_trace.updateWeightedMeanMZ();
           if (!fwhms_mz.empty()) { new_trace.fwhm_mz_avg = Math::median(fwhms_mz.begin(), fwhms_mz.end()); }

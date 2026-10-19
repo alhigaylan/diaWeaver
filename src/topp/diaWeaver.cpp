@@ -14,6 +14,10 @@
 #include <OpenMS/KERNEL/OnDiscMSExperiment.h>
 #include <OpenMS/KERNEL/FeatureMap.h>
 #include <OpenMS/KERNEL/MassTrace.h>
+#include <fstream>
+#include <array>
+#include <limits>
+#include <cstdio>
 #include <OpenMS/MATH/StatisticFunctions.h>
 #include <OpenMS/SYSTEM/File.h>
 #include <OpenMS/APPLICATIONS/diaWeaver.h>
@@ -32,6 +36,7 @@
 #include <OpenMS/FORMAT/BrukerTimsFile.h>
 #endif
 
+#include <algorithm>
 #include <cmath>
 #include <iomanip>
 #include <iostream>
@@ -196,6 +201,13 @@ protected:
 
     registerSubsection_("MassTraceExtractor", "Parameters for MassTraceExtractor algorithm (mass trace detection on MS2 data)");
 
+    registerStringOption_("density_dump", "<file>", "",
+      "Write the per-peak ion density values (raw peaks in the picked-peak box and in 2.5x/4x/8x boxes) of every "
+      "mass trace used for clustering to this TSV file (study only)", false, true);
+    registerStringOption_("fwhm_dump", "<file>", "",
+      "Write one TSV row per mass trace (MS1, precursor and MS2 traces after EPD/FeatureFinderPeptide) with its RT FWHM "
+      "(raw and smoothed intensities), the number of real (non-imputed) points, FeatureFinderPeptide isotope rank "
+      "and per-point n_raw summary (study only)", false, true);
     registerStringOption_("deisotope_ms2", "<toggle>", "true",
       "Run FeatureFinderPeptide on MS2 fragment traces to resolve isotope envelopes and charge states "
       "before clustering. Only the monoisotopic trace per assembled feature is passed to the clusterer, "
@@ -882,6 +894,136 @@ protected:
     // Shared counter for unique spectrum native IDs (protected by critical section)
     Size spectrum_index = 0;
 
+    // Optional dump of per-peak ion density values of the mass traces (study only).
+    // One row per trace peak; (kind, window_idx, trace_idx) identifies the trace as in the pseudo spectra's
+    // fragment_window_id / fragment_trace_id arrays (kind ms2). ms1/prec traces are identified by their label.
+    std::ofstream density_out;
+    const String density_dump_path = getStringOption_("density_dump");
+    if (!density_dump_path.empty())
+    {
+      density_out.open(density_dump_path);
+      density_out << "kind\twindow_idx\twindow_lo\twindow_hi\ttrace_idx\ttrace_label\ttrace_mz\ttrace_im\ttrace_rt\t"
+                     "peak_idx\trt\tmz\tintensity\tn_raw\tmz_width\tim_width\tn_1\tn_2p5\tn_4\tn_8\n";
+    }
+    auto dump_traces = [&](const char* kind, SignedSize window_idx, double lo, double hi,
+                           const std::vector<MassTrace>& traces)
+    {
+      if (!density_out.is_open()) return;
+      std::string buf;
+      char line[512];
+      for (Size t = 0; t < traces.size(); ++t)
+      {
+        const MassTrace& tr = traces[t];
+        const bool has_d = (tr.peak_density.size() == tr.getSize());
+        for (Size p = 0; p < tr.getSize(); ++p)
+        {
+          const float nan = std::numeric_limits<float>::quiet_NaN();
+          const std::array<float, 7>* d = has_d ? &tr.peak_density[p] : nullptr;
+          std::snprintf(line, sizeof(line),
+            "%s\t%ld\t%.3f\t%.3f\t%zu\t%s\t%.5f\t%.5f\t%.3f\t%zu\t%.3f\t%.5f\t%.1f\t%g\t%g\t%g\t%g\t%g\t%g\t%g\n",
+            kind, static_cast<long>(window_idx), lo, hi, (size_t)t, tr.getLabel().c_str(),
+            tr.getCentroidMZ(), tr.getCentroidIM(), tr.getCentroidRT(), (size_t)p,
+            tr[p].getRT(), tr[p].getMZ(), tr[p].getIntensity(),
+            d ? (*d)[0] : nan, d ? (*d)[1] : nan, d ? (*d)[2] : nan, d ? (*d)[3] : nan,
+            d ? (*d)[4] : nan, d ? (*d)[5] : nan, d ? (*d)[6] : nan);
+          buf += line;
+        }
+      }
+#pragma omp critical (density_dump)
+      {
+        density_out << buf;
+      }
+    };
+
+    // Optional per-trace RT FWHM dump (study only). One row per trace. A point is "imputed" if its density is NaN
+    // (zero placeholder from impute_zeros_missing_scans) or, when the trace has no density array, if its raw intensity is 0.
+    // estimateFWHM walks outwards from the apex until the first point below half maximum, so imputed zeros can never lie
+    // inside the FWHM; what a gap does is stop the walk. bL/bR therefore report what stopped it: 1 = imputed zero,
+    // 0 = real point below half maximum, -1 = trace edge reached.
+    std::ofstream fwhm_out;
+    const String fwhm_dump_path = getStringOption_("fwhm_dump");
+    if (!fwhm_dump_path.empty())
+    {
+      fwhm_out.open(fwhm_dump_path);
+      fwhm_out << "kind\twindow_idx\twindow_lo\twindow_hi\ttrace_idx\ttrace_label\ttrace_mz\ttrace_im\ttrace_rt\t"
+                  "ffp_rank\tffp_charge\tffp_nisotopes\tn_pts\tn_real\tn_imputed\thas_density\tapex_int\tapex_rt\t"
+                  "nraw_median\tnraw_min\t"
+                  "raw_fwhm\traw_in_real\traw_in_imp\traw_bL\traw_bR\t"
+                  "sm_fwhm\tsm_in_real\tsm_in_imp\tsm_bL\tsm_bR\n";
+    }
+    auto dump_fwhm = [&](const char* kind, SignedSize window_idx, double lo, double hi,
+                         const std::vector<MassTrace>& traces)
+    {
+      if (!fwhm_out.is_open()) return;
+      std::string buf;
+      char line[1024];
+      for (Size t = 0; t < traces.size(); ++t)
+      {
+        const MassTrace& tr = traces[t];
+        const Size n = tr.getSize();
+        if (n < 3) continue;
+        const bool has_d = (tr.peak_density.size() == n);
+        std::vector<char> imputed(n);
+        std::vector<float> nraw;
+        for (Size p = 0; p < n; ++p)
+        {
+          imputed[p] = has_d ? std::isnan(tr.peak_density[p][0]) : (tr[p].getIntensity() == 0.0);
+          if (!imputed[p] && has_d) nraw.push_back(tr.peak_density[p][0]);
+        }
+        Size n_imp = std::count(imputed.begin(), imputed.end(), char(1));
+        double nraw_med = std::numeric_limits<double>::quiet_NaN(), nraw_min = nraw_med;
+        if (!nraw.empty())
+        {
+          std::sort(nraw.begin(), nraw.end());
+          nraw_med = (nraw.size() % 2) ? nraw[nraw.size() / 2] : 0.5 * (nraw[nraw.size() / 2 - 1] + nraw[nraw.size() / 2]);
+          nraw_min = nraw.front();
+        }
+        double apex_int = 0, apex_rt = 0;
+        for (Size p = 0; p < n; ++p)
+        {
+          if (tr[p].getIntensity() > apex_int) { apex_int = tr[p].getIntensity(); apex_rt = tr[p].getRT(); }
+        }
+
+        struct Fw { double fwhm = 0; Size in_real = 0, in_imp = 0; int bL = -1, bR = -1; };
+        auto measure = [&](bool smoothed) -> Fw
+        {
+          Fw r;
+          MassTrace tmp = tr;
+          r.fwhm = tmp.estimateFWHM(smoothed);
+          if (r.fwhm <= 0) return r;
+          std::vector<double> ints;
+          if (smoothed) ints = tr.getSmoothedIntensities();
+          else { ints.reserve(n); for (Size p = 0; p < n; ++p) ints.push_back(tr[p].getIntensity()); }
+          const Size apex = std::distance(ints.begin(), std::max_element(ints.begin(), ints.end()));
+          const double half = ints[apex] / 2.0;
+          Size l = apex, rr = apex;
+          while (l > 0 && ints[l - 1] >= half) --l;
+          while (rr + 1 < n && ints[rr + 1] >= half) ++rr;
+          for (Size p = l; p <= rr; ++p) { if (imputed[p]) ++r.in_imp; else ++r.in_real; }
+          if (l > 0) r.bL = imputed[l - 1] ? 1 : 0;
+          if (rr + 1 < n) r.bR = imputed[rr + 1] ? 1 : 0;
+          return r;
+        };
+        const Fw raw = measure(false);
+        const bool have_sm = (tr.getSmoothedIntensities().size() == n);
+        const Fw sm = have_sm ? measure(true) : Fw();
+        std::snprintf(line, sizeof(line),
+          "%s\t%ld\t%.3f\t%.3f\t%zu\t%s\t%.5f\t%.5f\t%.3f\t%d\t%d\t%d\t%zu\t%zu\t%zu\t%d\t%.1f\t%.3f\t%g\t%g\t"
+          "%.4f\t%zu\t%zu\t%d\t%d\t%.4f\t%zu\t%zu\t%d\t%d\n",
+          kind, static_cast<long>(window_idx), lo, hi, (size_t)t, tr.getLabel().c_str(),
+          tr.getCentroidMZ(), tr.getCentroidIM(), tr.getCentroidRT(),
+          tr.ffp_rank, tr.ffp_charge, tr.ffp_nisotopes, (size_t)n, (size_t)(n - n_imp), (size_t)n_imp, (int)has_d,
+          apex_int, apex_rt, nraw_med, nraw_min,
+          raw.fwhm, (size_t)raw.in_real, (size_t)raw.in_imp, raw.bL, raw.bR,
+          have_sm ? sm.fwhm : -1.0, (size_t)sm.in_real, (size_t)sm.in_imp, sm.bL, sm.bR);
+        buf += line;
+      }
+#pragma omp critical (fwhm_dump)
+      {
+        fwhm_out << buf;
+      }
+    };
+
     // ------------------------------
     // Step 3: Process windows in parallel with nested parallelism
     // Outer loop: over DIA windows
@@ -990,7 +1132,9 @@ protected:
             {
               MSSpectrum aggregated;
               aggregateSpectrum_(ms2_exp, s, picker_im, aggregated);
+              picker_im.setDumpFrameLabel("ms2\t" + std::to_string(idx));   // raw_dump (study only): window index as in density_dump
               picker_im.pickIMTraces(aggregated);
+              picker_im.setDumpFrameLabel("");
               ms2_picked[s] = std::move(aggregated);
             }
             else
@@ -1026,7 +1170,9 @@ protected:
             {
               if (ms2_exp[s].getIMPeakType() != IMPeakType::IM_CENTROIDED)
               {
+                pickers.im.setDumpFrameLabel("ms2\t" + std::to_string(idx));
                 pickers.im.pickIMTraces(ms2_exp[s]);
+                pickers.im.setDumpFrameLabel("");
               }
             }
             else
@@ -1057,6 +1203,8 @@ protected:
           if (runFeatureFinderPeptide_(ms2_exp, ms2ffp_common_param, mtd_copy, epd_copy, ffp_copy,
                                        ms2_features, ms2_all_traces, inner_threads))
           {
+            // all post-EPD MS2 traces, with their FeatureFinderPeptide isotope rank (-1 = unassembled)
+            dump_fwhm("ms2", static_cast<SignedSize>(idx), w.lower_mz, w.upper_mz, ms2_all_traces);
             std::map<String, const MassTrace*> trace_lookup;
             for (const auto& tr : ms2_all_traces)
               trace_lookup[tr.getLabel()] = &tr;
@@ -1098,6 +1246,9 @@ protected:
           runMassTraceExtractor_(ms2_exp, mte_common_param, mte_mtd_copy, mte_epd_copy, ms2_traces, inner_threads);
         }
       }
+
+      dump_traces("ms2", static_cast<SignedSize>(idx), w.lower_mz, w.upper_mz, ms2_traces);
+      if (!deisotope_ms2) dump_fwhm("ms2", static_cast<SignedSize>(idx), w.lower_mz, w.upper_mz, ms2_traces);
 
       // Apply peak picking to precursors
       if (save_precursors && !precursor_exp.empty())
@@ -1183,6 +1334,8 @@ protected:
             && !precursor_features.empty() && !ms2_traces.empty())
         {
           MSExperiment pseudo_spectra;
+          dump_traces("prec", static_cast<SignedSize>(idx), w.lower_mz, w.upper_mz, precursor_traces);
+          dump_fwhm("prec", static_cast<SignedSize>(idx), w.lower_mz, w.upper_mz, precursor_traces);
 
           // precursor_exp and ms2_exp are split from the same scans, so their RTs are identical
           Param window_cluster_param = cluster_param;
@@ -1320,6 +1473,8 @@ protected:
             && !ms1_features.empty())
         {
           MSExperiment pseudo_spectra;
+          dump_traces("ms1", static_cast<SignedSize>(idx), w.lower_mz, w.upper_mz, ms1_traces);
+          dump_fwhm("ms1", static_cast<SignedSize>(idx), w.lower_mz, w.upper_mz, ms1_traces);
 
           // cluster MS2 fragments by precursors
           Param window_cluster_param = cluster_param;

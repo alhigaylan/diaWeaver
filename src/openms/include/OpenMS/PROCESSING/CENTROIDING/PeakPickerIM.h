@@ -18,6 +18,7 @@
 #include <OpenMS/PROCESSING/SMOOTHING/SavitzkyGolayFilter.h>
 
 #include <map>
+#include <string>
 #include <vector>
 
 namespace OpenMS
@@ -52,6 +53,10 @@ namespace OpenMS
    * @param[in,out] spectrum Spectrum containing ion mobility data in its FloatDataArrays
    */
     void pickIMTraces(MSSpectrum& spectrum);
+
+    /// Study only: label ("<kind>\t<window_idx>") written in front of every raw peak row of the following pickIMTraces() calls
+    /// when pickIMTraces:raw_dump is set. An empty label (default) disables the dump for those calls.
+    void setDumpFrameLabel(const std::string& label) { dump_label_ = label; }
 
     /// Sets the parameters for peak picking.
     using DefaultParamHandler::setParameters;
@@ -182,8 +187,12 @@ namespace OpenMS
       const MSSpectrum& raw_spectrum);
 
     /// compute m/z and ion mobility centers for picked traces. Returns centroided spectrum.
+    /// If raw_spectrum and mz_windows (picked m/z window [lo, hi] per trace) are given, per-peak ion density
+    /// values (see MassTrace::DENSITY_NAMES) are written as float data arrays named "density_*".
     MSSpectrum computeCentroids_(const std::vector<Mobilogram>& mobilogram_traces,
-                              const std::vector<Mobilogram>& picked_traces);
+                              const std::vector<Mobilogram>& picked_traces,
+                              const MSSpectrum* raw_spectrum = nullptr,
+                              const std::vector<std::pair<double, double>>* mz_windows = nullptr);
 
 
     double sum_tolerance_mz_{1.0};
@@ -193,6 +202,14 @@ namespace OpenMS
     int sgolay_frame_length_{5};
     int sgolay_polynomial_order_{3};
     Size min_raw_peaks_{1};
+    double max_background_pvalue_{1.0};
+    bool density_filter_{false};             ///< per-frame significance filter (pickIMTraces:density_filter)
+    double density_filter_quantile_{0.5};    ///< fraction of the frame's picked peaks discarded by density_filter
+    std::string raw_dump_path_;              ///< pickIMTraces:raw_dump (study only)
+    double raw_dump_rt_min_{0.0};
+    double raw_dump_rt_max_{1e12};
+    std::string dump_label_;                 ///< see setDumpFrameLabel()
+    double dump_rt_{0.0};                    ///< RT of the frame being picked
 
     /// Filters and pickers used by pickIMTraces(), configured once in updateMembers_()
     /// instead of per spectrum (their construction and parameter setup dominated runtime)

@@ -667,6 +667,16 @@ namespace OpenMS
       // Now accept hypothesis
       //
 
+      // record feature membership on the traces (study diagnostics); the traces live in the non-const
+      // input_mtraces and each is claimed by at most one accepted hypothesis
+      for (Size rank = 0; rank < traces.size(); ++rank)
+      {
+        MassTrace* mt = const_cast<MassTrace*>(traces[rank]);
+        mt->ffp_rank = static_cast<int>(rank);
+        mt->ffp_charge = static_cast<int>(feat_hypos[hypo_idx].getCharge());
+        mt->ffp_nisotopes = static_cast<int>(traces.size());
+      }
+
       Feature f;
       f.setRT(feat_hypos[hypo_idx].getCentroidRT());
       f.setMZ(feat_hypos[hypo_idx].getCentroidMZ());

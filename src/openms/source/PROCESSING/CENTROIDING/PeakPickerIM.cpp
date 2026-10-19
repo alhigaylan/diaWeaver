@@ -33,6 +33,9 @@
 #include <unordered_map>
 #include <map>
 #include <utility>
+#include <array>
+#include <fstream>
+#include <mutex>
 
 
 using namespace std;
@@ -199,9 +202,81 @@ namespace OpenMS
       return mobility_traces;
     }
 
+    namespace
+    {
+      // P(X >= k) for X ~ Binomial(N, p)
+      double binomialTail(Size k, Size N, double p)
+      {
+        if (k == 0) return 1.0;
+        if (k > N) return 0.0;
+        const double lp = std::log(p), lq = std::log1p(-p), lgN = std::lgamma(static_cast<double>(N) + 1.0);
+        double sum = 0.0;
+        for (Size j = k; j <= N; ++j)
+        {
+          sum += std::exp(lgN - std::lgamma(static_cast<double>(j) + 1.0) - std::lgamma(static_cast<double>(N - j) + 1.0)
+                          + static_cast<double>(j) * lp + static_cast<double>(N - j) * lq);
+        }
+        return std::min(1.0, sum);
+      }
+
+      // log P(X >= k) for X ~ Binomial(N, p); stays finite where the probability itself underflows
+      double logBinomialTail(Size k, Size N, double p)
+      {
+        if (k == 0) return 0.0;
+        if (k > N) return -std::numeric_limits<double>::infinity();
+        const double lp = std::log(p), lq = std::log1p(-p), lgN = std::lgamma(static_cast<double>(N) + 1.0);
+        double max_term = -std::numeric_limits<double>::infinity();
+        std::vector<double> terms;
+        terms.reserve(N - k + 1);
+        for (Size j = k; j <= N; ++j)
+        {
+          const double t = lgN - std::lgamma(static_cast<double>(j) + 1.0) - std::lgamma(static_cast<double>(N - j) + 1.0)
+                           + static_cast<double>(j) * lp + static_cast<double>(N - j) * lq;
+          terms.push_back(t);
+          max_term = std::max(max_term, t);
+        }
+        double sum = 0.0;
+        for (const double t : terms) sum += std::exp(t - max_term);
+        return std::min(0.0, max_term + std::log(sum));
+      }
+
+      // Study only: shared TSV sink of the raw peaks retrieved for every picked peak (pickIMTraces:raw_dump)
+      void writeRawDump(const std::string& path, const std::string& text)
+      {
+        static std::mutex mtx;
+        static std::ofstream out;
+        static std::string open_path;
+        std::lock_guard<std::mutex> lock(mtx);
+        if (open_path != path)
+        {
+          if (out.is_open()) out.close();
+          out.open(path);
+          open_path = path;
+          out << "kind\twindow_idx\trt\ttrace_idx\tpeak_idx\tpeak_im\tmz\tim\tintensity\tmz_lo\tmz_hi\tim_lo\tim_hi\n";
+        }
+        out << text;
+      }
+
+      // number of raw peaks (m/z-sorted spectrum with ion mobility array) inside [mz_lo, mz_hi] x [im_lo, im_hi]
+      Size countRawInBox(const MSSpectrum& raw, const MSSpectrum::FloatDataArray& im,
+                         double mz_lo, double mz_hi, double im_lo, double im_hi)
+      {
+        const auto last = raw.MZEnd(mz_hi);
+        Size n = 0;
+        for (auto it = raw.MZBegin(mz_lo); it != last; ++it)
+        {
+          const double v = im[it - raw.begin()];
+          if (v >= im_lo && v <= im_hi) ++n;
+        }
+        return n;
+      }
+    }
+
     // Function to compute m/z centers from mobilogram_traces and picked_traces
     MSSpectrum PeakPickerIM::computeCentroids_(const vector<Mobilogram>& mobilogram_traces,
-                              const vector<Mobilogram>& picked_traces)
+                              const vector<Mobilogram>& picked_traces,
+                              const MSSpectrum* raw_spectrum,
+                              const std::vector<std::pair<double, double>>* mz_windows)
     {
       MSSpectrum centroided_frame;
 
@@ -214,6 +289,20 @@ namespace OpenMS
 
       MSSpectrum::FloatDataArray mz_fwhm_array;
       mz_fwhm_array.setName("MZ FWHM");
+
+      // Per-peak ion density (counts of raw peaks in nested boxes around each reported peak)
+      const bool density_on = (raw_spectrum != nullptr && mz_windows != nullptr && raw_spectrum->containsIMData()
+                               && mz_windows->size() == picked_traces.size());
+      std::vector<MSSpectrum::FloatDataArray> density_arrays(MassTrace::DENSITY_NAMES.size());
+      for (Size d = 0; d < density_arrays.size(); ++d) density_arrays[d].setName(MassTrace::DENSITY_NAMES[d]);
+      const MSSpectrum::FloatDataArray* raw_im = nullptr;
+      if (density_on) raw_im = &raw_spectrum->getFloatDataArrays()[raw_spectrum->getIMData().first];
+      static constexpr double kScales[4] = {1.0, 2.5, 4.0, 8.0};
+      std::vector<double> peak_log_p_values;   // log p-value of every reported peak (only when density_filter_ is on)
+      if (density_filter_ && !density_on)
+      {
+        OPENMS_LOG_WARN << "PeakPickerIM: pickIMTraces:density_filter is on but the frame has no raw ion mobility data; the filter is skipped.\n";
+      }
 
       // Loop over picked traces and their corresponding raw mobilogram traces
       for (size_t i = 0; i < picked_traces.size(); ++i)
@@ -264,6 +353,8 @@ namespace OpenMS
         vector<double> mz_values;
         vector<double> intensity_values;
         vector<size_t> indices;
+        std::vector<std::array<double, 3>> dump_pts;   // raw peaks retrieved for the current box: m/z, IM, intensity
+        const bool dump_on = !raw_dump_path_.empty() && !dump_label_.empty() && dump_rt_ >= raw_dump_rt_min_ && dump_rt_ <= raw_dump_rt_max_;
         vector<double> sorted_mz;
         vector<double> sorted_intensity;
         
@@ -287,6 +378,7 @@ namespace OpenMS
 
           // Clear the spectrum for reuse
           raw_peaks_within_bounds.clear(false);
+          dump_pts.clear();
 
           // --- Expand Left ---
           SignedSize left_idx = center_idx;
@@ -296,6 +388,7 @@ namespace OpenMS
             new_peak.setMZ(raw_mz_values[left_idx]);                      // m/z from FloatDataArray
             new_peak.setIntensity(raw_trace[left_idx].getIntensity());    // intensity from raw_trace
             raw_peaks_within_bounds.push_back(new_peak);
+            if (dump_on) dump_pts.push_back({static_cast<double>(raw_mz_values[left_idx]), raw_trace[left_idx].getMobility(), raw_trace[left_idx].getIntensity()});
 
             --left_idx;
           }
@@ -309,16 +402,71 @@ namespace OpenMS
             new_peak.setMZ(raw_mz_values[right_idx]);
             new_peak.setIntensity(raw_trace[right_idx].getIntensity());
             raw_peaks_within_bounds.push_back(new_peak);
+            if (dump_on) dump_pts.push_back({static_cast<double>(raw_mz_values[right_idx]), raw_trace[right_idx].getMobility(), raw_trace[right_idx].getIntensity()});
 
             ++right_idx;
           }
 
+
+          if (dump_on)
+          {
+            std::string buf;
+            char line[256];
+            for (const auto& pt : dump_pts)
+            {
+              std::snprintf(line, sizeof(line), "\t%.3f\t%zu\t%zu\t%.5f\t%.5f\t%.5f\t%.1f\t%.5f\t%.5f\t%.5f\t%.5f\n", dump_rt_, (size_t)i, (size_t)j, centroid_im, pt[0], pt[1], pt[2],
+                            mz_windows ? (*mz_windows)[i].first : std::nan(""), mz_windows ? (*mz_windows)[i].second : std::nan(""), im_lower, im_upper);
+              buf += dump_label_;
+              buf += line;
+            }
+            writeRawDump(raw_dump_path_, buf);
+          }
 
           // Peaks supported by too few raw peaks are not reported
           if (raw_peaks_within_bounds.size() < min_raw_peaks_)
           {
             continue;
           }
+
+          // Significance against the local background: raw peaks in the box vs. in the ring between the 2.5x and 4x boxes
+          // (log p-value is also kept per reported peak for the per-frame density_filter below)
+          double peak_log_p = 0.0;
+          if (density_on && (max_background_pvalue_ < 1.0 || density_filter_))
+          {
+            const double mz_lo = (*mz_windows)[i].first, mz_hi = (*mz_windows)[i].second;
+            const double mz_c = 0.5 * (mz_lo + mz_hi), mz_w = mz_hi - mz_lo;
+            const Size n_box = raw_peaks_within_bounds.size();
+            const Size n_25 = countRawInBox(*raw_spectrum, *raw_im, mz_c - 1.25 * mz_w, mz_c + 1.25 * mz_w,
+                                            centroid_im - 1.25 * fwhm, centroid_im + 1.25 * fwhm);
+            const Size n_4 = countRawInBox(*raw_spectrum, *raw_im, mz_c - 2.0 * mz_w, mz_c + 2.0 * mz_w,
+                                           centroid_im - 2.0 * fwhm, centroid_im + 2.0 * fwhm);
+            const Size ring = n_4 > n_25 ? n_4 - n_25 : 0;
+            const double p0 = 1.0 / (1.0 + (4.0 * 4.0 - 2.5 * 2.5));
+            peak_log_p = logBinomialTail(n_box, n_box + ring, p0);
+            if (max_background_pvalue_ < 1.0 && peak_log_p > std::log(max_background_pvalue_))
+            {
+              continue;
+            }
+          }
+
+          // Ion density of the reported peak: raw peaks inside the picked-peak box (n_raw) and inside nested boxes
+          // k x wider in m/z and ion mobility, centred on the box
+          auto push_density = [&]()
+          {
+            if (!density_on) return;
+            if (density_filter_) peak_log_p_values.push_back(peak_log_p);
+            const double mz_lo = (*mz_windows)[i].first, mz_hi = (*mz_windows)[i].second;
+            const double mz_c = 0.5 * (mz_lo + mz_hi), mz_w = mz_hi - mz_lo;
+            density_arrays[0].push_back(static_cast<float>(raw_peaks_within_bounds.size()));
+            density_arrays[1].push_back(static_cast<float>(mz_w));
+            density_arrays[2].push_back(static_cast<float>(fwhm));
+            for (Size k = 0; k < 4; ++k)
+            {
+              density_arrays[3 + k].push_back(static_cast<float>(countRawInBox(*raw_spectrum, *raw_im,
+                mz_c - 0.5 * kScales[k] * mz_w, mz_c + 0.5 * kScales[k] * mz_w,
+                centroid_im - 0.5 * kScales[k] * fwhm, centroid_im + 0.5 * kScales[k] * fwhm)));
+            }
+          };
 
           // If we only retrieved one raw peak, pass it over to centroided_frame as is
           // Resampling and smoothing the raw data distorts the intensity values.
@@ -329,6 +477,7 @@ namespace OpenMS
 
             // Add it directly to centroided_frame
             centroided_frame.push_back(single_peak);
+            push_density();
 
             // Push corresponding ion mobility and FWHM arrays
             ion_mobility_array.push_back(centroid_im);
@@ -358,6 +507,7 @@ namespace OpenMS
           if (raw_mz_peaks.size() == 1)
           {
             centroided_frame.push_back(raw_mz_peaks[0]);
+            push_density();
             ion_mobility_array.push_back(centroid_im);
             ion_mobility_fwhm.push_back(fwhm);
             mz_fwhm_array.push_back(0.0);
@@ -507,6 +657,7 @@ namespace OpenMS
 
 
           centroided_frame.emplace_back(apex_mz, apex_intensity);
+          push_density();
           ion_mobility_array.push_back(centroid_im);
           ion_mobility_fwhm.push_back(fwhm);
           mz_fwhm_array.push_back(mz_fwhm);
@@ -514,10 +665,53 @@ namespace OpenMS
 
       }
 
+      // Per-frame density filter: discard the density_filter_quantile_ fraction of this frame's reported peaks with the
+      // least significant p-values (score = -log p; peaks scoring below the quantile of the frame's scores are dropped,
+      // ties at the quantile are kept)
+      if (density_filter_ && density_on && density_filter_quantile_ > 0.0 && peak_log_p_values.size() == centroided_frame.size()
+          && !peak_log_p_values.empty())
+      {
+        std::vector<double> scores(peak_log_p_values.size());
+        for (Size s = 0; s < scores.size(); ++s) scores[s] = -peak_log_p_values[s];
+        std::vector<double> sorted_scores(scores);
+        std::sort(sorted_scores.begin(), sorted_scores.end());
+        const double pos = density_filter_quantile_ * static_cast<double>(sorted_scores.size() - 1);
+        const Size lo = static_cast<Size>(std::floor(pos)), hi = static_cast<Size>(std::ceil(pos));
+        const double threshold = sorted_scores[lo] + (pos - static_cast<double>(lo)) * (sorted_scores[hi] - sorted_scores[lo]);
+
+        MSSpectrum kept_frame;
+        MSSpectrum::FloatDataArray kept_im, kept_im_fwhm, kept_mz_fwhm;
+        kept_im.setName(ion_mobility_array.getName());
+        kept_im_fwhm.setName(ion_mobility_fwhm.getName());
+        kept_mz_fwhm.setName(mz_fwhm_array.getName());
+        std::vector<MSSpectrum::FloatDataArray> kept_density(density_arrays.size());
+        for (Size d = 0; d < density_arrays.size(); ++d) kept_density[d].setName(density_arrays[d].getName());
+        for (Size s = 0; s < scores.size(); ++s)
+        {
+          if (scores[s] < threshold) continue;
+          kept_frame.push_back(centroided_frame[s]);
+          kept_im.push_back(ion_mobility_array[s]);
+          kept_im_fwhm.push_back(ion_mobility_fwhm[s]);
+          kept_mz_fwhm.push_back(mz_fwhm_array[s]);
+          for (Size d = 0; d < density_arrays.size(); ++d) kept_density[d].push_back(density_arrays[d][s]);
+        }
+        OPENMS_LOG_DEBUG << "PeakPickerIM density_filter: kept " << kept_frame.size() << " of " << scores.size() << " peaks (quantile "
+                         << density_filter_quantile_ << ", -log p threshold " << threshold << ")\n";
+        centroided_frame = std::move(kept_frame);
+        ion_mobility_array = std::move(kept_im);
+        ion_mobility_fwhm = std::move(kept_im_fwhm);
+        mz_fwhm_array = std::move(kept_mz_fwhm);
+        density_arrays = std::move(kept_density);
+      }
+
       auto& centroided_frame_fda = centroided_frame.getFloatDataArrays();
       centroided_frame_fda.push_back(std::move(ion_mobility_array));
       centroided_frame_fda.push_back(std::move(ion_mobility_fwhm));
       centroided_frame_fda.push_back(std::move(mz_fwhm_array));
+      if (density_on)
+      {
+        for (auto& arr : density_arrays) centroided_frame_fda.push_back(std::move(arr));
+      }
       centroided_frame.sortByPosition();
 
       return centroided_frame;
@@ -530,7 +724,8 @@ namespace OpenMS
       // Use remove_if to move all elements to remove to the end
       auto new_end = std::remove_if(float_arrays.begin(), float_arrays.end(),
                                [&keep_name](const MSSpectrum::FloatDataArray& array) {
-                                 return array.getName() != keep_name;  // Remove if NOT the one we want to keep
+                                 // Remove if NOT the one we want to keep (per-peak ion density arrays are kept too)
+                                 return array.getName() != keep_name && array.getName().compare(0, 8, "density_") != 0;
                                });
   
       // Erase the removed elements
@@ -551,6 +746,23 @@ namespace OpenMS
       defaults_.setValue("pickIMTraces:sgolay_polynomial_order", 3,     "Savitzky-Golay smoothing polynomial order");
       defaults_.setValue("pickIMTraces:min_raw_peaks", 1, "Minimum number of raw peaks within the m/z and ion mobility bounds of a picked peak for it to be reported. 1 = report all picked peaks.");
       defaults_.setMinInt("pickIMTraces:min_raw_peaks", 1);
+      defaults_.setValue("pickIMTraces:max_background_pvalue", 1.0, "Report a picked peak only if the number of raw peaks in its box is significantly above the local background: "
+                         "exact binomial tail probability P(X >= n_raw) of finding n_raw of the (n_raw + ring) raw peaks in the box, given the area of the box "
+                         "relative to the ring between the 2.5x and 4x boxes (both in m/z and ion mobility). Peaks with a larger p-value are dropped. 1 = off.");
+      defaults_.setMinFloat("pickIMTraces:max_background_pvalue", 0.0);
+      defaults_.setMaxFloat("pickIMTraces:max_background_pvalue", 1.0);
+      defaults_.setValue("pickIMTraces:raw_dump", "", "Study only: write every raw peak retrieved for a picked peak (m/z, ion mobility, intensity of the aggregated frame) to this TSV file. "
+                         "Only frames for which the caller set a frame label (diaWeaver: MS2 frames) are written.", {"advanced"});
+      defaults_.setValue("pickIMTraces:raw_dump_rt_min", 0.0, "Study only: first RT (seconds) of the frames written by raw_dump.", {"advanced"});
+      defaults_.setValue("pickIMTraces:raw_dump_rt_max", 1e12, "Study only: last RT (seconds) of the frames written by raw_dump.", {"advanced"});
+      defaults_.setValue("pickIMTraces:density_filter", "false", "Per-frame density filter. Every picked peak is scored by the exact binomial tail probability of finding "
+                         "its raw peaks in its box rather than in the ring between the 2.5x and 4x boxes (m/z and ion mobility). Within each frame "
+                         "(one spectrum), the fraction of peaks with the least significant p-values given by density_filter_quantile is discarded.");
+      defaults_.setValidStrings("pickIMTraces:density_filter", {"true","false"});
+      defaults_.setValue("pickIMTraces:density_filter_quantile", 0.5, "Fraction of the frame's picked peaks discarded by density_filter, "
+                         "least significant first (0.5 = below the frame median, 0.25 = below the first quartile). Used only if density_filter is true.");
+      defaults_.setMinFloat("pickIMTraces:density_filter_quantile", 0.0);
+      defaults_.setMaxFloat("pickIMTraces:density_filter_quantile", 1.0);
 #if 0
       // --- PickIMCluster parameters ---
       defaults_.setValue("pickIMCluster:ppm_tolerance_cluster", 50.0, "m/z tolerance in ppm for clustering");
@@ -574,6 +786,12 @@ namespace OpenMS
       sgolay_frame_length_   = (int)param_.getValue("pickIMTraces:sgolay_frame_length");
       sgolay_polynomial_order_= (int)param_.getValue("pickIMTraces:sgolay_polynomial_order");
       min_raw_peaks_ = static_cast<Size>((int)param_.getValue("pickIMTraces:min_raw_peaks"));
+      max_background_pvalue_ = (double)param_.getValue("pickIMTraces:max_background_pvalue");
+      raw_dump_path_ = param_.getValue("pickIMTraces:raw_dump").toString();
+      raw_dump_rt_min_ = (double)param_.getValue("pickIMTraces:raw_dump_rt_min");
+      raw_dump_rt_max_ = (double)param_.getValue("pickIMTraces:raw_dump_rt_max");
+      density_filter_ = param_.getValue("pickIMTraces:density_filter").toBool();
+      density_filter_quantile_ = (double)param_.getValue("pickIMTraces:density_filter_quantile");
 
       Param gauss_params;
       gauss_params.setValue("ppm_tolerance", gauss_ppm_tolerance_);
@@ -711,6 +929,12 @@ namespace OpenMS
         MSSpectrum::FloatDataArray empty_im_array;
         empty_im_array.setName(Constants::UserParam::ION_MOBILITY_CENTROID);
         empty_frame.getFloatDataArrays().push_back(std::move(empty_im_array));
+        for (const char* name : MassTrace::DENSITY_NAMES)
+        {
+          MSSpectrum::FloatDataArray empty_density;
+          empty_density.setName(name);
+          empty_frame.getFloatDataArrays().push_back(std::move(empty_density));
+        }
         empty_frame.setType(SpectrumSettings::SpectrumType::CENTROID);
         empty_frame.setIMPeakType(IMPeakType::IM_CENTROIDED);
         spectrum = std::move(empty_frame);
@@ -725,6 +949,27 @@ namespace OpenMS
       // (currently we have this hard-coded as +20 raw peaks in a mobilogram to be considered well-populated).
 
       auto mobilogram_traces = PeakPickerIM::extractIonMobilityTraces(picked_spectrum, spectrum);
+
+      // m/z window [lo, hi] of every non-empty trace (parallel to mobilogram_traces after empty traces are removed below);
+      // used to count raw peaks around each picked peak (ion density)
+      std::vector<std::pair<double, double>> mz_windows;
+      {
+        const MSSpectrum::FloatDataArray* fwhm_ppm_array = nullptr;
+        for (const auto& array : picked_spectrum.getFloatDataArrays())
+        {
+          if (array.getName() == "FWHM_ppm") { fwhm_ppm_array = &array; break; }
+        }
+        if (fwhm_ppm_array != nullptr && mobilogram_traces.size() == picked_spectrum.size())
+        {
+          for (Size i = 0; i < picked_spectrum.size(); ++i)
+          {
+            if (!mobilogram_traces[i].empty())
+            {
+              mz_windows.push_back(ppmBounds(picked_spectrum[i].getMZ(), (*fwhm_ppm_array)[i]));
+            }
+          }
+        }
+      }
 
       // ************************************************* PART II *****************************************************
       // ------------------------------------------ Ion mobility peak picking ------------------------------------------
@@ -774,7 +1019,8 @@ namespace OpenMS
       }
 
       // Recompute m/z centers and output centroided frame
-      MSSpectrum centroided_frame = computeCentroids_(mobilogram_traces, picked_traces);
+      dump_rt_ = spectrum.getRT();
+      MSSpectrum centroided_frame = computeCentroids_(mobilogram_traces, picked_traces, &spectrum, &mz_windows);
 
       // Remove extra FDAs (IM FWHM, MZ FWHM)
       removeAllFloatDataArraysExcept(centroided_frame, Constants::UserParam::ION_MOBILITY_CENTROID);

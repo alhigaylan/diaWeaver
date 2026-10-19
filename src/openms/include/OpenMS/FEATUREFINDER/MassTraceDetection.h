@@ -158,6 +158,7 @@ namespace OpenMS
         void processPeak_(const PeakCandidate& candidate,
                          const MSSpectrum& spectrum,
                          std::list<PeakType>& current_trace,
+                         std::list<std::array<float, 7>>& current_density,
                          std::vector<std::pair<Size, Size>>& gathered_idx,
                          std::vector<double>& fwhms_mz,
                          std::vector<double>& fwhms_im,
@@ -178,6 +179,13 @@ namespace OpenMS
                           Size total_scans_visited,
                           Size consecutive_missed_down,
                           Size consecutive_missed_up) const;
+
+        /// per-peak ion density values (MassTrace::DENSITY_NAMES) of a peak; NaN where the arrays are absent
+        std::array<float, 7> readDensity_(const MSSpectrum& spectrum, Size peak_idx) const;
+
+        // per-peak ion density arrays (written by PeakPickerIM), found by name in run_()
+        bool has_density_ = false;
+        mutable std::array<int, 7> density_idx_{{-1, -1, -1, -1, -1, -1, -1}};
 
         // Metadata availability flags – set by getIMIndices_ and valid after run_()
         bool has_fwhm_mz_ = false;

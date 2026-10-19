@@ -12,6 +12,7 @@
 #include <OpenMS/KERNEL/FeatureMap.h>
 
 
+#include <array>
 #include <vector>
 #include <list>
 #include <map>
@@ -324,6 +325,24 @@ public:
     /// Average FWHM of ion mobility peaks
     /// 0 denotes no fwhm meta data computed
     double fwhm_im_avg = 0;
+
+    /// Names (and order) of the per-peak ion density values stored in peak_density.
+    /// n_raw: raw peaks in the picked-peak box; mz_width (Da), im_width (1/K0): box extent;
+    /// n_1, n_2p5, n_4, n_8: raw peaks in boxes of 1x, 2.5x, 4x, 8x the box width in both dimensions
+    /// (cumulative, each includes everything inside it).
+    static constexpr std::array<const char*, 7> DENSITY_NAMES =
+      {"density_n_raw", "density_mz_width", "density_im_width", "density_n_1", "density_n_2p5", "density_n_4", "density_n_8"};
+
+    /// Per-peak ion density values, parallel to the trace peaks (empty if not available).
+    /// Missing entries (imputed zero peaks) are NaN.
+    std::vector<std::array<float, 7>> peak_density;
+
+    /// FeatureFindingPeptide membership of this trace (study diagnostics): position of the trace in the accepted
+    /// feature, counted from its lowest-m/z trace (0 = the seed, assumed monoisotopic); -1 = trace is not part of
+    /// an accepted feature. ffp_charge / ffp_nisotopes: charge and trace count of that feature.
+    int ffp_rank = -1;
+    int ffp_charge = 0;
+    int ffp_nisotopes = 0;
 
 private:
 
