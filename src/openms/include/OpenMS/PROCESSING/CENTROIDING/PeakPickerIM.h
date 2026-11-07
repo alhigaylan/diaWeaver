@@ -156,6 +156,23 @@ namespace OpenMS
      */
     void pickExperimentWithAggregation(MSExperiment& exp);
 
+    /**
+     * @brief Estimates the spacing of the raw m/z lattice in sqrt(m/z) (one m/z column).
+     *
+     * TimsTOF m/z values lie on a lattice in sqrt(m/z) that is constant within an acquisition file but
+     * differs between files. The step is the dominant smallest gap between neighbouring distinct
+     * m/z values; gaps below 1e-6 (duplicates across scans) are ignored.
+     * @param[in] spectra Raw spectra sorted by m/z, ideally several frames spread over the file
+     * @return the step, or 0 if it could not be estimated
+     */
+    static double estimateMzGridStep(const std::vector<const MSSpectrum*>& spectra);
+
+    /// Sets the m/z grid step (sqrt(m/z)) needed by the neighbor filter; call once per file with estimateMzGridStep()
+    void setMzGridStep(double step) { mz_grid_step_ = step; }
+
+    /// True if the m/z neighbor filter is enabled (pickIMTraces:neighbor_filter)
+    bool neighborFilterEnabled() const { return neighbor_filter_; }
+
   protected:
     void updateMembers_() override;
 
@@ -185,6 +202,22 @@ namespace OpenMS
     MSSpectrum computeCentroids_(const std::vector<Mobilogram>& mobilogram_traces,
                               const std::vector<Mobilogram>& picked_traces);
 
+    /**
+     * @brief m/z-column neighbour support of the raw peaks of a picked peak box.
+     *
+     * Raw timsTOF m/z values lie on a lattice in sqrt(m/z) with spacing mz_grid_step_; one lattice step is
+     * called a column. Each raw peak is assigned the column index round((sqrt(mz) - sqrt(mz_min)) / mz_grid_step_)
+     * relative to the lowest raw peak of the box.
+     *
+     * The box is supported (returns true) if either
+     *  - one column holds at least singleton_column_min_peaks_ raw peaks, or
+     *  - two occupied columns are at most neighbor_max_column_gap_ columns apart.
+     * The two rules are independent: the per-column count only matters for the first, and the neighbours
+     * need not be symmetric about the peak centre. The box is never trimmed or moved; it is kept or rejected whole.
+     * @return false if the box has no neighbour support and should not be reported
+     */
+    bool hasNeighborSupport_(const MSSpectrum& peaks) const;
+
 
     double sum_tolerance_mz_{1.0};
     double gauss_ppm_tolerance_{5.0};
@@ -193,6 +226,10 @@ namespace OpenMS
     int sgolay_frame_length_{5};
     int sgolay_polynomial_order_{3};
     Size min_raw_peaks_{1};
+    bool neighbor_filter_{false};
+    int singleton_column_min_peaks_{2};
+    int neighbor_max_column_gap_{1};
+    double mz_grid_step_{0.0};   ///< spacing of the raw m/z lattice in sqrt(m/z); see setMzGridStep()
 
     /// Filters and pickers used by pickIMTraces(), configured once in updateMembers_()
     /// instead of per spectrum (their construction and parameter setup dominated runtime)

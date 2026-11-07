@@ -800,6 +800,33 @@ protected:
       DiaWeaver::extractMS1Windows(on_disc, windows, im_info, mzml_ms1_windows);
     }
 
+    // The neighbor filter needs the m/z lattice spacing of this file (constant within a file, differs between files)
+    double mz_grid_step = 0.0;
+    {
+      PeakPickerIM probe_ms1, probe_ms2;
+      probe_ms1.setParameters(ppim_params);
+      probe_ms2.setParameters(ppim_ms2_params);
+      if ((probe_ms1.neighborFilterEnabled() || probe_ms2.neighborFilterEnabled()) && im_info.available && !bruker_im_centroiding)
+      {
+        std::vector<MSSpectrum> sample;
+        const Size n_total = is_bruker ? 0 : on_disc.getNrSpectra();
+        const Size n_sample = std::min<Size>(10, n_total);
+        for (Size k = 0; k < n_sample; ++k)
+        {
+          sample.push_back(on_disc.getSpectrum(k * n_total / n_sample));
+        }
+        std::vector<const MSSpectrum*> sample_ptrs;
+        for (const MSSpectrum& sp : sample) sample_ptrs.push_back(&sp);
+        mz_grid_step = PeakPickerIM::estimateMzGridStep(sample_ptrs);
+        if (!(mz_grid_step > 0.0))
+        {
+          OPENMS_LOG_ERROR << "Could not estimate the m/z grid step needed by the neighbor filter." << std::endl;
+          return INCOMPATIBLE_INPUT_DATA;
+        }
+        OPENMS_LOG_INFO << "Estimated m/z grid step (sqrt(m/z)): " << mz_grid_step << std::endl;
+      }
+    }
+
     // Convert map to vector for OpenMP indexed access
     std::vector<std::pair<DiaWeaver::DIAWindow, std::vector<Size>>> window_vec(
       windows.begin(), windows.end());
@@ -978,10 +1005,11 @@ protected:
         // sharing until all workers have joined below, at which point the move is safe.
         OpenMS::parallelForWithState(
           ms2_exp.size(), static_cast<Size>(inner_threads),
-          [&ppim_ms2_params]()
+          [&ppim_ms2_params, mz_grid_step]()
           {
             PeakPickerIM picker_im;
             picker_im.setParameters(ppim_ms2_params);
+            picker_im.setMzGridStep(mz_grid_step);
             return picker_im;
           },
           [&](PeakPickerIM& picker_im, Size s)
@@ -1013,6 +1041,7 @@ protected:
             if (im_info.available)
             {
               pickers.im.setParameters(ppim_ms2_params);
+                pickers.im.setMzGridStep(mz_grid_step);
             }
             else
             {
@@ -1110,10 +1139,11 @@ protected:
 
           OpenMS::parallelForWithState(
             precursor_exp.size(), static_cast<Size>(inner_threads),
-            [&ppim_ms2_params]()
+            [&ppim_ms2_params, mz_grid_step]()
             {
               PeakPickerIM picker_im;
               picker_im.setParameters(ppim_ms2_params);
+            picker_im.setMzGridStep(mz_grid_step);
               return picker_im;
             },
             [&](PeakPickerIM& picker_im, Size s)
@@ -1145,6 +1175,7 @@ protected:
               if (im_info.available)
               {
                 pickers.im.setParameters(ppim_ms2_params);
+                pickers.im.setMzGridStep(mz_grid_step);
               }
               else
               {
@@ -1230,10 +1261,11 @@ protected:
 
         OpenMS::parallelForWithState(
           ms1_exp.size(), static_cast<Size>(inner_threads),
-          [&ppim_params]()
+          [&ppim_params, mz_grid_step]()
           {
             PeakPickerIM picker_im;
             picker_im.setParameters(ppim_params);
+            picker_im.setMzGridStep(mz_grid_step);
             return picker_im;
           },
           [&](PeakPickerIM& picker_im, Size s)
@@ -1265,6 +1297,7 @@ protected:
             if (im_info.available)
             {
               pickers.im.setParameters(ppim_params);
+                pickers.im.setMzGridStep(mz_grid_step);
             }
             else
             {

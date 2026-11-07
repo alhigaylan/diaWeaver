@@ -24,6 +24,7 @@
 #include <OpenMS/CONCEPT/LogStream.h>
 #include <OpenMS/FEATUREFINDER/MassTraceDetection.h>
 #include <OpenMS/FEATUREFINDER/ElutionPeakDetection.h>
+#include <cstdint>
 #include <iostream>
 #include <deque>
 #include <cmath>
@@ -200,10 +201,92 @@ namespace OpenMS
     }
 
     // Function to compute m/z centers from mobilogram_traces and picked_traces
+    double PeakPickerIM::estimateMzGridStep(const std::vector<const MSSpectrum*>& spectra)
+    {
+      std::vector<double> gaps;
+      std::vector<double> sq;
+      for (const MSSpectrum* spec : spectra)
+      {
+        sq.clear();
+        sq.reserve(spec->size());
+        for (const Peak1D& p : *spec) sq.push_back(std::sqrt(p.getMZ()));
+        std::sort(sq.begin(), sq.end());
+        for (Size i = 1; i < sq.size(); ++i)
+        {
+          const double g = sq[i] - sq[i - 1];
+          if (g > 1e-6 && g < 1e-3) gaps.push_back(g);
+        }
+      }
+      if (gaps.size() < 1000) return 0.0;
+
+      // The smallest recurring gap is one column; larger gaps are multiples of it
+      std::sort(gaps.begin(), gaps.end());
+      const double g0 = gaps[gaps.size() / 50];
+      std::vector<double> near;
+      for (const double g : gaps)
+      {
+        if (g >= 0.5 * g0 && g <= 1.5 * g0) near.push_back(g);
+      }
+      return near[near.size() / 2];
+    }
+
+    bool PeakPickerIM::hasNeighborSupport_(const MSSpectrum& peaks) const
+    {
+      const double step = mz_grid_step_;
+      const Size n = peaks.size();
+      if (n == 0) return false;
+
+      // Column index of each raw peak relative to the lowest one (the lattice offset is not needed)
+      std::vector<double> sq(n);
+      for (Size k = 0; k < n; ++k) sq[k] = std::sqrt(peaks[k].getMZ());
+      const double sq_min = *std::min_element(sq.begin(), sq.end());
+      std::vector<long> cols(n);
+      for (Size k = 0; k < n; ++k) cols[k] = std::lround((sq[k] - sq_min) / step);
+
+      const long max_col = *std::max_element(cols.begin(), cols.end());
+      if (max_col < 64)
+      {
+        // Fast path: bit mask of occupied columns plus a per-column count
+        uint64_t mask = 0;
+        int counts[64] = {};
+        for (long c : cols)
+        {
+          if (++counts[c] >= singleton_column_min_peaks_) return true;
+          mask |= uint64_t(1) << c;
+        }
+        // Two occupied columns at most neighbor_max_column_gap_ apart
+        for (int g = 1; g <= neighbor_max_column_gap_; ++g)
+        {
+          if (mask & (mask >> g)) return true;
+        }
+        return false;
+      }
+
+      // Wide box: same rule on the sorted column indices
+      std::sort(cols.begin(), cols.end());
+      int run = 1;
+      if (run >= singleton_column_min_peaks_) return true;
+      for (Size k = 1; k < n; ++k)
+      {
+        const long diff = cols[k] - cols[k - 1];
+        if (diff >= 1 && diff <= neighbor_max_column_gap_) return true;
+        run = (diff == 0) ? run + 1 : 1;
+        if (run >= singleton_column_min_peaks_) return true;
+      }
+      return false;
+    }
+
     MSSpectrum PeakPickerIM::computeCentroids_(const vector<Mobilogram>& mobilogram_traces,
                               const vector<Mobilogram>& picked_traces)
     {
       MSSpectrum centroided_frame;
+      const bool use_neighbors = neighbor_filter_;
+      if (use_neighbors && !(mz_grid_step_ > 0.0))
+      {
+        throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+                                      "pickIMTraces:neighbor_filter requires the m/z grid step; call setMzGridStep(estimateMzGridStep(...)) first",
+                                      String(mz_grid_step_));
+      }
 
       // Create float data arrays to house ion mobility data and peaks FWHM
       MSSpectrum::FloatDataArray ion_mobility_array;
@@ -316,6 +399,13 @@ namespace OpenMS
 
           // Peaks supported by too few raw peaks are not reported
           if (raw_peaks_within_bounds.size() < min_raw_peaks_)
+          {
+            continue;
+          }
+
+          // Peaks without m/z column neighbours are not reported
+          if (use_neighbors &&
+              !hasNeighborSupport_(raw_peaks_within_bounds))
           {
             continue;
           }
@@ -551,6 +641,12 @@ namespace OpenMS
       defaults_.setValue("pickIMTraces:sgolay_polynomial_order", 3,     "Savitzky-Golay smoothing polynomial order");
       defaults_.setValue("pickIMTraces:min_raw_peaks", 1, "Minimum number of raw peaks within the m/z and ion mobility bounds of a picked peak for it to be reported. 1 = report all picked peaks.");
       defaults_.setMinInt("pickIMTraces:min_raw_peaks", 1);
+      defaults_.setValue("pickIMTraces:neighbor_filter", "false", "Report a picked peak only if its raw peaks are supported by m/z neighbours: either one m/z column holds at least singleton_column_min_peaks raw peaks, or two occupied columns are at most neighbor_max_column_gap columns apart. A column is one step of the raw m/z lattice in sqrt(m/z), which is estimated from the data.");
+      defaults_.setValidStrings("pickIMTraces:neighbor_filter", {"true","false"});
+      defaults_.setValue("pickIMTraces:neighbor_max_column_gap", 1, "neighbor_filter only: two occupied m/z columns count as neighbours if they are at most this many columns apart (1 = adjacent columns, 2 = at most one empty column between them).");
+      defaults_.setMinInt("pickIMTraces:neighbor_max_column_gap", 1);
+      defaults_.setValue("pickIMTraces:singleton_column_min_peaks", 2, "neighbor_filter only: a box is also accepted if a single m/z column holds at least this many raw peaks (several scans or aggregated copies landing on the same m/z value), even with no occupied neighbour column.");
+      defaults_.setMinInt("pickIMTraces:singleton_column_min_peaks", 1);
 #if 0
       // --- PickIMCluster parameters ---
       defaults_.setValue("pickIMCluster:ppm_tolerance_cluster", 50.0, "m/z tolerance in ppm for clustering");
@@ -574,6 +670,9 @@ namespace OpenMS
       sgolay_frame_length_   = (int)param_.getValue("pickIMTraces:sgolay_frame_length");
       sgolay_polynomial_order_= (int)param_.getValue("pickIMTraces:sgolay_polynomial_order");
       min_raw_peaks_ = static_cast<Size>((int)param_.getValue("pickIMTraces:min_raw_peaks"));
+      neighbor_filter_ = param_.getValue("pickIMTraces:neighbor_filter").toBool();
+      neighbor_max_column_gap_ = (int)param_.getValue("pickIMTraces:neighbor_max_column_gap");
+      singleton_column_min_peaks_ = (int)param_.getValue("pickIMTraces:singleton_column_min_peaks");
 
       Param gauss_params;
       gauss_params.setValue("ppm_tolerance", gauss_ppm_tolerance_);
