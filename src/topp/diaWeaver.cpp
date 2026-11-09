@@ -806,7 +806,8 @@ protected:
       PeakPickerIM probe_ms1, probe_ms2;
       probe_ms1.setParameters(ppim_params);
       probe_ms2.setParameters(ppim_ms2_params);
-      if ((probe_ms1.neighborFilterEnabled() || probe_ms2.neighborFilterEnabled()) && im_info.available && !bruker_im_centroiding)
+      if ((probe_ms1.neighborFilterEnabled() || probe_ms2.neighborFilterEnabled() ||
+           probe_ms1.latticeBinningEnabled() || probe_ms2.latticeBinningEnabled()) && im_info.available && !bruker_im_centroiding)
       {
         std::vector<MSSpectrum> sample;
         const Size n_total = is_bruker ? 0 : on_disc.getNrSpectra();
@@ -820,7 +821,7 @@ protected:
         mz_grid_step = PeakPickerIM::estimateMzGridStep(sample_ptrs);
         if (!(mz_grid_step > 0.0))
         {
-          OPENMS_LOG_ERROR << "Could not estimate the m/z grid step needed by the neighbor filter." << std::endl;
+          OPENMS_LOG_ERROR << "Could not estimate the m/z grid step needed by the neighbor filter / lattice m/z binning." << std::endl;
           return INCOMPATIBLE_INPUT_DATA;
         }
         OPENMS_LOG_INFO << "Estimated m/z grid step (sqrt(m/z)): " << mz_grid_step << std::endl;

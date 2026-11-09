@@ -74,13 +74,23 @@ namespace OpenMS
 
       for (Size i = 1; i < input_spectrum.size(); ++i)
       {
+      double current_sqrt_mz = std::sqrt(current_mz);
+      const double half_column = 0.5 * mz_grid_step_;
         double next_mz = input_spectrum[i].getMZ();
         double next_intensity = input_spectrum[i].getIntensity();
 
         double delta_mz = std::abs(next_mz - current_mz);
-        bool within_tolerance = use_ppm
-                                  ? ((delta_mz / current_mz) * 1e6 <= tolerance)
-                                  : (delta_mz <= tolerance);
+        bool within_tolerance;
+        if (mz_lattice_binning_)
+        {
+          within_tolerance = (std::sqrt(next_mz) - current_sqrt_mz) < half_column;
+        }
+        else
+        {
+          within_tolerance = use_ppm
+                               ? ((delta_mz / current_mz) * 1e6 <= tolerance)
+                               : (delta_mz <= tolerance);
+        }
 
         if (within_tolerance)
         {
@@ -94,6 +104,7 @@ namespace OpenMS
         }
       }
       output_spectrum.emplace_back(current_mz, current_intensity);
+          current_sqrt_mz = std::sqrt(current_mz);
     }
 
     // We use peak FWHM (from PeakPickerHiRes) to extract ion mobility traces.
@@ -659,6 +670,8 @@ namespace OpenMS
       defaults_.setValue("aggregation:cutoff", 0.01, "Weight cutoff below which spectra are not included in aggregation");
 
       defaultsToParam_();  // copies defaults_ into param_
+      defaults_.setValue("pickIMTraces:mz_binning", "ppm", "How raw m/z peaks are summed before m/z peak picking: 'ppm' sums peaks within sum_tolerance_mz ppm of the first peak of a group; 'lattice' sums peaks that fall into the same column of the raw m/z lattice (one step in sqrt(m/z), estimated from the data per file) and ignores sum_tolerance_mz.");
+      defaults_.setValidStrings("pickIMTraces:mz_binning", {"ppm","lattice"});
       updateMembers_();    // caches into member variables
     }
     void PeakPickerIM::updateMembers_()
@@ -691,6 +704,7 @@ namespace OpenMS
       resampler_param.setValue("spacing", mobilogram_sampling_grid_);
       resampler_param.setValue("ppm", "false");
       lin_resampler_.setParameters(resampler_param);
+      mz_lattice_binning_ = (param_.getValue("pickIMTraces:mz_binning").toString() == "lattice");
 
       Param sgolay_params;
       sgolay_params.setValue("frame_length", sgolay_frame_length_);
@@ -780,6 +794,12 @@ namespace OpenMS
       // ------------------------------------------ mass-to-charge peak picking -------------------------------------
       // ------------------------------------------ Step a1: Sum m/z peaks ------------------------------------------
       // project all timsTOF peaks into the m/z axis using sumFrame_
+      if (mz_lattice_binning_ && !(mz_grid_step_ > 0.0))
+      {
+        throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+                                      "pickIMTraces:mz_binning = lattice requires the m/z grid step; call setMzGridStep(estimateMzGridStep(...)) first",
+                                      String(mz_grid_step_));
+      }
       // The ppm tolerance is a dynamic way of testing m/z floats being almost identical. The raw intensity is summed.
       MSSpectrum summed_spectrum;
       sumFrame_(spectrum, summed_spectrum, sum_tolerance_mz_, true);

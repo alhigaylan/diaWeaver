@@ -173,6 +173,9 @@ namespace OpenMS
     /// True if the m/z neighbor filter is enabled (pickIMTraces:neighbor_filter)
     bool neighborFilterEnabled() const { return neighbor_filter_; }
 
+    /// True if m/z peaks are summed per raw m/z lattice column (pickIMTraces:mz_binning = lattice); needs setMzGridStep()
+    bool latticeBinningEnabled() const { return mz_lattice_binning_; }
+
   protected:
     void updateMembers_() override;
 
@@ -186,6 +189,10 @@ namespace OpenMS
      * @param[out] output_spectrum Output spectrum containing the summed peaks.
      * @param[in] tolerance Mass tolerance between peaks
      * @param[in] use_ppm Whether to use parts per million tolerance. If set to False, absolute tolerance will be used.
+     *
+     * With pickIMTraces:mz_binning = lattice the tolerance is ignored: peaks are summed if they fall into the same
+     * column of the raw m/z lattice, i.e. their sqrt(m/z) differs from the first peak of the group by less than half
+     * of mz_grid_step_ (the lattice offset is not needed).
      */
     void sumFrame_(const MSSpectrum& input_spectrum, MSSpectrum& output_spectrum, double tolerance = 0.01, bool use_ppm = true);
 
@@ -227,6 +234,7 @@ namespace OpenMS
     int sgolay_polynomial_order_{3};
     Size min_raw_peaks_{1};
     bool neighbor_filter_{false};
+    bool mz_lattice_binning_{false};
     int singleton_column_min_peaks_{2};
     int neighbor_max_column_gap_{1};
     double mz_grid_step_{0.0};   ///< spacing of the raw m/z lattice in sqrt(m/z); see setMzGridStep()
