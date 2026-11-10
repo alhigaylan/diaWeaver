@@ -691,7 +691,7 @@ protected:
     const String in = getStringOption_("in");
     const bool save_precursors = getFlag_("save_unfragmented_precursors");
     const bool keep_ms1 = getFlag_("keep_ms1");
-    const bool aggregate_scans = getFlag_("aggregate_across_scans");
+    const bool aggregate_requested = getFlag_("aggregate_across_scans");
     const Param ppim_params = getParam_().copy("PeakPickerIM:", true);         // MS1
     const Param ppim_ms2_params = getParam_().copy("PeakPickerIMMS2:", true);  // MS2 frames: fragments and unfragmented precursors
     const Param pphr_params = getParam_().copy("PeakPickerHiRes:", true);
@@ -775,6 +775,16 @@ protected:
       OPENMS_LOG_INFO << "Loaded " << windows.size() << " DIA windows from Bruker .d file." << std::endl;
     }
 #endif
+
+    // rt_FWHM aggregation is an mzML-path feature. Bruker .d input is aggregated by the reader itself
+    // (bruker:ms1_n_neighbors, bruker:dia_ms2_n_neighbors), so it is switched off for MS1, MS2 and
+    // unfragmented precursors alike.
+    const bool aggregate_scans = aggregate_requested && !is_bruker;
+    if (aggregate_requested && is_bruker)
+    {
+      OPENMS_LOG_WARN << "aggregate_across_scans is ignored for Bruker .d input. "
+                      << "Use the bruker:*_n_neighbors options instead." << std::endl;
+    }
 
     OnDiscMSExperiment on_disc;
     DiaWeaver::WindowedExperiments mzml_ms1_windows; // per-window MS1 for the mzML path
