@@ -668,7 +668,7 @@ namespace OpenMS
       // --- Aggregation parameters ---
       defaults_.setValue("aggregation:rt_FWHM", 5.0, "Full width at half maximum for Gaussian weighting of scans (in seconds)");
       defaults_.setValue("aggregation:cutoff", 0.01, "Weight cutoff below which spectra are not included in aggregation");
-      defaults_.setValue("aggregation:frames_per_side", -1, "Frames pooled on each side of the centre frame (1 = 3 frames). If >= 0, rt_FWHM is solved from the frame spacing of the data and the rt_FWHM parameter is ignored; negative = use rt_FWHM as given");
+      defaults_.setValue("aggregation:frames_per_side", -1, "Frames pooled on each side of the centre frame, with equal weights (1 = 3 frames). If >= 0 the Gaussian weighting is not used and rt_FWHM and cutoff are ignored; negative = Gaussian weights from rt_FWHM and cutoff");
       defaults_.setMinInt("aggregation:frames_per_side", -1);
 
       defaultsToParam_();  // copies defaults_ into param_
@@ -1376,44 +1376,25 @@ namespace OpenMS
       aggregated_spectrum.setDriftTimeUnit(center_spec.getDriftTimeUnit());
     }
 
-    double PeakPickerIM::aggregationRtFwhm(std::vector<double> rts, int frames_per_side, double cutoff, double rt_fwhm)
+    std::vector<std::pair<Size, double>> PeakPickerIM::equalWeightNeighbours(Size n_frames, Size centre, Size frames_per_side)
     {
-      if (frames_per_side < 0)
+      std::vector<std::pair<Size, double>> neighbours;
+      neighbours.emplace_back(centre, 0.0);
+      for (Size j = centre + 1; j < n_frames && j <= centre + frames_per_side; ++j)
       {
-        return rt_fwhm;
+        neighbours.emplace_back(j, 0.0);
       }
-      if (!(cutoff > 0.0 && cutoff < 1.0))
+      for (Size j = centre; j-- > 0 && centre - j <= frames_per_side;)
       {
-        throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-            "aggregation:cutoff must be in (0, 1) to solve rt_FWHM from frames_per_side", String(cutoff));
-      }
-      if (rts.size() < 2)
-      {
-        throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-            "Need at least two frames to determine the frame spacing for aggregation:frames_per_side", String(rts.size()));
+        neighbours.emplace_back(j, 0.0);
       }
 
-      std::sort(rts.begin(), rts.end());
-      std::vector<double> gaps(rts.size() - 1);
-      for (Size i = 0; i + 1 < rts.size(); ++i)
+      const double weight = 1.0 / neighbours.size();
+      for (auto& neighbour : neighbours)
       {
-        gaps[i] = rts[i + 1] - rts[i];
+        neighbour.second = weight;
       }
-      std::nth_element(gaps.begin(), gaps.begin() + gaps.size() / 2, gaps.end());
-      const double spacing = gaps[gaps.size() / 2];
-      if (!(spacing > 0.0))
-      {
-        throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-            "Median frame spacing is not positive; cannot solve rt_FWHM from aggregation:frames_per_side", String(spacing));
-      }
-
-      const double half_width_per_fwhm = std::sqrt(-std::log(cutoff) / (4.0 * std::log(2.0)));
-      return (frames_per_side + 0.5) * spacing / half_width_per_fwhm;
-    }
-
-    double PeakPickerIM::aggregationRtFwhm(const std::vector<double>& rts) const
-    {
-      return aggregationRtFwhm(rts, aggregation_frames_per_side_, aggregation_cutoff_, aggregation_rt_fwhm_);
+      return neighbours;
     }
 
     void PeakPickerIM::pickExperimentWithAggregation(MSExperiment& exp)
@@ -1424,8 +1405,22 @@ namespace OpenMS
         return;
       }
 
-      // Gaussian weighting parameters
+      // Gaussian weighting parameters (not used when aggregating by a number of frames)
+      double fwhm = aggregation_rt_fwhm_;
+      double factor = -4.0 * std::log(2.0) / (fwhm * fwhm);
       double cutoff = aggregation_cutoff_;
+      const bool by_frames = aggregation_frames_per_side_ >= 0;
+
+      if (by_frames)
+      {
+        OPENMS_LOG_INFO << "pickExperimentWithAggregation: Using equal weights over " << aggregation_frames_per_side_
+                        << " frames on each side\n";
+      }
+      else
+      {
+        OPENMS_LOG_INFO << "pickExperimentWithAggregation: Using rt_FWHM=" << fwhm
+                        << "s, cutoff=" << cutoff << "\n";
+      }
 
       // Build list of MS1 spectrum indices
       std::vector<Size> ms1_indices;
@@ -1451,18 +1446,6 @@ namespace OpenMS
       double rt_max = exp[ms1_indices.back()].getRT();
       OPENMS_LOG_INFO << "pickExperimentWithAggregation: MS1 RT range: [" << rt_min << ", " << rt_max << "] seconds.\n";
 
-      std::vector<double> ms1_rts;
-      ms1_rts.reserve(ms1_indices.size());
-      for (Size i : ms1_indices)
-      {
-        ms1_rts.push_back(exp[i].getRT());
-      }
-      const double fwhm = aggregationRtFwhm(ms1_rts);
-      const double factor = -4.0 * std::log(2.0) / (fwhm * fwhm);
-
-      OPENMS_LOG_INFO << "pickExperimentWithAggregation: Using rt_FWHM=" << fwhm
-                      << "s, cutoff=" << cutoff << "\n";
-
       // Check if first MS1 spectrum has IM data - required for PeakPickerIM
       if (!exp[ms1_indices[0]].containsIMData())
       {
@@ -1472,13 +1455,24 @@ namespace OpenMS
       }
 
 
-      // Build AggregationBlocks: for each spectrum, collect neighbors with Gaussian weights
+      // Build AggregationBlocks: for each spectrum, collect neighbors with Gaussian weights (or equal weights when aggregating by frames)
       AggregationBlocks aggregation_blocks;
 
       for (Size idx = 0; idx < ms1_indices.size(); ++idx)
       {
         Size center_exp_idx = ms1_indices[idx];
         double center_rt = exp[center_exp_idx].getRT();
+
+        if (by_frames)
+        {
+          std::vector<std::pair<Size, double>> frames = equalWeightNeighbours(ms1_indices.size(), idx, aggregation_frames_per_side_);
+          for (auto& frame : frames)
+          {
+            frame.first = ms1_indices[frame.first];
+          }
+          aggregation_blocks[center_exp_idx] = std::move(frames);
+          continue;
+        }
 
         std::vector<std::pair<Size, double>> neighbors_with_weights;
 
