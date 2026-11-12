@@ -148,6 +148,7 @@ namespace OpenMS
      * Uses parameters:
      * - aggregation:rt_FWHM: Full width at half maximum for Gaussian weighting (in seconds)
      * - aggregation:cutoff: Weight threshold below which spectra are not included
+     * - aggregation:frames_per_side: if >= 0, rt_FWHM is solved from the frame spacing (see aggregationRtFwhm())
      *
      * @param[in,out] exp The experiment to process. Each MS1 spectrum will be replaced with
      *                    an aggregated version combining signal from neighboring scans.
@@ -155,6 +156,29 @@ namespace OpenMS
      * @throws Exception::InvalidValue if no ion mobility data is detected in the experiment.
      */
     void pickExperimentWithAggregation(MSExperiment& exp);
+
+    /**
+     * @brief The rt_FWHM (seconds) to aggregate with.
+     *
+     * If aggregation:frames_per_side is negative, this is aggregation:rt_FWHM as given. Otherwise it is
+     * solved so that a regular frame grid pools exactly frames_per_side frames on each side of the centre frame.
+     *
+     * A neighbour is pooled while its weight exp(-4 ln2 d^2 / FWHM^2) is at least aggregation:cutoff, i.e. up to
+     * the half-width d = FWHM * sqrt(-ln(cutoff) / (4 ln2)). The half-width is set midway between the k-th and
+     * (k+1)-th frame, (k + 0.5) * spacing, so frame-time jitter of up to half a spacing does not change the count.
+     *
+     * @param[in] rts Retention times (seconds) of the frames that are aggregated together (one MS level, one window)
+     * @param[in] frames_per_side frames pooled on each side; negative = use aggregation:rt_FWHM
+     * @param[in] cutoff weight below which a frame is not pooled
+     * @param[in] rt_fwhm aggregation:rt_FWHM, returned when frames_per_side is negative
+     * @return the rt_FWHM in seconds
+     * @throws Exception::InvalidValue if frames_per_side is non-negative and the spacing cannot be determined
+     *         (fewer than two frames, or a median gap that is not positive)
+     */
+    static double aggregationRtFwhm(std::vector<double> rts, int frames_per_side, double cutoff, double rt_fwhm);
+
+    /// aggregationRtFwhm() with this picker's aggregation parameters
+    double aggregationRtFwhm(const std::vector<double>& rts) const;
 
     /**
      * @brief Estimates the spacing of the raw m/z lattice in sqrt(m/z) (one m/z column).
@@ -256,6 +280,7 @@ namespace OpenMS
 
     double aggregation_rt_fwhm_{1.0};   ///< Gaussian FWHM for RT-based weighting (in seconds)
     double aggregation_cutoff_{0.01};   ///< Weight cutoff for including spectra in aggregation
+    int aggregation_frames_per_side_{-1}; ///< Frames pooled on each side of the centre frame; negative = use aggregation_rt_fwhm_
 
 #if 0
     /// Flag to track if CCS tolerance warning has been shown (mutable for const methods)

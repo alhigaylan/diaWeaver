@@ -87,6 +87,22 @@ protected:
   /// Aggregate a single spectrum with its RT neighbors using Gaussian weighting.
   /// Reads from the immutable source experiment; safe to call from a parallel loop
   /// that writes picked results into a separate output experiment.
+  /// Picker parameters with aggregation:rt_FWHM solved from the frame spacing of exp when aggregation:frames_per_side >= 0
+  /// (a lone frame has no neighbours to pool, so its parameters are left as given)
+  static Param withSolvedRtFwhm_(const Param& picker_params, const MSExperiment& exp)
+  {
+    Param solved = picker_params;
+    if (exp.size() < 2) return solved;
+
+    std::vector<double> rts;
+    rts.reserve(exp.size());
+    for (const MSSpectrum& spec : exp) rts.push_back(spec.getRT());
+    PeakPickerIM picker;
+    picker.setParameters(picker_params);
+    solved.setValue("aggregation:rt_FWHM", picker.aggregationRtFwhm(rts));
+    return solved;
+  }
+
   static void aggregateSpectrum_(
     const MSExperiment& exp,
     Size center_idx,
@@ -1010,16 +1026,17 @@ protected:
         // original neighbors. Each thread writes to a unique index in ms2_picked.
         MSExperiment ms2_picked;
         ms2_picked.resize(ms2_exp.size());
+        const Param ms2_window_params = withSolvedRtFwhm_(ppim_ms2_params, ms2_exp);
 
         // Each worker gets its own PeakPickerIM (constructed once, reused across that
         // worker's spectra) and writes to a unique index in ms2_picked -- no cross-thread
         // sharing until all workers have joined below, at which point the move is safe.
         OpenMS::parallelForWithState(
           ms2_exp.size(), static_cast<Size>(inner_threads),
-          [&ppim_ms2_params, mz_grid_step]()
+          [&ms2_window_params, mz_grid_step]()
           {
             PeakPickerIM picker_im;
-            picker_im.setParameters(ppim_ms2_params);
+            picker_im.setParameters(ms2_window_params);
             picker_im.setMzGridStep(mz_grid_step);
             return picker_im;
           },
@@ -1147,13 +1164,14 @@ protected:
           // Parallel aggregation + peak picking (same pattern as MS2)
           MSExperiment prec_picked;
           prec_picked.resize(precursor_exp.size());
+          const Param prec_window_params = withSolvedRtFwhm_(ppim_ms2_params, precursor_exp);
 
           OpenMS::parallelForWithState(
             precursor_exp.size(), static_cast<Size>(inner_threads),
-            [&ppim_ms2_params, mz_grid_step]()
+            [&prec_window_params, mz_grid_step]()
             {
               PeakPickerIM picker_im;
-              picker_im.setParameters(ppim_ms2_params);
+              picker_im.setParameters(prec_window_params);
             picker_im.setMzGridStep(mz_grid_step);
               return picker_im;
             },
@@ -1269,13 +1287,14 @@ protected:
         // Parallel aggregation + peak picking (same pattern as MS2)
         MSExperiment ms1_picked;
         ms1_picked.resize(ms1_exp.size());
+        const Param ms1_window_params = withSolvedRtFwhm_(ppim_params, ms1_exp);
 
         OpenMS::parallelForWithState(
           ms1_exp.size(), static_cast<Size>(inner_threads),
-          [&ppim_params, mz_grid_step]()
+          [&ms1_window_params, mz_grid_step]()
           {
             PeakPickerIM picker_im;
-            picker_im.setParameters(ppim_params);
+            picker_im.setParameters(ms1_window_params);
             picker_im.setMzGridStep(mz_grid_step);
             return picker_im;
           },

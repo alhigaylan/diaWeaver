@@ -147,4 +147,84 @@ START_SECTION(void pickIMTraces(MSSpectrum& spectrum))
 }
 END_SECTION
 
+START_SECTION(static double aggregationRtFwhm(std::vector<double> rts, int frames_per_side, double cutoff, double rt_fwhm))
+{
+    // number of frames on each side of the centre (index centre) whose weight is at least the cutoff
+    auto frames_pooled_per_side = [](const std::vector<double>& rts, size_t centre, double fwhm, double cutoff)
+    {
+        size_t n = 0;
+        for (size_t j = centre + 1; j < rts.size(); ++j)
+        {
+            const double d = rts[j] - rts[centre];
+            if (std::exp(-4.0 * std::log(2.0) * d * d / (fwhm * fwhm)) < cutoff) break;
+            ++n;
+        }
+        return n;
+    };
+
+    const double cutoff = 0.01;
+    const double half_width_per_fwhm = std::sqrt(-std::log(cutoff) / (4.0 * std::log(2.0)));  // 1.2888
+    const double spacing = 0.738;
+    std::vector<double> grid;
+    for (int i = 0; i < 40; ++i) grid.push_back(i * spacing);
+
+    // negative frames_per_side: rt_FWHM is returned as given
+    TEST_REAL_SIMILAR(PeakPickerIM::aggregationRtFwhm(grid, -1, cutoff, 3.0), 3.0)
+
+    // ±1 frame at 0.738 s spacing: half-width 1.5 * 0.738 s, divided by sqrt(-ln(0.01) / (4 ln 2)) = 1.2888
+    TEST_REAL_SIMILAR(PeakPickerIM::aggregationRtFwhm(grid, 1, cutoff, 3.0), 1.5 * spacing / half_width_per_fwhm)
+
+    // a regular grid pools exactly k frames on each side
+    for (int k : {0, 1, 2, 5})
+    {
+        const double fwhm = PeakPickerIM::aggregationRtFwhm(grid, k, cutoff, 3.0);
+        TEST_EQUAL(frames_pooled_per_side(grid, 20, fwhm, cutoff), static_cast<size_t>(k))
+    }
+
+    // the same count at a different spacing, and with the retention times unsorted
+    std::vector<double> coarse;
+    for (int i = 0; i < 40; ++i) coarse.push_back(i * 1.786);
+    std::vector<double> reversed(coarse.rbegin(), coarse.rend());
+    const double fwhm_coarse = PeakPickerIM::aggregationRtFwhm(reversed, 1, cutoff, 3.0);
+    TEST_REAL_SIMILAR(fwhm_coarse, 1.5 * 1.786 / half_width_per_fwhm)
+    TEST_EQUAL(frames_pooled_per_side(coarse, 20, fwhm_coarse, cutoff), 1u)
+
+    // jitter (gaps of 0.737 to 0.914 s) does not change the count: the median gap sets the width
+    std::vector<double> jittered;
+    double t = 0.0;
+    for (int i = 0; i < 40; ++i)
+    {
+        jittered.push_back(t);
+        t += (i % 10 == 3) ? 0.914 : 0.738;
+    }
+    const double fwhm_jitter = PeakPickerIM::aggregationRtFwhm(jittered, 1, cutoff, 3.0);
+    for (size_t centre = 1; centre + 1 < jittered.size(); ++centre)
+    {
+        TEST_EQUAL(frames_pooled_per_side(jittered, centre, fwhm_jitter, cutoff) >= 1u, true)
+        TEST_EQUAL(frames_pooled_per_side(jittered, centre, fwhm_jitter, cutoff) <= 1u, true)
+    }
+
+    // spacing cannot be determined
+    TEST_EXCEPTION(Exception::InvalidValue, PeakPickerIM::aggregationRtFwhm({1.0}, 1, cutoff, 3.0))
+    TEST_EXCEPTION(Exception::InvalidValue, PeakPickerIM::aggregationRtFwhm({1.0, 1.0, 1.0}, 1, cutoff, 3.0))
+    TEST_EXCEPTION(Exception::InvalidValue, PeakPickerIM::aggregationRtFwhm(grid, 1, 1.5, 3.0))
+}
+END_SECTION
+
+START_SECTION(double aggregationRtFwhm(const std::vector<double>& rts) const)
+{
+    std::vector<double> grid;
+    for (int i = 0; i < 10; ++i) grid.push_back(i * 0.738);
+
+    const double half_width_per_fwhm = std::sqrt(-std::log(0.01) / (4.0 * std::log(2.0)));
+    PeakPickerIM pp_im;
+    TEST_REAL_SIMILAR(pp_im.aggregationRtFwhm(grid), 5.0)  // default: rt_FWHM as given
+
+    Param p = pp_im.getParameters();
+    p.setValue("aggregation:frames_per_side", 1);
+    pp_im.setParameters(p);
+    TEST_REAL_SIMILAR(pp_im.aggregationRtFwhm(grid), 1.5 * 0.738 / half_width_per_fwhm)
+}
+END_SECTION
+
 END_TEST

@@ -668,6 +668,8 @@ namespace OpenMS
       // --- Aggregation parameters ---
       defaults_.setValue("aggregation:rt_FWHM", 5.0, "Full width at half maximum for Gaussian weighting of scans (in seconds)");
       defaults_.setValue("aggregation:cutoff", 0.01, "Weight cutoff below which spectra are not included in aggregation");
+      defaults_.setValue("aggregation:frames_per_side", -1, "Frames pooled on each side of the centre frame (1 = 3 frames). If >= 0, rt_FWHM is solved from the frame spacing of the data and the rt_FWHM parameter is ignored; negative = use rt_FWHM as given");
+      defaults_.setMinInt("aggregation:frames_per_side", -1);
 
       defaultsToParam_();  // copies defaults_ into param_
       defaults_.setValue("pickIMTraces:mz_binning", "ppm", "How raw m/z peaks are summed before m/z peak picking: 'ppm' sums peaks within sum_tolerance_mz ppm of the first peak of a group; 'lattice' sums peaks that fall into the same column of the raw m/z lattice (one step in sqrt(m/z), estimated from the data per file) and ignores sum_tolerance_mz.");
@@ -729,6 +731,7 @@ namespace OpenMS
 
       aggregation_rt_fwhm_ = (double)param_.getValue("aggregation:rt_FWHM");
       aggregation_cutoff_ = (double)param_.getValue("aggregation:cutoff");
+      aggregation_frames_per_side_ = (int)param_.getValue("aggregation:frames_per_side");
     }
 
     namespace
@@ -1373,6 +1376,46 @@ namespace OpenMS
       aggregated_spectrum.setDriftTimeUnit(center_spec.getDriftTimeUnit());
     }
 
+    double PeakPickerIM::aggregationRtFwhm(std::vector<double> rts, int frames_per_side, double cutoff, double rt_fwhm)
+    {
+      if (frames_per_side < 0)
+      {
+        return rt_fwhm;
+      }
+      if (!(cutoff > 0.0 && cutoff < 1.0))
+      {
+        throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+            "aggregation:cutoff must be in (0, 1) to solve rt_FWHM from frames_per_side", String(cutoff));
+      }
+      if (rts.size() < 2)
+      {
+        throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+            "Need at least two frames to determine the frame spacing for aggregation:frames_per_side", String(rts.size()));
+      }
+
+      std::sort(rts.begin(), rts.end());
+      std::vector<double> gaps(rts.size() - 1);
+      for (Size i = 0; i + 1 < rts.size(); ++i)
+      {
+        gaps[i] = rts[i + 1] - rts[i];
+      }
+      std::nth_element(gaps.begin(), gaps.begin() + gaps.size() / 2, gaps.end());
+      const double spacing = gaps[gaps.size() / 2];
+      if (!(spacing > 0.0))
+      {
+        throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+            "Median frame spacing is not positive; cannot solve rt_FWHM from aggregation:frames_per_side", String(spacing));
+      }
+
+      const double half_width_per_fwhm = std::sqrt(-std::log(cutoff) / (4.0 * std::log(2.0)));
+      return (frames_per_side + 0.5) * spacing / half_width_per_fwhm;
+    }
+
+    double PeakPickerIM::aggregationRtFwhm(const std::vector<double>& rts) const
+    {
+      return aggregationRtFwhm(rts, aggregation_frames_per_side_, aggregation_cutoff_, aggregation_rt_fwhm_);
+    }
+
     void PeakPickerIM::pickExperimentWithAggregation(MSExperiment& exp)
     {
       if (exp.empty())
@@ -1382,12 +1425,7 @@ namespace OpenMS
       }
 
       // Gaussian weighting parameters
-      double fwhm = aggregation_rt_fwhm_;
-      double factor = -4.0 * std::log(2.0) / (fwhm * fwhm);
       double cutoff = aggregation_cutoff_;
-
-      OPENMS_LOG_INFO << "pickExperimentWithAggregation: Using rt_FWHM=" << fwhm
-                      << "s, cutoff=" << cutoff << "\n";
 
       // Build list of MS1 spectrum indices
       std::vector<Size> ms1_indices;
@@ -1412,6 +1450,18 @@ namespace OpenMS
       double rt_min = exp[ms1_indices.front()].getRT();
       double rt_max = exp[ms1_indices.back()].getRT();
       OPENMS_LOG_INFO << "pickExperimentWithAggregation: MS1 RT range: [" << rt_min << ", " << rt_max << "] seconds.\n";
+
+      std::vector<double> ms1_rts;
+      ms1_rts.reserve(ms1_indices.size());
+      for (Size i : ms1_indices)
+      {
+        ms1_rts.push_back(exp[i].getRT());
+      }
+      const double fwhm = aggregationRtFwhm(ms1_rts);
+      const double factor = -4.0 * std::log(2.0) / (fwhm * fwhm);
+
+      OPENMS_LOG_INFO << "pickExperimentWithAggregation: Using rt_FWHM=" << fwhm
+                      << "s, cutoff=" << cutoff << "\n";
 
       // Check if first MS1 spectrum has IM data - required for PeakPickerIM
       if (!exp[ms1_indices[0]].containsIMData())
