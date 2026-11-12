@@ -100,8 +100,8 @@ namespace OpenMS
         {
           output_spectrum.emplace_back(current_mz, current_intensity);
           current_mz = next_mz;
-          current_sqrt_mz = std::sqrt(current_mz);
           current_intensity = next_intensity;
+          current_sqrt_mz = std::sqrt(current_mz);
         }
       }
       output_spectrum.emplace_back(current_mz, current_intensity);
@@ -287,10 +287,97 @@ namespace OpenMS
       return false;
     }
 
+    namespace
+    {
+      // log P(X >= k) for X ~ Binomial(N, p); stays finite where the probability itself underflows
+      double logBinomialTail(Size k, Size N, double p)
+      {
+        if (k == 0) return 0.0;
+        if (k > N) return -std::numeric_limits<double>::infinity();
+        const double lp = std::log(p), lq = std::log1p(-p), lgN = std::lgamma(static_cast<double>(N) + 1.0);
+        double max_term = -std::numeric_limits<double>::infinity();
+        std::vector<double> terms;
+        terms.reserve(N - k + 1);
+        for (Size j = k; j <= N; ++j)
+        {
+          const double t = lgN - std::lgamma(static_cast<double>(j) + 1.0) - std::lgamma(static_cast<double>(N - j) + 1.0)
+                           + static_cast<double>(j) * lp + static_cast<double>(N - j) * lq;
+          terms.push_back(t);
+          max_term = std::max(max_term, t);
+        }
+        double sum = 0.0;
+        for (const double t : terms) sum += std::exp(t - max_term);
+        return std::min(0.0, max_term + std::log(sum));
+      }
+
+      // number of raw peaks (m/z-sorted spectrum with ion mobility array) inside [mz_lo, mz_hi] x [im_lo, im_hi]
+      Size countRawInBox(const MSSpectrum& raw, const MSSpectrum::FloatDataArray& im,
+                         double mz_lo, double mz_hi, double im_lo, double im_hi)
+      {
+        const auto last = raw.MZEnd(mz_hi);
+        Size n = 0;
+        for (auto it = raw.MZBegin(mz_lo); it != last; ++it)
+        {
+          const double v = im[it - raw.begin()];
+          if (v >= im_lo && v <= im_hi) ++n;
+        }
+        return n;
+      }
+
+      // exact median intensity of the raw peaks (m/z-sorted spectrum with ion mobility array) inside [mz_lo, mz_hi] x [im_lo, im_hi],
+      // 0 if there are none; the number of raw peaks is returned in n. scratch is reused between calls to avoid allocations.
+      double medianRawIntensityInBox(const MSSpectrum& raw, const MSSpectrum::FloatDataArray& im,
+                                     double mz_lo, double mz_hi, double im_lo, double im_hi,
+                                     std::vector<double>& scratch, Size& n)
+      {
+        scratch.clear();
+        const auto last = raw.MZEnd(mz_hi);
+        for (auto it = raw.MZBegin(mz_lo); it != last; ++it)
+        {
+          const double v = im[it - raw.begin()];
+          if (v >= im_lo && v <= im_hi) scratch.push_back(it->getIntensity());
+        }
+        n = scratch.size();
+        if (scratch.empty()) return 0.0;
+        auto mid = scratch.begin() + scratch.size() / 2;
+        std::nth_element(scratch.begin(), mid, scratch.end());
+        return *mid;
+      }
+    }
+
     MSSpectrum PeakPickerIM::computeCentroids_(const vector<Mobilogram>& mobilogram_traces,
-                              const vector<Mobilogram>& picked_traces)
+                              const vector<Mobilogram>& picked_traces,
+                              const MSSpectrum& raw_spectrum,
+                              const std::vector<std::pair<double, double>>& mz_windows)
     {
       MSSpectrum centroided_frame;
+      const bool use_background_test = max_background_pvalue_ < 1.0;
+      const bool use_noise_test = min_signal_to_noise_ > 0.0;
+      const MSSpectrum::FloatDataArray* raw_im = nullptr;
+      // Probability that a raw peak of the background test lands in the box, if the box and the ring are equally dense:
+      // the box has area 1 (box units), the ring has area outer^2 - inner^2
+      const double box_to_ring_probability = 1.0 / (1.0 + background_ring_outer_ * background_ring_outer_
+                                                        - background_ring_inner_ * background_ring_inner_);
+      const double log_max_background_pvalue = std::log(max_background_pvalue_);
+      if (use_background_test)
+      {
+        if (!raw_spectrum.containsIMData() || mz_windows.size() != picked_traces.size())
+        {
+          throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+                                        "pickIMTraces:max_background_pvalue needs the raw ion mobility data and one m/z window per picked trace",
+                                        String(max_background_pvalue_));
+        }
+      }
+      if (use_noise_test && !raw_spectrum.containsIMData())
+      {
+        throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+                                      "pickIMTraces:min_signal_to_noise needs the raw ion mobility data",
+                                      String(min_signal_to_noise_));
+      }
+      if (use_background_test || use_noise_test)
+      {
+        raw_im = &raw_spectrum.getFloatDataArrays()[raw_spectrum.getIMData().first];
+      }
       const bool use_neighbors = neighbor_filter_;
       if (use_neighbors && !(mz_grid_step_ > 0.0))
       {
@@ -360,7 +447,8 @@ namespace OpenMS
         vector<size_t> indices;
         vector<double> sorted_mz;
         vector<double> sorted_intensity;
-        
+        vector<double> noise_scratch;
+
         // Iterate through picked peaks in this trace
         for (Size j = 0; j < picked_trace.size(); ++j)
         {
@@ -419,6 +507,52 @@ namespace OpenMS
               !hasNeighborSupport_(raw_peaks_within_bounds))
           {
             continue;
+          }
+
+          // Peaks whose raw peaks are not significantly denser than the local background are not reported.
+          // The box is the m/z window of the picked peak times its ion mobility FWHM; the background is the ring
+          // between the box scaled by background_ring_inner and by background_ring_outer (both dimensions).
+          // The test is the exact binomial tail P(X >= n_box) of finding n_box of the (n_box + ring) raw peaks in the box,
+          // when each falls in the box with the probability given by the area of the box relative to the ring.
+          if (use_background_test)
+          {
+            const double mz_centre = 0.5 * (mz_windows[i].first + mz_windows[i].second);
+            const double mz_width = mz_windows[i].second - mz_windows[i].first;
+            const Size n_box = raw_peaks_within_bounds.size();
+            const Size n_inner = countRawInBox(raw_spectrum, *raw_im,
+                                               mz_centre - 0.5 * background_ring_inner_ * mz_width, mz_centre + 0.5 * background_ring_inner_ * mz_width,
+                                               centroid_im - 0.5 * background_ring_inner_ * fwhm, centroid_im + 0.5 * background_ring_inner_ * fwhm);
+            const Size n_outer = countRawInBox(raw_spectrum, *raw_im,
+                                               mz_centre - 0.5 * background_ring_outer_ * mz_width, mz_centre + 0.5 * background_ring_outer_ * mz_width,
+                                               centroid_im - 0.5 * background_ring_outer_ * fwhm, centroid_im + 0.5 * background_ring_outer_ * fwhm);
+            const Size n_ring = n_outer > n_inner ? n_outer - n_inner : 0;
+            if (logBinomialTail(n_box, n_box + n_ring, box_to_ring_probability) > log_max_background_pvalue)
+            {
+              continue;
+            }
+          }
+
+          // Peaks whose apex is not sufficiently above the noise are not reported. As in PeakPickerHiRes the noise is the median
+          // intensity of the raw peaks in a window (here noise_window_mz x noise_window_im centred on the box); the apex is the most
+          // intense raw peak of the box. A window without signal (median 0) gives no noise estimate and does not reject.
+          if (use_noise_test)
+          {
+            double box_mz = 0.0, apex = 0.0;
+            for (const Peak1D& raw_peak : raw_peaks_within_bounds)
+            {
+              box_mz += raw_peak.getMZ();
+              apex = std::max<double>(apex, raw_peak.getIntensity());
+            }
+            box_mz /= raw_peaks_within_bounds.size();
+            Size n_window = 0;
+            const double noise = medianRawIntensityInBox(raw_spectrum, *raw_im,
+                                                         box_mz - 0.5 * noise_window_mz_, box_mz + 0.5 * noise_window_mz_,
+                                                         centroid_im - 0.5 * noise_window_im_, centroid_im + 0.5 * noise_window_im_,
+                                                         noise_scratch, n_window);
+            if (apex < min_signal_to_noise_ * noise)
+            {
+              continue;
+            }
           }
 
           // If we only retrieved one raw peak, pass it over to centroided_frame as is
@@ -650,8 +784,23 @@ namespace OpenMS
       defaults_.setValidStrings("pickIMTraces:gauss_exact_kernel", {"true","false"});
       defaults_.setValue("pickIMTraces:sgolay_frame_length",     5,     "Savitzky-Golay smoothing frame length");
       defaults_.setValue("pickIMTraces:sgolay_polynomial_order", 3,     "Savitzky-Golay smoothing polynomial order");
+      defaults_.setValue("pickIMTraces:mz_binning", "ppm", "How raw m/z peaks are summed before m/z peak picking: 'ppm' sums peaks within sum_tolerance_mz ppm of the first peak of a group; 'lattice' sums peaks that fall into the same column of the raw m/z lattice (one step in sqrt(m/z), estimated from the data per file) and ignores sum_tolerance_mz.");
+      defaults_.setValidStrings("pickIMTraces:mz_binning", {"ppm","lattice"});
       defaults_.setValue("pickIMTraces:min_raw_peaks", 1, "Minimum number of raw peaks within the m/z and ion mobility bounds of a picked peak for it to be reported. 1 = report all picked peaks.");
       defaults_.setMinInt("pickIMTraces:min_raw_peaks", 1);
+      defaults_.setValue("pickIMTraces:max_background_pvalue", 1.0, "Report a picked peak only if its raw peaks are significantly denser than the local background. The box is the m/z window of the picked peak times its ion mobility FWHM, the background is the ring between the box scaled by background_ring_inner and by background_ring_outer (m/z and ion mobility). The p-value is the exact binomial tail probability of finding at least the observed number of the box and ring raw peaks in the box, given the area of the box relative to the ring. Peaks with a larger p-value are dropped. 1 = off.");
+      defaults_.setMinFloat("pickIMTraces:max_background_pvalue", 0.0);
+      defaults_.setMaxFloat("pickIMTraces:max_background_pvalue", 1.0);
+      defaults_.setValue("pickIMTraces:background_ring_inner", 2.5, "max_background_pvalue only: inner edge of the background ring, as a multiple of the box size (the gap between the box and the ring is not counted).");
+      defaults_.setMinFloat("pickIMTraces:background_ring_inner", 1.0);
+      defaults_.setValue("pickIMTraces:background_ring_outer", 4.0, "max_background_pvalue only: outer edge of the background ring, as a multiple of the box size. Must be larger than background_ring_inner.");
+      defaults_.setMinFloat("pickIMTraces:background_ring_outer", 1.0);
+      defaults_.setValue("pickIMTraces:min_signal_to_noise", 0.0, "Report a picked peak only if its most intense raw peak (the apex) is at least this many times the noise, the median intensity of the raw peaks in a window of noise_window_mz x noise_window_im centred on the peak. 0 = off.");
+      defaults_.setMinFloat("pickIMTraces:min_signal_to_noise", 0.0);
+      defaults_.setValue("pickIMTraces:noise_window_mz", 200.0, "min_signal_to_noise only: total width of the noise window in m/z (Th).");
+      defaults_.setMinFloat("pickIMTraces:noise_window_mz", 0.0);
+      defaults_.setValue("pickIMTraces:noise_window_im", 0.04, "min_signal_to_noise only: total width of the noise window in ion mobility (same unit as the data).");
+      defaults_.setMinFloat("pickIMTraces:noise_window_im", 0.0);
       defaults_.setValue("pickIMTraces:neighbor_filter", "false", "Report a picked peak only if its raw peaks are supported by m/z neighbours: either one m/z column holds at least singleton_column_min_peaks raw peaks, or two occupied columns are at most neighbor_max_column_gap columns apart. A column is one step of the raw m/z lattice in sqrt(m/z), which is estimated from the data.");
       defaults_.setValidStrings("pickIMTraces:neighbor_filter", {"true","false"});
       defaults_.setValue("pickIMTraces:neighbor_max_column_gap", 1, "neighbor_filter only: two occupied m/z columns count as neighbours if they are at most this many columns apart (1 = adjacent columns, 2 = at most one empty column between them).");
@@ -672,8 +821,6 @@ namespace OpenMS
       defaults_.setMinInt("aggregation:frames_per_side", -1);
 
       defaultsToParam_();  // copies defaults_ into param_
-      defaults_.setValue("pickIMTraces:mz_binning", "ppm", "How raw m/z peaks are summed before m/z peak picking: 'ppm' sums peaks within sum_tolerance_mz ppm of the first peak of a group; 'lattice' sums peaks that fall into the same column of the raw m/z lattice (one step in sqrt(m/z), estimated from the data per file) and ignores sum_tolerance_mz.");
-      defaults_.setValidStrings("pickIMTraces:mz_binning", {"ppm","lattice"});
       updateMembers_();    // caches into member variables
     }
     void PeakPickerIM::updateMembers_()
@@ -685,7 +832,19 @@ namespace OpenMS
       sgolay_frame_length_   = (int)param_.getValue("pickIMTraces:sgolay_frame_length");
       sgolay_polynomial_order_= (int)param_.getValue("pickIMTraces:sgolay_polynomial_order");
       min_raw_peaks_ = static_cast<Size>((int)param_.getValue("pickIMTraces:min_raw_peaks"));
+      max_background_pvalue_ = (double)param_.getValue("pickIMTraces:max_background_pvalue");
+      background_ring_inner_ = (double)param_.getValue("pickIMTraces:background_ring_inner");
+      background_ring_outer_ = (double)param_.getValue("pickIMTraces:background_ring_outer");
+      if (!(background_ring_outer_ > background_ring_inner_))
+      {
+        throw Exception::InvalidParameter(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+                                          "pickIMTraces:background_ring_outer must be larger than pickIMTraces:background_ring_inner");
+      }
+      min_signal_to_noise_ = (double)param_.getValue("pickIMTraces:min_signal_to_noise");
+      noise_window_mz_ = (double)param_.getValue("pickIMTraces:noise_window_mz");
+      noise_window_im_ = (double)param_.getValue("pickIMTraces:noise_window_im");
       neighbor_filter_ = param_.getValue("pickIMTraces:neighbor_filter").toBool();
+      mz_lattice_binning_ = (param_.getValue("pickIMTraces:mz_binning").toString() == "lattice");
       neighbor_max_column_gap_ = (int)param_.getValue("pickIMTraces:neighbor_max_column_gap");
       singleton_column_min_peaks_ = (int)param_.getValue("pickIMTraces:singleton_column_min_peaks");
 
@@ -706,7 +865,6 @@ namespace OpenMS
       resampler_param.setValue("spacing", mobilogram_sampling_grid_);
       resampler_param.setValue("ppm", "false");
       lin_resampler_.setParameters(resampler_param);
-      mz_lattice_binning_ = (param_.getValue("pickIMTraces:mz_binning").toString() == "lattice");
 
       Param sgolay_params;
       sgolay_params.setValue("frame_length", sgolay_frame_length_);
@@ -777,6 +935,12 @@ namespace OpenMS
 
     void PeakPickerIM::pickIMTraces(MSSpectrum& spectrum)
     {
+      if (mz_lattice_binning_ && !(mz_grid_step_ > 0.0))
+      {
+        throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
+                                      "pickIMTraces:mz_binning = lattice requires the m/z grid step; call setMzGridStep(estimateMzGridStep(...)) first",
+                                      String(mz_grid_step_));
+      }
       // Only process MS1 spectra; non-MS1 spectra are passed through unchanged
       if (spectrum.getMSLevel() != 1)
       {
@@ -797,12 +961,6 @@ namespace OpenMS
       // ------------------------------------------ mass-to-charge peak picking -------------------------------------
       // ------------------------------------------ Step a1: Sum m/z peaks ------------------------------------------
       // project all timsTOF peaks into the m/z axis using sumFrame_
-      if (mz_lattice_binning_ && !(mz_grid_step_ > 0.0))
-      {
-        throw Exception::InvalidValue(__FILE__, __LINE__, OPENMS_PRETTY_FUNCTION,
-                                      "pickIMTraces:mz_binning = lattice requires the m/z grid step; call setMzGridStep(estimateMzGridStep(...)) first",
-                                      String(mz_grid_step_));
-      }
       // The ppm tolerance is a dynamic way of testing m/z floats being almost identical. The raw intensity is summed.
       MSSpectrum summed_spectrum;
       sumFrame_(spectrum, summed_spectrum, sum_tolerance_mz_, true);
@@ -847,6 +1005,28 @@ namespace OpenMS
       // (currently we have this hard-coded as +20 raw peaks in a mobilogram to be considered well-populated).
 
       auto mobilogram_traces = PeakPickerIM::extractIonMobilityTraces(picked_spectrum, spectrum);
+
+      // m/z window of every non-empty mobilogram, in the order of mobilogram_traces after the empty ones are removed below.
+      // It is the window extractIonMobilityTraces() used to collect the raw peaks of each picked m/z peak.
+      std::vector<std::pair<double, double>> mz_windows;
+      if (max_background_pvalue_ < 1.0)
+      {
+        const MSSpectrum::FloatDataArray* fwhm_ppm_array = nullptr;
+        for (const auto& array : picked_spectrum.getFloatDataArrays())
+        {
+          if (array.getName() == "FWHM_ppm") { fwhm_ppm_array = &array; break; }
+        }
+        if (fwhm_ppm_array != nullptr && mobilogram_traces.size() == picked_spectrum.size())
+        {
+          for (Size t = 0; t < picked_spectrum.size(); ++t)
+          {
+            if (!mobilogram_traces[t].empty())
+            {
+              mz_windows.push_back(ppmBounds(picked_spectrum[t].getMZ(), (*fwhm_ppm_array)[t]));
+            }
+          }
+        }
+      }
 
       // ************************************************* PART II *****************************************************
       // ------------------------------------------ Ion mobility peak picking ------------------------------------------
@@ -896,7 +1076,7 @@ namespace OpenMS
       }
 
       // Recompute m/z centers and output centroided frame
-      MSSpectrum centroided_frame = computeCentroids_(mobilogram_traces, picked_traces);
+      MSSpectrum centroided_frame = computeCentroids_(mobilogram_traces, picked_traces, spectrum, mz_windows);
 
       // Remove extra FDAs (IM FWHM, MZ FWHM)
       removeAllFloatDataArraysExcept(centroided_frame, Constants::UserParam::ION_MOBILITY_CENTROID);
