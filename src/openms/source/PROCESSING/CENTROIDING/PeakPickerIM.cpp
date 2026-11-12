@@ -71,11 +71,11 @@ namespace OpenMS
 
       double current_mz = input_spectrum[0].getMZ();
       double current_intensity = input_spectrum[0].getIntensity();
+      double current_sqrt_mz = std::sqrt(current_mz);
+      const double half_column = 0.5 * mz_grid_step_;
 
       for (Size i = 1; i < input_spectrum.size(); ++i)
       {
-      double current_sqrt_mz = std::sqrt(current_mz);
-      const double half_column = 0.5 * mz_grid_step_;
         double next_mz = input_spectrum[i].getMZ();
         double next_intensity = input_spectrum[i].getIntensity();
 
@@ -100,11 +100,11 @@ namespace OpenMS
         {
           output_spectrum.emplace_back(current_mz, current_intensity);
           current_mz = next_mz;
+          current_sqrt_mz = std::sqrt(current_mz);
           current_intensity = next_intensity;
         }
       }
       output_spectrum.emplace_back(current_mz, current_intensity);
-          current_sqrt_mz = std::sqrt(current_mz);
     }
 
     // We use peak FWHM (from PeakPickerHiRes) to extract ion mobility traces.
