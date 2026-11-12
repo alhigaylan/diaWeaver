@@ -224,8 +224,7 @@ namespace OpenMS
     /// compute m/z and ion mobility centers for picked traces. Returns centroided spectrum.
     MSSpectrum computeCentroids_(const std::vector<Mobilogram>& mobilogram_traces,
                               const std::vector<Mobilogram>& picked_traces,
-                              const MSSpectrum& raw_spectrum,
-                              const std::vector<std::pair<double, double>>& mz_windows);
+                              const MSSpectrum& raw_spectrum);
 
     /**
      * @brief m/z-column neighbour support of the raw peaks of a picked peak box.
@@ -251,9 +250,6 @@ namespace OpenMS
     int sgolay_frame_length_{5};
     int sgolay_polynomial_order_{3};
     Size min_raw_peaks_{1};
-    double max_background_pvalue_{1.0};
-    double background_ring_inner_{2.5};
-    double background_ring_outer_{4.0};
     double min_signal_to_noise_{0.0};
     double noise_window_mz_{200.0};
     double noise_window_im_{0.04};
