@@ -736,7 +736,7 @@ namespace OpenMS
       // --- Aggregation parameters ---
       defaults_.setValue("aggregation:rt_FWHM", 5.0, "Full width at half maximum for Gaussian weighting of scans (in seconds)");
       defaults_.setValue("aggregation:cutoff", 0.01, "Weight cutoff below which spectra are not included in aggregation");
-      defaults_.setValue("aggregation:frames_per_side", -1, "Frames pooled on each side of the centre frame, with equal weights (1 = 3 frames). If >= 0 the Gaussian weighting is not used and rt_FWHM and cutoff are ignored; negative = Gaussian weights from rt_FWHM and cutoff");
+      defaults_.setValue("aggregation:frames_per_side", -1, "Frames on each side of the centre frame whose peaks are copied unscaled into it (1 = 3 frames). If >= 0 no weights are used and rt_FWHM and cutoff are ignored; negative = Gaussian weights from rt_FWHM and cutoff");
       defaults_.setMinInt("aggregation:frames_per_side", -1);
 
       defaultsToParam_();  // copies defaults_ into param_
@@ -1333,6 +1333,12 @@ namespace OpenMS
     }
 
     void PeakPickerIM::aggregateScans(const std::vector<const MSSpectrum*>& spectra,
+                                       MSSpectrum& aggregated_spectrum) const
+    {
+      aggregateScans(spectra, std::vector<double>(spectra.size(), 1.0), aggregated_spectrum);
+    }
+
+    void PeakPickerIM::aggregateScans(const std::vector<const MSSpectrum*>& spectra,
                                        const std::vector<double>& weights,
                                        MSSpectrum& aggregated_spectrum) const
     {
@@ -1445,25 +1451,18 @@ namespace OpenMS
       aggregated_spectrum.setDriftTimeUnit(center_spec.getDriftTimeUnit());
     }
 
-    std::vector<std::pair<Size, double>> PeakPickerIM::equalWeightNeighbours(Size n_frames, Size centre, Size frames_per_side)
+    std::vector<Size> PeakPickerIM::neighbouringFrames(Size n_frames, Size centre, Size frames_per_side)
     {
-      std::vector<std::pair<Size, double>> neighbours;
-      neighbours.emplace_back(centre, 0.0);
+      std::vector<Size> frames{centre};
       for (Size j = centre + 1; j < n_frames && j <= centre + frames_per_side; ++j)
       {
-        neighbours.emplace_back(j, 0.0);
+        frames.push_back(j);
       }
       for (Size j = centre; j-- > 0 && centre - j <= frames_per_side;)
       {
-        neighbours.emplace_back(j, 0.0);
+        frames.push_back(j);
       }
-
-      const double weight = 1.0 / neighbours.size();
-      for (auto& neighbour : neighbours)
-      {
-        neighbour.second = weight;
-      }
-      return neighbours;
+      return frames;
     }
 
     void PeakPickerIM::pickExperimentWithAggregation(MSExperiment& exp)
@@ -1482,7 +1481,7 @@ namespace OpenMS
 
       if (by_frames)
       {
-        OPENMS_LOG_INFO << "pickExperimentWithAggregation: Using equal weights over " << aggregation_frames_per_side_
+        OPENMS_LOG_INFO << "pickExperimentWithAggregation: Copying the peaks of " << aggregation_frames_per_side_
                         << " frames on each side\n";
       }
       else
@@ -1524,7 +1523,7 @@ namespace OpenMS
       }
 
 
-      // Build AggregationBlocks: for each spectrum, collect neighbors with Gaussian weights (or equal weights when aggregating by frames)
+      // Build AggregationBlocks: for each spectrum, collect neighbors with Gaussian weights (or the neighbouring frames, copied unscaled, when aggregating by frames)
       AggregationBlocks aggregation_blocks;
 
       for (Size idx = 0; idx < ms1_indices.size(); ++idx)
@@ -1534,10 +1533,10 @@ namespace OpenMS
 
         if (by_frames)
         {
-          std::vector<std::pair<Size, double>> frames = equalWeightNeighbours(ms1_indices.size(), idx, aggregation_frames_per_side_);
-          for (auto& frame : frames)
+          std::vector<std::pair<Size, double>> frames;
+          for (const Size frame : neighbouringFrames(ms1_indices.size(), idx, aggregation_frames_per_side_))
           {
-            frame.first = ms1_indices[frame.first];
+            frames.emplace_back(ms1_indices[frame], 1.0); // peaks are copied unscaled
           }
           aggregation_blocks[center_exp_idx] = std::move(frames);
           continue;

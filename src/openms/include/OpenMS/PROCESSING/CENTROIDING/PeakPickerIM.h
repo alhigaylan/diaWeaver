@@ -138,6 +138,14 @@ namespace OpenMS
                         MSSpectrum& aggregated_spectrum) const;
 
     /**
+     * @brief Copies the peaks of all given spectra into one spectrum, unscaled and merged by m/z; no weights are applied.
+     *
+     * The center spectrum must be at index 0 and provides the metadata. All input spectra must contain ion mobility data.
+     */
+    void aggregateScans(const std::vector<const MSSpectrum*>& spectra,
+                        MSSpectrum& aggregated_spectrum) const;
+
+    /**
      * @brief Aggregates adjacent scans in an experiment using Gaussian-weighted signal boosting.
      *
      * For each MS1 spectrum in the experiment, this method aggregates adjacent scans using
@@ -148,7 +156,7 @@ namespace OpenMS
      * Uses parameters:
      * - aggregation:rt_FWHM: Full width at half maximum for Gaussian weighting (in seconds)
      * - aggregation:cutoff: Weight threshold below which spectra are not included
-     * - aggregation:frames_per_side: if >= 0, pool this many frames on each side with equal weights; rt_FWHM and cutoff are then not used
+     * - aggregation:frames_per_side: if >= 0, copy the peaks of this many frames on each side into the centre frame, unscaled; no weights, rt_FWHM and cutoff are then not used
      *
      * @param[in,out] exp The experiment to process. Each MS1 spectrum will be replaced with
      *                    an aggregated version combining signal from neighboring scans.
@@ -158,19 +166,18 @@ namespace OpenMS
     void pickExperimentWithAggregation(MSExperiment& exp);
 
     /**
-     * @brief Frames pooled around a centre frame when aggregating by a number of frames
+     * @brief Frames whose peaks are copied into a centre frame when aggregating by a number of frames
      * (aggregation:frames_per_side >= 0), instead of by Gaussian weights.
      *
      * The centre frame comes first, then up to frames_per_side following frames, then up to
-     * frames_per_side preceding frames (fewer near the ends of the experiment). Frames are taken by position, and
-     * each gets the same weight, 1 / (number of frames pooled), so the weights sum to 1.
+     * frames_per_side preceding frames (fewer near the ends of the experiment). Frames are taken by position.
      *
      * @param[in] n_frames number of frames that are aggregated together (one MS level, one window)
      * @param[in] centre index of the centre frame, must be smaller than n_frames
      * @param[in] frames_per_side frames pooled on each side of the centre frame
-     * @return pairs of frame index and weight
+     * @return indices of the frames, the centre frame first
      */
-    static std::vector<std::pair<Size, double>> equalWeightNeighbours(Size n_frames, Size centre, Size frames_per_side);
+    static std::vector<Size> neighbouringFrames(Size n_frames, Size centre, Size frames_per_side);
 
     /**
      * @brief Estimates the spacing of the raw m/z lattice in sqrt(m/z) (one m/z column).

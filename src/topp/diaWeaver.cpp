@@ -84,7 +84,7 @@ public:
 
 protected:
 
-  /// Aggregate a single spectrum with its RT neighbors using Gaussian weighting, or with equal weights over
+  /// Aggregate a single spectrum with its RT neighbors using Gaussian weighting, or by copying the peaks of
   /// aggregation:frames_per_side frames on each side if that is set.
   /// Reads from the immutable source experiment; safe to call from a parallel loop
   /// that writes picked results into a separate output experiment.
@@ -102,15 +102,14 @@ protected:
     std::vector<const MSSpectrum*> spectra_to_aggregate; // read in place, no copies
     std::vector<double> weights;
 
-    // Aggregating by a number of frames: equal weights, no Gaussian
+    // Aggregating by a number of frames: peaks copied unscaled, no Gaussian
     if (frames_per_side >= 0)
     {
-      for (const auto& [idx, weight] : PeakPickerIM::equalWeightNeighbours(exp.size(), center_idx, frames_per_side))
+      for (const Size idx : PeakPickerIM::neighbouringFrames(exp.size(), center_idx, frames_per_side))
       {
         spectra_to_aggregate.push_back(&exp[idx]);
-        weights.push_back(weight);
       }
-      picker.aggregateScans(spectra_to_aggregate, weights, out);
+      picker.aggregateScans(spectra_to_aggregate, out);
       return;
     }
 
