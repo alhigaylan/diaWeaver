@@ -143,13 +143,15 @@ namespace OpenMS
         PeakCandidate findBestPeak_(const MSSpectrum& spectrum,
                                     double centroid_mz,
                                     double ftl_sd,
-                                    double centroid_im = -1.0) const;
+                                    double centroid_im = -1.0,
+                                    double im_sd = 0.0) const;
 
         /// Check if peak candidate meets acceptance criteria
         bool isPeakAcceptable_(const PeakCandidate& candidate,
                               double centroid_mz,
                               double ftl_sd,
                               double centroid_im,
+                              double im_sd,
                               Size spectrum_idx,
                               const std::vector<Size>& spec_offsets,
                               const boost::dynamic_bitset<>& peak_visited) const;
@@ -169,6 +171,8 @@ namespace OpenMS
                          double& prev_denom_im,
                          double& ftl_sd,
                          double& intensity_so_far,
+                         double& im_sd,
+                         double& im_intensity_so_far,
                          Size spectrum_idx,
                          bool is_upward_extension);
 
@@ -199,6 +203,7 @@ namespace OpenMS
         double max_trace_length_;
 
         bool reestimate_mt_sd_;
+        bool reestimate_im_sd_;
         bool impute_zeros_missing_scans_;
 
         // Metadata array indices - set during run_()

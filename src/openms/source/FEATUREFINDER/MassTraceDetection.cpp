@@ -37,6 +37,9 @@ namespace OpenMS
       defaults_.setValue("reestimate_mt_sd", "true", "Enables dynamic re-estimation of m/z variance during mass trace collection stage.");
       defaults_.setValidStrings("reestimate_mt_sd", {"true","false"});
 
+      defaults_.setValue("reestimate_im_sd", "false", "Enables dynamic re-estimation of ion mobility variance during mass trace collection stage. The ion mobility window is 3 standard deviations, starting from ion_mobility_tolerance / 3.");
+      defaults_.setValidStrings("reestimate_im_sd", {"true","false"});
+
       defaults_.setValue("impute_zeros_missing_scans", "false", "Insert a zero-intensity data point at every scan position where no acceptable peak was found during trace extension, instead of silently skipping it. This preserves the full RT grid of each trace.", {"advanced"});
       defaults_.setValidStrings("impute_zeros_missing_scans", {"true","false"});
 
@@ -181,12 +184,12 @@ namespace OpenMS
       run(map, found_masstraces);
     }
 
-    void updateWeightedSDEstimateRobust(const PeakType& p, const double& mean_t1, double& sd_t, double& last_weights_sum)
+    void updateWeightedSDEstimateRobust(const double value, const double intensity, const double& mean_t1, double& sd_t, double& last_weights_sum)
     {
       double denom1 = std::log(last_weights_sum) + 2 * std::log(sd_t);
-      double denom2 = std::log(p.getIntensity()) + 2 * std::log(std::abs(p.getMZ() - mean_t1));
+      double denom2 = std::log(intensity) + 2 * std::log(std::abs(value - mean_t1));
       double denom = std::sqrt(std::exp(denom1) + std::exp(denom2));
-      double weights_sum = last_weights_sum + p.getIntensity();
+      double weights_sum = last_weights_sum + intensity;
       double tmp_sd = denom / std::sqrt(weights_sum);
 
       if (tmp_sd > std::numeric_limits<double>::epsilon())
@@ -295,7 +298,8 @@ namespace OpenMS
         const MSSpectrum& spectrum,
         double centroid_mz,
         double ftl_sd,
-        double centroid_im) const
+        double centroid_im,
+        double im_sd) const
     {
       PeakCandidate candidate;
       
@@ -318,8 +322,8 @@ namespace OpenMS
       else
       {
         // LC-IMS-MS data: find best peak considering both m/z and ion mobility
-        double right_bound_im = centroid_im + ion_mobility_tolerance_;
-        double left_bound_im = centroid_im - ion_mobility_tolerance_;
+        double right_bound_im = centroid_im + 3 * im_sd;
+        double left_bound_im = centroid_im - 3 * im_sd;
 
         auto left_bound_it = spectrum.MZBegin(left_bound);
         Size idx_left = left_bound_it - spectrum.begin();
@@ -353,6 +357,7 @@ namespace OpenMS
         double centroid_mz,
         double ftl_sd,
         double centroid_im,
+        double im_sd,
         Size spectrum_idx,
         const std::vector<Size>& spec_offsets,
         const boost::dynamic_bitset<>& peak_visited) const
@@ -374,8 +379,8 @@ namespace OpenMS
       // For ion mobility data, peak must also fall within IM tolerance window
       if (has_centroid_im_)
       {
-        double right_bound_im = centroid_im + ion_mobility_tolerance_;
-        double left_bound_im = centroid_im - ion_mobility_tolerance_;
+        double right_bound_im = centroid_im + 3 * im_sd;
+        double left_bound_im = centroid_im - 3 * im_sd;
         
         if (candidate.im < left_bound_im || candidate.im > right_bound_im)
         {
@@ -402,6 +407,8 @@ namespace OpenMS
         double& prev_denom_im,
         double& ftl_sd,
         double& intensity_so_far,
+        double& im_sd,
+        double& im_intensity_so_far,
         Size spectrum_idx,
         bool is_upward_extension)
     {
@@ -428,6 +435,12 @@ namespace OpenMS
       if (has_centroid_im_)
       {
         updateIterativeWeightedMean_(candidate.im, candidate.intensity, centroid_im, prev_counter_im, prev_denom_im);
+
+        // Dynamically adjust ion mobility tolerance based on observed variance
+        if (reestimate_im_sd_)
+        {
+          updateWeightedSDEstimateRobust(candidate.im, candidate.intensity, centroid_im, im_sd, im_intensity_so_far);
+        }
       }
 
       // Collect FWHM metadata for trace quality assessment
@@ -443,7 +456,7 @@ namespace OpenMS
       // Dynamically adjust m/z tolerance based on observed variance
       if (reestimate_mt_sd_)
       {
-        updateWeightedSDEstimateRobust(next_peak, centroid_mz, ftl_sd, intensity_so_far);
+        updateWeightedSDEstimateRobust(next_peak.getMZ(), next_peak.getIntensity(), centroid_mz, ftl_sd, intensity_so_far);
       }
     }
 
@@ -542,6 +555,8 @@ namespace OpenMS
 
         double ftl_sd((centroid_mz / 1e6) * mass_error_ppm_);
         double intensity_so_far(apex_peak.getIntensity());
+        double im_sd(ion_mobility_tolerance_ / 3);
+        double im_intensity_so_far(apex_peak.getIntensity());
 
         while ((trace_down_idx > 0 && down_state.active) || (trace_up_idx < work_exp.size() - 1 && up_state.active))
         {
@@ -555,14 +570,14 @@ namespace OpenMS
             // Only process spectra that contain peaks
             if (!spec_trace_down.empty())
             {
-              PeakCandidate candidate = findBestPeak_(spec_trace_down, centroid_mz, ftl_sd, centroid_im);
+              PeakCandidate candidate = findBestPeak_(spec_trace_down, centroid_mz, ftl_sd, centroid_im, im_sd);
               
-              if (isPeakAcceptable_(candidate, centroid_mz, ftl_sd, centroid_im, trace_down_idx - 1, spec_offsets, peak_visited))
+              if (isPeakAcceptable_(candidate, centroid_mz, ftl_sd, centroid_im, im_sd, trace_down_idx - 1, spec_offsets, peak_visited))
               {
                 processPeak_(candidate, spec_trace_down, current_trace, gathered_idx,
                             fwhms_mz, fwhms_im, centroid_mz, centroid_im,
                             prev_counter, prev_denom, prev_counter_im, prev_denom_im,
-                            ftl_sd, intensity_so_far, trace_down_idx - 1, false);
+                            ftl_sd, intensity_so_far, im_sd, im_intensity_so_far, trace_down_idx - 1, false);
                 ++down_state.hitting_peak_count;
                 down_state.consecutive_missed = 0;
               }
@@ -616,14 +631,14 @@ namespace OpenMS
             // Only process spectra that contain peaks
             if (!spec_trace_up.empty())
             {
-              PeakCandidate candidate = findBestPeak_(spec_trace_up, centroid_mz, ftl_sd, centroid_im);
+              PeakCandidate candidate = findBestPeak_(spec_trace_up, centroid_mz, ftl_sd, centroid_im, im_sd);
               
-              if (isPeakAcceptable_(candidate, centroid_mz, ftl_sd, centroid_im, trace_up_idx + 1, spec_offsets, peak_visited))
+              if (isPeakAcceptable_(candidate, centroid_mz, ftl_sd, centroid_im, im_sd, trace_up_idx + 1, spec_offsets, peak_visited))
               {
                 processPeak_(candidate, spec_trace_up, current_trace, gathered_idx,
                             fwhms_mz, fwhms_im, centroid_mz, centroid_im,
                             prev_counter, prev_denom, prev_counter_im, prev_denom_im,
-                            ftl_sd, intensity_so_far, trace_up_idx + 1, true);
+                            ftl_sd, intensity_so_far, im_sd, im_intensity_so_far, trace_up_idx + 1, true);
                 ++up_state.hitting_peak_count;
                 up_state.consecutive_missed = 0;
               }
@@ -734,6 +749,7 @@ namespace OpenMS
       min_trace_length_ = (double)param_.getValue("min_trace_length");
       max_trace_length_ = (double)param_.getValue("max_trace_length");
       reestimate_mt_sd_ = param_.getValue("reestimate_mt_sd").toBool();
+      reestimate_im_sd_ = param_.getValue("reestimate_im_sd").toBool();
       impute_zeros_missing_scans_ = param_.getValue("impute_zeros_missing_scans").toBool();
     }
 
