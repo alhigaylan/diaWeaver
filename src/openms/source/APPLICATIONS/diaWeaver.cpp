@@ -335,7 +335,9 @@ void DiaWeaver::extractMS2Windows(
 void DiaWeaver::extractMS1Windows(
   const MSExperiment& raw,
   const WindowMap& window_map,
-  DiaWeaver::WindowedExperiments& out_ms1)
+  DiaWeaver::WindowedExperiments& out_ms1,
+  double mz_margin,
+  double im_margin)
 {
   out_ms1.clear();
 
@@ -371,7 +373,7 @@ void DiaWeaver::extractMS1Windows(
         const double mz = spec[i].getMZ();
 
         // Always filter by m/z
-        if (mz < window.lower_mz || mz > window.upper_mz)
+        if (mz < window.lower_mz - mz_margin || mz > window.upper_mz + mz_margin)
         {
           continue;
         }
@@ -380,7 +382,7 @@ void DiaWeaver::extractMS1Windows(
         if (im_array && window.hasIonMobility())
         {
           const double im = (*im_array)[i];
-          if (im < window.lower_im || im > window.upper_im)
+          if (im < window.lower_im - im_margin || im > window.upper_im + im_margin)
           {
             continue;
           }
@@ -737,7 +739,9 @@ void DiaWeaver::extractMS1Windows(
   OnDiscMSExperiment& raw,
   const WindowMap& window_map,
   const IMInfo& im_info,
-  DiaWeaver::WindowedExperiments& out_ms1)
+  DiaWeaver::WindowedExperiments& out_ms1,
+  double mz_margin,
+  double im_margin)
 {
   out_ms1.clear();
 
@@ -772,8 +776,9 @@ void DiaWeaver::extractMS1Windows(
   std::vector<double> max_upper(windows.size());
   for (Size r = 0; r < by_lower.size(); ++r)
   {
-    lower_mz[r] = windows[by_lower[r]]->lower_mz;
-    max_upper[r] = std::max(windows[by_lower[r]]->upper_mz, r > 0 ? max_upper[r - 1] : windows[by_lower[r]]->upper_mz);
+    const double upper_mz = windows[by_lower[r]]->upper_mz + mz_margin;
+    lower_mz[r] = windows[by_lower[r]]->lower_mz - mz_margin;
+    max_upper[r] = std::max(upper_mz, r > 0 ? max_upper[r - 1] : upper_mz);
   }
 
   // Decode each MS1 spectrum only once (decoding dominates the cost) and split it into every
@@ -821,7 +826,7 @@ void DiaWeaver::extractMS1Windows(
           const DIAWindow& window = *windows[w];
 
           // Always filter by m/z
-          if (mz > window.upper_mz)
+          if (mz > window.upper_mz + mz_margin)
           {
             continue;
           }
@@ -830,7 +835,7 @@ void DiaWeaver::extractMS1Windows(
           if (im_array && window.hasIonMobility())
           {
             const double im = (*im_array)[j];
-            if (im < window.lower_im || im > window.upper_im)
+            if (im < window.lower_im - im_margin || im > window.upper_im + im_margin)
             {
               continue;
             }

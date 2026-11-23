@@ -254,7 +254,9 @@ namespace OpenMS
       double swath_lower,
       double swath_upper,
       MSExperiment& pseudo_spectra,
-      Int window_idx)
+      Int window_idx,
+      double swath_lower_im,
+      double swath_upper_im)
   {
     if (ms1_features.empty() || ms2_traces.empty())
     {
@@ -421,7 +423,7 @@ namespace OpenMS
     clusterAndCreateSpectra_(
         precursor_profiles, precursor_mz, precursor_rt, precursor_im, precursor_charge, precursor_intensity,
         fragment_profiles, fragment_mz, fragment_rt, fragment_im, fragment_intensity,
-        swath_lower, swath_upper, has_im_data, window_idx, pseudo_spectra);
+        swath_lower, swath_upper, has_im_data, window_idx, pseudo_spectra, swath_lower_im, swath_upper_im);
   }
 
   void ClusterMassTracesByPrecursor::run(
@@ -569,9 +571,19 @@ namespace OpenMS
       double swath_upper,
       bool has_im_data,
       Int window_idx,
-      MSExperiment& pseudo_spectra)
+      MSExperiment& pseudo_spectra,
+      double swath_lower_im,
+      double swath_upper_im)
   {
     MasstraceCorrelator mtcorr;
+
+    // A precursor belongs to the window if its monoisotopic m/z (and, if bounds are given, its ion mobility) is inside
+    const bool clip_im = has_im_data && swath_upper_im > swath_lower_im;
+    auto in_window = [&](Size i)
+    {
+      return precursor_mz[i] >= swath_lower && precursor_mz[i] <= swath_upper &&
+             (!clip_im || (precursor_im[i] >= swath_lower_im && precursor_im[i] <= swath_upper_im));
+    };
 
     // Stores all scores produced by scoreHullpoints for a precursor-fragment pair
     struct HullScore
@@ -599,7 +611,7 @@ namespace OpenMS
       setProgress(i);
 
       // Only consider precursors within the SWATH window
-      if (precursor_mz[i] < swath_lower || precursor_mz[i] > swath_upper)
+      if (!in_window(i))
       {
         continue;
       }
@@ -704,8 +716,14 @@ namespace OpenMS
     // Stats
     Size cnt_ms2_used = 0;
     Size cnt_ms1_used = 0;
+    Size cnt_ms1_in_window = 0;
     for (Size i = 0; i < precursor_profiles.size(); ++i)
     {
+      if (!in_window(i))
+      {
+        continue;
+      }
+      cnt_ms1_in_window++;
       if (!assignment_map[i].empty())
       {
         cnt_ms1_used++;
@@ -720,7 +738,7 @@ namespace OpenMS
     }
 
     OPENMS_LOG_INFO << "Assigned " << cnt_ms2_used << " (out of " << fragment_profiles.size()
-                    << ") MS2 fragments to " << cnt_ms1_used << " (out of " << precursor_profiles.size()
+                    << ") MS2 fragments to " << cnt_ms1_used << " (out of " << cnt_ms1_in_window
                     << ") precursors" << std::endl;
 
     // -----------------------------------
@@ -742,7 +760,7 @@ namespace OpenMS
         // Find suitable precursors to assign these fragments to
         for (Size i = 0; i < precursor_profiles.size(); ++i)
         {
-          if (precursor_mz[i] < swath_lower || precursor_mz[i] > swath_upper)
+          if (!in_window(i))
           {
             continue;
           }
@@ -776,7 +794,7 @@ namespace OpenMS
     {
       setProgress(i);
 
-      if (precursor_mz[i] < swath_lower || precursor_mz[i] > swath_upper)
+      if (!in_window(i))
       {
         continue;
       }

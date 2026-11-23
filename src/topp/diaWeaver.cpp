@@ -196,6 +196,23 @@ protected:
       "keep_ms1",
       "If set, include peak-picked MS1 spectra in the output file alongside pseudo spectra");
 
+    registerDoubleOption_(
+      "ms1_mz_margin",
+      "<Th>",
+      2.0,
+      "m/z margin added to both edges of each DIA window when slicing MS1, so isotope envelopes at the window edges stay complete. "
+      "Precursors are still restricted to the strict window by their monoisotopic m/z.",
+      false);
+    setMinFloat_("ms1_mz_margin", 0.0);
+    registerDoubleOption_(
+      "ms1_im_margin",
+      "<float>",
+      0.02,
+      "Ion mobility margin (1/K0) added to both edges of each DIA window when slicing MS1. "
+      "Precursors are still restricted to the strict window by their ion mobility.",
+      false);
+    setMinFloat_("ms1_im_margin", 0.0);
+
     registerFlag_(
       "aggregate_across_scans",
       "If set, aggregate signal across neighboring scans using Gaussian weighting before peak picking. "
@@ -705,6 +722,8 @@ protected:
     const String in = getStringOption_("in");
     const bool save_precursors = getFlag_("save_unfragmented_precursors");
     const bool keep_ms1 = getFlag_("keep_ms1");
+    const double ms1_mz_margin = getDoubleOption_("ms1_mz_margin");
+    const double ms1_im_margin = getDoubleOption_("ms1_im_margin");
     const bool aggregate_requested = getFlag_("aggregate_across_scans");
     const Param ppim_params = getParam_().copy("PeakPickerIM:", true);         // MS1
     const Param ppim_ms2_params = getParam_().copy("PeakPickerIMMS2:", true);  // MS2 frames: fragments and unfragmented precursors
@@ -784,7 +803,7 @@ protected:
       // Pre-extract all windows into memory (already in-memory anyway)
       DiaWeaver::extractMS2Windows(bruker_exp, windows, bruker_ms2_windows,
                                     save_precursors ? &bruker_precursor_windows : nullptr);
-      DiaWeaver::extractMS1Windows(bruker_exp, windows, bruker_ms1_windows);
+      DiaWeaver::extractMS1Windows(bruker_exp, windows, bruker_ms1_windows, ms1_mz_margin, ms1_im_margin);
 
       OPENMS_LOG_INFO << "Loaded " << windows.size() << " DIA windows from Bruker .d file." << std::endl;
     }
@@ -821,7 +840,7 @@ protected:
 
       // Split MS1 into all windows up front: every window needs the full MS1 run, and decoding
       // each MS1 spectrum once is much cheaper than re-decoding all of them for every window.
-      DiaWeaver::extractMS1Windows(on_disc, windows, im_info, mzml_ms1_windows);
+      DiaWeaver::extractMS1Windows(on_disc, windows, im_info, mzml_ms1_windows, ms1_mz_margin, ms1_im_margin);
     }
 
     // The neighbor filter needs the m/z lattice spacing of this file (constant within a file, differs between files)
@@ -1249,7 +1268,7 @@ protected:
 
           ClusterMassTracesByPrecursor clusterFragments;
           clusterFragments.setParameters(window_cluster_param);
-          clusterFragments.run(precursor_features, precursor_traces, ms2_traces, w.lower_mz, w.upper_mz, pseudo_spectra, static_cast<Int>(idx));
+          clusterFragments.run(precursor_features, precursor_traces, ms2_traces, w.lower_mz, w.upper_mz, pseudo_spectra, static_cast<Int>(idx), w.lower_im, w.upper_im);
 
           if (!pseudo_spectra.empty())
           {
@@ -1399,7 +1418,7 @@ protected:
 
           ClusterMassTracesByPrecursor clusterFragments;
           clusterFragments.setParameters(window_cluster_param);
-          clusterFragments.run(ms1_features, ms1_traces, ms2_traces, w.lower_mz, w.upper_mz, pseudo_spectra, static_cast<Int>(idx));
+          clusterFragments.run(ms1_features, ms1_traces, ms2_traces, w.lower_mz, w.upper_mz, pseudo_spectra, static_cast<Int>(idx), w.lower_im, w.upper_im);
 
           if (!pseudo_spectra.empty())
           {

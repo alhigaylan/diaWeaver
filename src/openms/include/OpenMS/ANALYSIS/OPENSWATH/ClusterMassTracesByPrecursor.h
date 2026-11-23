@@ -90,6 +90,10 @@ namespace OpenMS
      * @param[in] swath_lower Lower m/z bound of the DIA/SWATH isolation window
      * @param[in] swath_upper Upper m/z bound of the DIA/SWATH isolation window
      * @param[out] pseudo_spectra Output pseudo MS/MS spectra
+     * @param[in] window_idx Sequential DIA window index
+     * @param[in] swath_lower_im Lower ion mobility bound of the window (precursors below are ignored)
+     * @param[in] swath_upper_im Upper ion mobility bound of the window (precursors above are ignored);
+     *            the ion mobility bounds are only applied if swath_upper_im > swath_lower_im
      */
     void run(const FeatureMap& ms1_features,
              const std::vector<MassTrace>& ms1_traces,
@@ -97,7 +101,9 @@ namespace OpenMS
              double swath_lower,
              double swath_upper,
              MSExperiment& pseudo_spectra,
-             Int window_idx = 0);
+             Int window_idx = 0,
+             double swath_lower_im = -1.0,
+             double swath_upper_im = -1.0);
 
     /**
      * @brief Generate ion-accounted pseudo spectra split into orphan and annotated outputs.
@@ -166,6 +172,8 @@ namespace OpenMS
      * @param[in] swath_upper Upper m/z bound of the DIA/SWATH isolation window
      * @param[in] has_im_data Flag indicating whether ion mobility data is present in the input
      * @param[out] pseudo_spectra Output pseudo MS/MS spectra
+     * @param[in] swath_lower_im Lower ion mobility bound of the window (only applied if swath_upper_im > swath_lower_im)
+     * @param[in] swath_upper_im Upper ion mobility bound of the window
      */
     void clusterAndCreateSpectra_(
         const std::vector<MasstraceCorrelator::MasstracePointsType>& precursor_profiles,
@@ -183,7 +191,9 @@ namespace OpenMS
         double swath_upper,
         bool has_im_data,
         Int window_idx,
-        MSExperiment& pseudo_spectra);
+        MSExperiment& pseudo_spectra,
+        double swath_lower_im = -1.0,
+        double swath_upper_im = -1.0);
 
     /// Ion-accounting variant: splits output into orphan / annotated / (optionally) full spectra.
     /// trace_claim_strings[j] is "" for orphan traces, otherwise the pre-formatted claim string.

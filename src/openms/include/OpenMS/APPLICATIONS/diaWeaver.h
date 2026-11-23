@@ -142,16 +142,20 @@ namespace OpenMS
       @brief Extract MS1 spectra for each window
 
       Filters MS1 spectra by m/z and ion mobility ranges defined by each
-      DIA window. Only peaks within the window boundaries are retained.
+      DIA window. Only peaks within the window boundaries, widened by the given margins, are retained.
 
       @param raw Input MSExperiment containing DIA data
       @param window_map Map of windows (used for window definitions)
       @param out_ms1 Output map of DIAWindow to filtered MS1 MSExperiment
+      @param mz_margin Margin (Th) added to both m/z bounds, so isotope envelopes at the window edges stay complete
+      @param im_margin Margin added to both ion mobility bounds
     */
     static void extractMS1Windows(
       const MSExperiment& raw,
       const WindowMap& window_map,
-      WindowedExperiments& out_ms1);
+      WindowedExperiments& out_ms1,
+      double mz_margin = 0.0,
+      double im_margin = 0.0);
 
     // ========================================================================
     // OnDiscMSExperiment overloads for memory-efficient processing
@@ -210,12 +214,16 @@ namespace OpenMS
       @param window_map Map of windows (used for window definitions)
       @param im_info Pre-computed ion mobility info (from determineIMInfo)
       @param out_ms1 Output map of DIAWindow to filtered MS1 MSExperiment
+      @param mz_margin Margin (Th) added to both m/z bounds, so isotope envelopes at the window edges stay complete
+      @param im_margin Margin added to both ion mobility bounds
     */
     static void extractMS1Windows(
       OnDiscMSExperiment& raw,
       const WindowMap& window_map,
       const IMInfo& im_info,
-      WindowedExperiments& out_ms1);
+      WindowedExperiments& out_ms1,
+      double mz_margin = 0.0,
+      double im_margin = 0.0);
 
     // ========================================================================
     // Single-window extraction for incremental/streaming processing
