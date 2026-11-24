@@ -662,11 +662,10 @@ namespace OpenMS
     // -----------------------------------
     // Filter fragments assigned to too many precursors - keep only top N precursor per fragment using a combined score
     // -----------------------------------
-    // Combined score = w_pearson * normalized_pearson + w_rt * normalized_rt + w_im * normalized_im
-    // normalized_pearson: (pearson - min_pearson_correlation_) / (1 - min_pearson_correlation_)  -> [0, 1]
+    // Combined score = w_pearson * pearson + w_rt * normalized_rt + w_im * normalized_im
+    // pearson:            raw Pearson correlation
     // normalized_rt:      1 - (delta_rt / max_rt_apex_difference_)                               -> [0, 1]
     // normalized_im:      1 - (delta_im / max_im_apex_difference_)                                         -> [0, 1]
-    double pearson_range = 1.0 - min_pearson_correlation_;
     Size cnt_fragments_filtered = 0;
     for (Size j = 0; j < fragment_assignments.size(); ++j)
     {
@@ -681,10 +680,9 @@ namespace OpenMS
                     if (!use_combined_scores_) return a.pearson > b.pearson;
                     auto combined = [&](const HullScore& hs)
                     {
-                      double norm_pearson = (hs.pearson - min_pearson_correlation_) / pearson_range;
                       double norm_rt = 1.0 - (hs.delta_rt / max_rt_apex_difference_);
                       double norm_im = (has_im_data && max_im_apex_difference_ > 0) ? 1.0 - (hs.delta_im / max_im_apex_difference_) : 1.0;
-                      return (pearson_weight_ * norm_pearson) + (delta_rt_weight_ * norm_rt) + (delta_im_weight_ * norm_im);
+                      return (pearson_weight_ * hs.pearson) + (delta_rt_weight_ * norm_rt) + (delta_im_weight_ * norm_im);
                     };
                     return combined(a) > combined(b);
                   });
@@ -842,10 +840,9 @@ namespace OpenMS
                     if (!use_combined_scores_) return a.pearson > b.pearson;
                     auto combined = [&](const HullScore& hs)
                     {
-                      double norm_pearson = (hs.pearson - min_pearson_correlation_) / pearson_range;
                       double norm_rt = 1.0 - (hs.delta_rt / max_rt_apex_difference_);
                       double norm_im = (has_im_data && max_im_apex_difference_ > 0) ? 1.0 - (hs.delta_im / max_im_apex_difference_) : 1.0;
-                      return (pearson_weight_ * norm_pearson) + (delta_rt_weight_ * norm_rt) + (delta_im_weight_ * norm_im);
+                      return (pearson_weight_ * hs.pearson) + (delta_rt_weight_ * norm_rt) + (delta_im_weight_ * norm_im);
                     };
                     return combined(a) > combined(b);
                   });
@@ -970,7 +967,6 @@ namespace OpenMS
     }
     endProgress();
 
-    double pearson_range = 1.0 - min_pearson_correlation_;
     Size cnt_filtered = 0;
     for (Size j = 0; j < fragment_assignments.size(); ++j)
     {
@@ -983,10 +979,9 @@ namespace OpenMS
                     if (!use_combined_scores_) return a.pearson > b.pearson;
                     auto score = [&](const HullScore& hs)
                     {
-                      double np = (hs.pearson - min_pearson_correlation_) / pearson_range;
                       double nr = 1.0 - (hs.delta_rt / max_rt_apex_difference_);
                       double ni = (has_im_data && max_im_apex_difference_ > 0) ? 1.0 - (hs.delta_im / max_im_apex_difference_) : 1.0;
-                      return (pearson_weight_ * np) + (delta_rt_weight_ * nr) + (delta_im_weight_ * ni);
+                      return (pearson_weight_ * hs.pearson) + (delta_rt_weight_ * nr) + (delta_im_weight_ * ni);
                     };
                     return score(a) > score(b);
                   });
@@ -1027,10 +1022,9 @@ namespace OpenMS
                     if (!use_combined_scores_) return a.pearson > b.pearson;
                     auto score = [&](const HullScore& hs)
                     {
-                      double np = (hs.pearson - min_pearson_correlation_) / pearson_range;
                       double nr = 1.0 - (hs.delta_rt / max_rt_apex_difference_);
                       double ni = (has_im_data && max_im_apex_difference_ > 0) ? 1.0 - (hs.delta_im / max_im_apex_difference_) : 1.0;
-                      return (pearson_weight_ * np) + (delta_rt_weight_ * nr) + (delta_im_weight_ * ni);
+                      return (pearson_weight_ * hs.pearson) + (delta_rt_weight_ * nr) + (delta_im_weight_ * ni);
                     };
                     return score(a) > score(b);
                   });
